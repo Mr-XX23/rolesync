@@ -1,0 +1,11 @@
+.env
+.vscode
+.idea
+init-db
+docker-compose.yml
+Dockerfile
+*.log
+*.sqlite
+*.pyc
+*.xml
+*.idea
