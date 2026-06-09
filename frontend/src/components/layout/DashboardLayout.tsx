@@ -4,11 +4,14 @@ import { Database, CheckSquare, Briefcase, Settings, HelpCircle, Plus, Share2 } 
 import { Sidebar } from './Sidebar';
 import type { SidebarItem } from './Sidebar';
 import { Header } from './Header';
-import { useAppSelector } from '../../store';
+import { useAppSelector, useAppDispatch } from '../../store';
+import { setModalOpen } from '../../store/taskSlice';
+import { NewInstanceModal } from '../common/NewInstanceModal';
 
 export const DashboardLayout: React.FC = () => {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const { activeRolePack } = useAppSelector((state) => state.role);
+  const dispatch = useAppDispatch();
 
   // Define sidebar configurations based on the selected persona role
   const getSidebarConfig = () => {
@@ -64,7 +67,7 @@ export const DashboardLayout: React.FC = () => {
             label: 'New Agent',
             icon: Plus,
             onClick: () => {
-              alert('Initializing Vanguard Agent Calibration wizard...');
+              dispatch(setModalOpen(true));
             },
           },
         };
@@ -100,6 +103,9 @@ export const DashboardLayout: React.FC = () => {
           </div>
         </main>
       </div>
+
+      {/* Modal Component */}
+      <NewInstanceModal />
     </div>
   );
 };

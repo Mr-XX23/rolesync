@@ -45,7 +45,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(({
           ref={ref}
           id={id}
           type={type}
-          className={`w-full py-2.5 rounded-lg border border-border text-foreground placeholder:text-muted-foreground/50 transition-all duration-200 text-sm focus:outline-none focus:ring-2 focus:ring-primary/10 focus:border-primary ${
+          className={`w-full py-2.5 rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground/50 transition-all duration-200 text-sm focus:outline-none focus:ring-2 focus:ring-primary/10 focus:border-primary ${
             leftElement ? 'pl-10' : 'pl-4'
           } ${
             rightElementInside ? 'pr-10' : 'pr-4'

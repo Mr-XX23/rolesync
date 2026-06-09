@@ -166,10 +166,39 @@
 @layer base {
   * {
     @apply border-border outline-ring/50;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+
+  /* Webkit Scrollbar Customizations */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 9999px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--muted-foreground);
+    border: 2px solid transparent;
+    background-clip: padding-box;
   }
 
   body {
     @apply bg-background text-foreground transition-colors duration-300 ease-in-out;
+  }
+
+  input {
+    @apply bg-background text-foreground transition-all duration-200;
   }
 
   select {
@@ -178,6 +207,22 @@
 
   textarea {
     @apply bg-background border border-border rounded-lg px-4 py-2.5 text-sm text-foreground placeholder:text-muted-foreground/50 transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-primary/10 focus:border-primary;
+  }
+
+  /* Autofill styling overrides to maintain dark/light theme integrity */
+  input:-webkit-autofill,
+  input:-webkit-autofill:hover,
+  input:-webkit-autofill:focus,
+  input:-webkit-autofill:active,
+  textarea:-webkit-autofill,
+  textarea:-webkit-autofill:hover,
+  textarea:-webkit-autofill:focus,
+  textarea:-webkit-autofill:active {
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: var(--foreground) !important;
+    box-shadow: 0 0 0 100px var(--background) inset !important;
+    -webkit-box-shadow: 0 0 0 100px var(--background) inset !important;
+    transition: background-color 5000s ease-in-out 0s;
   }
 }
 

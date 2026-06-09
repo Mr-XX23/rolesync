@@ -3,6 +3,7 @@ import { Search, LogOut, Menu, User, Settings, ChevronDown } from 'lucide-react'
 import { useAppDispatch, useAppSelector } from '../../store';
 import { logout } from '../../store/authSlice';
 import { clearActiveRole } from '../../store/roleSlice';
+import { setModalOpen } from '../../store/taskSlice';
 
 interface HeaderProps {
   onMenuToggle: () => void;
@@ -55,7 +56,7 @@ export const Header: React.FC<HeaderProps> = ({
 
         {/* Deploy Trigger */}
         <button
-          onClick={() => alert('Vanguard Deployment Sequence Initiated: Calibrating neural models...')}
+          onClick={() => dispatch(setModalOpen(true))}
           className="text-primary font-bold text-xs bg-primary/10 border border-primary/20 px-3.5 py-1.5 rounded-xl hover:bg-primary/20 active:scale-95 transition-all cursor-pointer shadow-2xs"
         >
           Deploy Agent

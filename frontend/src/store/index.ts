@@ -3,12 +3,14 @@ import { useDispatch, useSelector } from 'react-redux';
 import type { TypedUseSelectorHook } from 'react-redux';
 import authReducer from './authSlice';
 import roleReducer from './roleSlice';
+import taskReducer from './taskSlice';
 
 // Configure root store
 export const store = configureStore({
   reducer: {
     auth: authReducer,
     role: roleReducer,
+    task: taskReducer,
   },
 });
 

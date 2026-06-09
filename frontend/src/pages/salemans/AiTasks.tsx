@@ -1,57 +1,43 @@
-import React, { useState } from 'react';
-import { Calendar, Play, CheckCircle2, Cpu, Clock } from 'lucide-react';
+import React from 'react';
+import { Calendar, Play, CheckCircle2, Cpu, Clock, Plus, Trash2 } from 'lucide-react';
 import { Button } from '../../components/common/Button';
-
-interface TaskItem {
-  id: string;
-  name: string;
-  status: 'Running' | 'Scheduled' | 'Completed' | 'Failed';
-  type: string;
-  schedule: string;
-  lastRun: string;
-}
+import { useAppDispatch, useAppSelector } from '../../store';
+import { setModalOpen, runTaskNow, removeTask } from '../../store/taskSlice';
 
 export const AiTasks: React.FC = () => {
-  const [tasks] = useState<TaskItem[]>([
-    {
-      id: '1',
-      name: 'Salesforce Contact Delta Extraction',
-      status: 'Running',
-      type: 'Sync Data',
-      schedule: 'Every 2 hours',
-      lastRun: '1 hour ago',
-    },
-    {
-      id: '2',
-      name: 'Vector Database Re-indexing Shards',
-      status: 'Scheduled',
-      type: 'Model Tuning',
-      schedule: 'Daily at 02:00 AM',
-      lastRun: '22 hours ago',
-    },
-    {
-      id: '3',
-      name: 'Ingest Competitor Pricing Portal',
-      status: 'Completed',
-      type: 'Scraper Ingestion',
-      schedule: 'Weekly on Mondays',
-      lastRun: '1 day ago',
-    },
-  ]);
+  const dispatch = useAppDispatch();
+  const tasks = useAppSelector((state) => state.task.tasks);
 
-  const handleRunTask = (name: string) => {
+  const handleRunTask = (id: string, name: string) => {
+    dispatch(runTaskNow(id));
     alert(`Manually executing vanguard task pipeline: ${name}`);
+  };
+
+  const handleDeleteTask = (id: string, name: string) => {
+    if (confirm(`Are you sure you want to terminate/delete the agent: ${name}?`)) {
+      dispatch(removeTask(id));
+    }
   };
 
   return (
     <div className="space-y-8 animate-in fade-in duration-500 pb-16">
       {/* Header */}
-      <section className="space-y-2">
-        <h2 className="font-serif text-3xl font-bold text-primary">Agent Manager</h2>
-        <p className="text-sm text-muted-foreground max-w-xl leading-relaxed">
-          Monitor background worker routines, synchronize data pipelines, and verify agent automation triggers in real time.
-        </p>
-      </section>
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <section className="space-y-2">
+          <h2 className="font-serif text-3xl font-bold text-primary">Agent Manager</h2>
+          <p className="text-sm text-muted-foreground max-w-xl leading-relaxed">
+            Monitor background worker routines, synchronize data pipelines, and verify agent automation triggers in real time.
+          </p>
+        </section>
+        <Button
+          variant="primary"
+          onClick={() => dispatch(setModalOpen(true))}
+          className="rounded-full py-2.5 px-6 w-auto text-sm font-semibold shrink-0"
+        >
+          <Plus className="w-4 h-4" />
+          <span>New Agent</span>
+        </Button>
+      </div>
 
       {/* Grid: Stat Overview */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -141,10 +127,17 @@ export const AiTasks: React.FC = () => {
 
                 <Button
                   variant="outline"
-                  onClick={() => handleRunTask(task.name)}
+                  onClick={() => handleRunTask(task.id, task.name)}
                   className="p-2.5 aspect-square rounded-xl shadow-2xs hover:border-primary/20"
                   title="Run Now"
                   icon={<Play className="w-3.5 h-3.5 text-primary" />}
+                />
+                <Button
+                  variant="outline"
+                  onClick={() => handleDeleteTask(task.id, task.name)}
+                  className="p-2.5 aspect-square rounded-xl shadow-2xs hover:border-destructive/20 text-destructive hover:text-destructive"
+                  title="Terminate Agent"
+                  icon={<Trash2 className="w-3.5 h-3.5" />}
                 />
               </div>
             </div>
