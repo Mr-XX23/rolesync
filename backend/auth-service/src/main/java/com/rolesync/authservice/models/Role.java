@@ -1,4 +1,4 @@
-package com.medisecure.authservice.models;
+package com.rolesync.authservice.models;
 
 public enum Role {
     USER,

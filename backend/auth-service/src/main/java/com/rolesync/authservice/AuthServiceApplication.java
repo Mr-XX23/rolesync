@@ -1,4 +1,4 @@
-package com.medisecure.authservice;
+package com.rolesync.authservice;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;

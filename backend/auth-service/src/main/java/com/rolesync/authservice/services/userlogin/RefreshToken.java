@@ -1,12 +1,12 @@
-package com.medisecure.authservice.services.userlogin;
+package com.rolesync.authservice.services.userlogin;
 
-import com.medisecure.authservice.exceptions.BadRequestException;
-import com.medisecure.authservice.exceptions.ForbiddenException;
-import com.medisecure.authservice.models.AuthUserCredentials;
-import com.medisecure.authservice.repository.UserRepository;
-import com.medisecure.authservice.services.CookiesService;
-import com.medisecure.authservice.services.JwtService;
-import com.medisecure.authservice.services.TokenService;
+import com.rolesync.authservice.exceptions.BadRequestException;
+import com.rolesync.authservice.exceptions.ForbiddenException;
+import com.rolesync.authservice.models.AuthUserCredentials;
+import com.rolesync.authservice.repository.UserRepository;
+import com.rolesync.authservice.services.CookiesService;
+import com.rolesync.authservice.services.JwtService;
+import com.rolesync.authservice.services.TokenService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;

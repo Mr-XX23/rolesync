@@ -18,17 +18,32 @@ const Register: React.FC = () => {
   const [localError, setLocalError] = useState<string | null>(null);
 
   const dispatch = useAppDispatch();
-  const { isRegisterLoading, registerSuccess, registerError } = useAppSelector(
+  const { isRegisterLoading, registerSuccess, registerError, user } = useAppSelector(
     (state) => state.auth
   );
 
-  // Redirect to verify phone after successful registration thunk
+  // Redirect to correct verification page after successful registration
   useEffect(() => {
     if (registerSuccess) {
-      navigate('/verify-phone', { state: { phone: phone || '+1 (555) 000-0000' } });
+      if (email) {
+        navigate('/verify-email', { 
+          state: { 
+            email: email,
+            phone: phone || null,
+            userId: user?.userId
+          } 
+        });
+      } else if (phone) {
+        navigate('/verify-phone', { 
+          state: { 
+            phone: phone,
+            userId: user?.userId
+          } 
+        });
+      }
       dispatch(clearRegisterState());
     }
-  }, [registerSuccess, phone, navigate, dispatch]);
+  }, [registerSuccess, email, phone, user, navigate, dispatch]);
 
   // Clear state on mount and unmount
   useEffect(() => {
@@ -133,7 +148,7 @@ const Register: React.FC = () => {
       <div className="fixed -top-40 -right-40 w-80 h-80 bg-primary-fixed opacity-20 blur-[100px] rounded-full pointer-events-none"></div>
       <div className="fixed -bottom-40 -left-40 w-80 h-80 bg-secondary-fixed opacity-20 blur-[100px] rounded-full pointer-events-none"></div>
 
-      <main className="relative z-10 w-full max-w-[500px] transition-all duration-700 ease-out">
+      <main className="relative z-10 w-full max-w-xl transition-all duration-700 ease-out">
         <div className="animate-in fade-in duration-500">
           {/* Brand Header */}
           <div className="flex flex-col items-center mb-6 text-center animate-in slide-in-from-top-2 duration-500">
@@ -308,7 +323,7 @@ const Register: React.FC = () => {
                   label="Phone (Optional)"
                   id="phone"
                   type="tel"
-                  placeholder="+1 (555) 000-0000"
+                  placeholder="+15550000000"
                   value={phone}
                   onChange={(e) => setPhone(e.target.value)}
                   leftElement={<Phone className="w-[16px] h-[16px]" />}

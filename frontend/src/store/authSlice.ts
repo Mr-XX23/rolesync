@@ -1,9 +1,14 @@
 import { createSlice, createAsyncThunk } from '@reduxjs/toolkit';
 import type { PayloadAction } from '@reduxjs/toolkit';
+import api from '../api/axiosInstance';
 
 // Define the interface for user data
 interface User {
+  userId: string;
+  username: string;
   email: string;
+  role?: string;
+  status?: string;
 }
 
 // Define the auth state schema
@@ -24,6 +29,12 @@ interface AuthState {
   isVerifyLoading: boolean;
   verifySuccess: boolean;
   verifyError: string | null;
+  isSendEmailLoading: boolean;
+  sendEmailSuccess: boolean;
+  sendEmailError: string | null;
+  isSendPhoneLoading: boolean;
+  sendPhoneSuccess: boolean;
+  sendPhoneError: string | null;
 }
 
 // Initial state matching the schema
@@ -44,70 +55,135 @@ const initialState: AuthState = {
   isVerifyLoading: false,
   verifySuccess: false,
   verifyError: null,
+  isSendEmailLoading: false,
+  sendEmailSuccess: false,
+  sendEmailError: null,
+  isSendPhoneLoading: false,
+  sendPhoneSuccess: false,
+  sendPhoneError: null,
 };
 
-// Async thunk simulating login request
+// Role mapping from frontend dropdown to backend Enum
+const mapRole = (role?: string): string => {
+  if (!role) return 'USER';
+  switch (role.toLowerCase()) {
+    case 'sales':
+      return 'SALESMAN';
+    case 'teacher':
+      return 'TEACHER';
+    case 'student':
+      return 'STUDENT';
+    default:
+      return 'USER';
+  }
+};
+
+// Async thunk making real login request
 export const loginUser = createAsyncThunk(
   'auth/loginUser',
   async (credentials: { email: string; password?: string }, { rejectWithValue }) => {
     try {
-      // Simulate API call delay of 1.5s
-      await new Promise((resolve) => setTimeout(resolve, 1500));
+      const response = await api.post('/auth/login', {
+        username: credentials.email,
+        password: credentials.password,
+      });
       
-      // Basic mock validation (e.g. password can't be less than 6 chars)
-      if (credentials.password && credentials.password.length < 6) {
-        return rejectWithValue('Password must be at least 6 characters.');
-      }
+      const data = response.data;
       
-      return { email: credentials.email };
+      return {
+        userId: data.userId,
+        username: data.username,
+        email: data.email,
+        role: data.role,
+        status: data.status,
+      };
     } catch (err: any) {
-      return rejectWithValue(err.message || 'An error occurred during authentication.');
+      return rejectWithValue(err.response?.data?.message || err.message || 'An error occurred during authentication.');
     }
   }
 );
 
-// Async thunk simulating registration request
+// Async thunk making real registration request
 export const registerUser = createAsyncThunk(
   'auth/registerUser',
   async (userData: { email: string; fullName: string; password?: string; phone?: string; role?: string }, { rejectWithValue }) => {
     try {
-      // Simulate API call delay of 1.5s
-      await new Promise((resolve) => setTimeout(resolve, 1500));
+      const cleanPhone = userData.phone ? userData.phone.replace(/[^\d+]/g, '') : undefined;
       
-      if (!userData.email || !userData.email.includes('@')) {
-        return rejectWithValue('Please enter a valid work email address.');
-      }
-      if (userData.password && userData.password.length < 12) {
-        return rejectWithValue('Password must be at least 12 characters.');
-      }
-      
-      return { email: userData.email };
+      const payload = {
+        username: userData.fullName,
+        email: userData.email,
+        phoneNumber: cleanPhone,
+        password: userData.password,
+        role: mapRole(userData.role),
+        acceptTerms: true,
+        hipaaPrivacyNotice: true,
+      };
+
+      const response = await api.post('/auth/register', payload);
+
+      const data = response.data;
+
+      return {
+        userId: data.userId,
+        username: data.username,
+        email: data.email,
+      };
     } catch (err: any) {
-      return rejectWithValue(err.message || 'An error occurred during registration.');
+      return rejectWithValue(err.response?.data?.message || err.message || 'An error occurred during registration.');
     }
   }
 );
 
-// Async thunk simulating phone OTP verification request
+// Async thunk making real phone OTP verification request
 export const verifyPhone = createAsyncThunk(
   'auth/verifyPhone',
-  async (data: { code: string }, { rejectWithValue }) => {
+  async (data: { code: string; userId: string }, { rejectWithValue }) => {
     try {
-      // Simulate API call delay of 1.5s
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-      
-      if (data.code.length !== 6 || !/^\d+$/.test(data.code)) {
-        return rejectWithValue('Please enter a valid 6-digit verification code.');
-      }
-      
-      // Let's say entering '000000' represents an invalid code
-      if (data.code === '000000') {
-        return rejectWithValue('Invalid verification code. Please try again.');
-      }
-      
+      await api.post('/auth/verify-phone', {
+        otp: data.code,
+        userId: data.userId,
+      });
+
       return { success: true };
     } catch (err: any) {
-      return rejectWithValue(err.message || 'An error occurred during verification.');
+      return rejectWithValue(err.response?.data?.message || err.message || 'An error occurred during verification.');
+    }
+  }
+);
+
+// Async thunk making real send email verification request
+export const sendEmailVerification = createAsyncThunk(
+  'auth/sendEmailVerification',
+  async (data: { userId: string }, { rejectWithValue }) => {
+    try {
+      const response = await api.post('/auth/send-email-verification', {
+        userId: data.userId,
+      });
+
+      const result = response.data;
+
+      return { success: true, message: result.message };
+    } catch (err: any) {
+      return rejectWithValue(err.response?.data?.message || err.message || 'An error occurred while sending email verification.');
+    }
+  }
+);
+
+// Async thunk making real send phone verification request
+export const sendPhoneVerification = createAsyncThunk(
+  'auth/sendPhoneVerification',
+  async (data: { userId: string }, { rejectWithValue }) => {
+    try {
+      const response = await api.post('/auth/send-phone-verification', {
+        userId: data.userId,
+      });
+
+      const result = response.data;
+
+      return { success: true, message: result.message };
+    } catch (err: any) {
+      return rejectWithValue(err.response?.data?.message || err.message || 'An error occurred while sending phone verification.');
     }
   }
 );
@@ -183,6 +259,16 @@ const authSlice = createSlice({
       state.verifySuccess = false;
       state.verifyError = null;
     },
+    clearSendEmailState: (state) => {
+      state.isSendEmailLoading = false;
+      state.sendEmailSuccess = false;
+      state.sendEmailError = null;
+    },
+    clearSendPhoneState: (state) => {
+      state.isSendPhoneLoading = false;
+      state.sendPhoneSuccess = false;
+      state.sendPhoneError = null;
+    },
   },
   extraReducers: (builder) => {
     builder
@@ -236,6 +322,38 @@ const authSlice = createSlice({
         state.verifySuccess = false;
         state.verifyError = (action.payload as string) || 'Phone verification failed.';
       })
+      // Send Email Verification flow
+      .addCase(sendEmailVerification.pending, (state) => {
+        state.isSendEmailLoading = true;
+        state.sendEmailSuccess = false;
+        state.sendEmailError = null;
+      })
+      .addCase(sendEmailVerification.fulfilled, (state) => {
+        state.isSendEmailLoading = false;
+        state.sendEmailSuccess = true;
+        state.sendEmailError = null;
+      })
+      .addCase(sendEmailVerification.rejected, (state, action) => {
+        state.isSendEmailLoading = false;
+        state.sendEmailSuccess = false;
+        state.sendEmailError = (action.payload as string) || 'Failed to send email verification.';
+      })
+      // Send Phone Verification flow
+      .addCase(sendPhoneVerification.pending, (state) => {
+        state.isSendPhoneLoading = true;
+        state.sendPhoneSuccess = false;
+        state.sendPhoneError = null;
+      })
+      .addCase(sendPhoneVerification.fulfilled, (state) => {
+        state.isSendPhoneLoading = false;
+        state.sendPhoneSuccess = true;
+        state.sendPhoneError = null;
+      })
+      .addCase(sendPhoneVerification.rejected, (state, action) => {
+        state.isSendPhoneLoading = false;
+        state.sendPhoneSuccess = false;
+        state.sendPhoneError = (action.payload as string) || 'Failed to send phone verification.';
+      })
       // Password reset flow
       .addCase(resetPassword.pending, (state) => {
         state.isResetLoading = true;
@@ -271,5 +389,5 @@ const authSlice = createSlice({
   },
 });
 
-export const { logout, clearError, clearResetState, clearUpdateState, clearRegisterState, clearVerifyState } = authSlice.actions;
+export const { logout, clearError, clearResetState, clearUpdateState, clearRegisterState, clearVerifyState, clearSendEmailState, clearSendPhoneState } = authSlice.actions;
 export default authSlice.reducer;

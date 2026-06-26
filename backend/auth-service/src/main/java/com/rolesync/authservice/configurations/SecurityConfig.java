@@ -1,7 +1,7 @@
-package com.medisecure.authservice.configurations;
+package com.rolesync.authservice.configurations;
 
-import com.medisecure.authservice.services.JwtService;
-import com.medisecure.authservice.services.TokenService;
+import com.rolesync.authservice.services.JwtService;
+import com.rolesync.authservice.services.TokenService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;

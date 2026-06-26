@@ -1,4 +1,4 @@
-package com.medisecure.authservice.controllers;
+package com.rolesync.authservice.controllers;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;

@@ -1,4 +1,4 @@
-package com.medisecure.authservice.dto.email;
+package com.rolesync.authservice.dto.email;
 
 import lombok.AllArgsConstructor;
 import lombok.Builder;

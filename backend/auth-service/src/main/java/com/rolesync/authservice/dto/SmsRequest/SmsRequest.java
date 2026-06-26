@@ -1,4 +1,4 @@
-package com.medisecure.authservice.dto.SmsRequest;
+package com.rolesync.authservice.dto.SmsRequest;
 
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Pattern;

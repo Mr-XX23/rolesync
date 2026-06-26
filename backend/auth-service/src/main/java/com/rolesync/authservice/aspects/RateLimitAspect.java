@@ -1,7 +1,7 @@
-package com.medisecure.authservice.aspects;
+package com.rolesync.authservice.aspects;
 
 import com.github.benmanes.caffeine.cache.Cache;
-import com.medisecure.authservice.annotations.RateLimited;
+import com.rolesync.authservice.annotations.RateLimited;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;

@@ -1,13 +1,13 @@
-package com.medisecure.authservice.controllers;
+package com.rolesync.authservice.controllers;
 
-import com.medisecure.authservice.annotations.RateLimited;
-import com.medisecure.authservice.dto.CookieUtil;
-import com.medisecure.authservice.dto.loginregistration.LoginRequest;
-import com.medisecure.authservice.dto.loginregistration.LoginResponse;
-import com.medisecure.authservice.services.userlogin.Logout;
-import com.medisecure.authservice.services.userlogin.RefreshToken;
-import com.medisecure.authservice.services.userlogin.UserLogin;
-import com.medisecure.authservice.services.userlogin.VerifyUser;
+import com.rolesync.authservice.annotations.RateLimited;
+import com.rolesync.authservice.dto.CookieUtil;
+import com.rolesync.authservice.dto.loginregistration.LoginRequest;
+import com.rolesync.authservice.dto.loginregistration.LoginResponse;
+import com.rolesync.authservice.services.userlogin.Logout;
+import com.rolesync.authservice.services.userlogin.RefreshToken;
+import com.rolesync.authservice.services.userlogin.UserLogin;
+import com.rolesync.authservice.services.userlogin.VerifyUser;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;

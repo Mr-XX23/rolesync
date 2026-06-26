@@ -1,8 +1,8 @@
-package com.medisecure.authservice.configurations;
+package com.rolesync.authservice.configurations;
 
-import com.medisecure.authservice.dto.CookieUtil;
-import com.medisecure.authservice.services.JwtService;
-import com.medisecure.authservice.services.TokenService;
+import com.rolesync.authservice.dto.CookieUtil;
+import com.rolesync.authservice.services.JwtService;
+import com.rolesync.authservice.services.TokenService;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;

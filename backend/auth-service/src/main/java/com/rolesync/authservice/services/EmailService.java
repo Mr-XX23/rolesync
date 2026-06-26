@@ -1,9 +1,9 @@
-package com.medisecure.authservice.services;
+package com.rolesync.authservice.services;
 
-import com.medisecure.authservice.dto.email.EmailRequest;
-import com.medisecure.authservice.dto.email.EmailResponse;
-import com.medisecure.authservice.models.EmailEventLog;
-import com.medisecure.authservice.repository.EmailEventLogRepository;
+import com.rolesync.authservice.dto.email.EmailRequest;
+import com.rolesync.authservice.dto.email.EmailResponse;
+import com.rolesync.authservice.models.EmailEventLog;
+import com.rolesync.authservice.repository.EmailEventLogRepository;
 import jakarta.mail.MessagingException;
 import jakarta.mail.internet.MimeMessage;
 import jakarta.validation.Valid;
@@ -44,7 +44,7 @@ public class EmailService {
     @Value("${spring.mail.username}")
     private String fromEmail;
 
-    @Value("${app.name:MediSecure}")
+    @Value("${app.name:RoleSync}")
     private String appName;
 
     @Value("${app.url}")

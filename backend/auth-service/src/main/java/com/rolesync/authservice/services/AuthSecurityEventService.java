@@ -1,9 +1,9 @@
-package com.medisecure.authservice.services;
+package com.rolesync.authservice.services;
 
-import com.medisecure.authservice.models.AuthSecurityEvent;
-import com.medisecure.authservice.models.AuthUserCredentials;
-import com.medisecure.authservice.repository.AuthSecurityEventRepository;
-import com.medisecure.authservice.repository.UserRepository;
+import com.rolesync.authservice.models.AuthSecurityEvent;
+import com.rolesync.authservice.models.AuthUserCredentials;
+import com.rolesync.authservice.repository.AuthSecurityEventRepository;
+import com.rolesync.authservice.repository.UserRepository;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;

@@ -1,4 +1,4 @@
-package com.medisecure.authservice.exceptions;
+package com.rolesync.authservice.exceptions;
 
 
 public class ForbiddenException extends RuntimeException {

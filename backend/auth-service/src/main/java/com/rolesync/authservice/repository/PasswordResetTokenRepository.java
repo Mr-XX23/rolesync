@@ -1,6 +1,6 @@
-package com.medisecure.authservice.repository;
+package com.rolesync.authservice.repository;
 
-import com.medisecure.authservice.models.PasswordResetToken;
+import com.rolesync.authservice.models.PasswordResetToken;
 import jakarta.persistence.LockModeType;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;

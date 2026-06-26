@@ -4,6 +4,7 @@ import Passwordreset from './pages/auth/Passwordreset';
 import Changepassword from './pages/auth/Changepassword';
 import Register from './pages/auth/Register';
 import VerifyPhone from './pages/auth/VerifyPhone';
+import VerifyEmail from './pages/auth/VerifyEmail';
 import { RolePicker } from './pages/RolePicker';
 import { DashboardLayout } from './components/layout/DashboardLayout';
 import { ProtectedRoute } from './components/guards/ProtectedRoute';
@@ -25,8 +26,16 @@ export const router = createBrowserRouter([
     element: <Signin />,
   },
   {
+    path: '/login',
+    element: <Navigate to="/signin" replace />,
+  },
+  {
     path: '/register',
     element: <Register />,
+  },
+  {
+    path: '/verify-email',
+    element: <VerifyEmail />,
   },
   {
     path: '/verify-phone',

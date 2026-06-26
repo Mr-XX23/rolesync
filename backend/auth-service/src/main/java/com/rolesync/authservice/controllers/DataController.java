@@ -1,8 +1,8 @@
-package com.medisecure.authservice.controllers;
+package com.rolesync.authservice.controllers;
 
-import com.medisecure.authservice.dto.user.UserDetailsRequest;
-import com.medisecure.authservice.dto.user.UserDetailsResponse;
-import com.medisecure.authservice.services.user.UserDetailsService;
+import com.rolesync.authservice.dto.user.UserDetailsRequest;
+import com.rolesync.authservice.dto.user.UserDetailsResponse;
+import com.rolesync.authservice.services.user.UserDetailsService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;

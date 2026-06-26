@@ -3,8 +3,67 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Email Verified - MediSecure</title>
+    <title>Email Verified - RoleSync</title>
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&display=swap" rel="stylesheet">
     <style>
+        :root {
+            --background: #f9f9f9;
+            --foreground: #202020;
+            --card: #fcfcfc;
+            --card-foreground: #202020;
+            --primary: #644a40;
+            --primary-foreground: #ffffff;
+            --secondary: #ffdfb5;
+            --secondary-foreground: #582d1d;
+            --muted: #efefef;
+            --muted-foreground: #646464;
+            --border: #d8d8d8;
+            --ring: #644a40;
+            --radius: 16px;
+            
+            --bg-gradient: linear-gradient(135deg, #f5ebe6 0%, #e6d7d0 100%);
+            --card-shadow: 0 20px 50px rgba(100, 74, 64, 0.12);
+            
+            --success-bg: hsl(142, 60%, 96%);
+            --success-border: hsl(142, 50%, 90%);
+            --success-text: hsl(142, 70%, 28%);
+            
+            --error-bg: hsl(10, 80%, 96%);
+            --error-border: hsl(10, 70%, 90%);
+            --error-text: hsl(10, 80%, 42%);
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --background: #111111;
+                --foreground: #eeeeee;
+                --card: #191919;
+                --card-foreground: #eeeeee;
+                --primary: #ffe0c2;
+                --primary-foreground: #081a1b;
+                --secondary: #393028;
+                --secondary-foreground: #ffe0c2;
+                --muted: #222222;
+                --muted-foreground: #b4b4b4;
+                --border: #27261f;
+                --ring: #ffe0c2;
+                
+                --bg-gradient: linear-gradient(135deg, #1c1512 0%, #111111 100%);
+                --card-shadow: 0 20px 50px rgba(0, 0, 0, 0.4);
+                
+                --success-bg: hsl(142, 40%, 12%);
+                --success-border: hsl(142, 35%, 20%);
+                --success-text: hsl(142, 75%, 70%);
+                
+                --error-bg: hsl(10, 45%, 13%);
+                --error-border: hsl(10, 40%, 22%);
+                --error-text: hsl(10, 90%, 70%);
+            }
+        }
+
         * {
             margin: 0;
             padding: 0;
@@ -12,30 +71,34 @@
         }
 
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: var(--bg-gradient);
             min-height: 100vh;
             display: flex;
             justify-content: center;
             align-items: center;
             padding: 20px;
+            color: var(--foreground);
+            transition: background 0.3s ease, color 0.3s ease;
         }
 
         .container {
-            background: white;
-            border-radius: 16px;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-            max-width: 500px;
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            box-shadow: var(--card-shadow);
+            max-width: 460px;
             width: 100%;
             padding: 40px;
             text-align: center;
-            animation: slideIn 0.5s ease-out;
+            animation: slideIn 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+            transition: background 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
         }
 
         @keyframes slideIn {
             from {
                 opacity: 0;
-                transform: translateY(-30px);
+                transform: translateY(20px);
             }
             to {
                 opacity: 1;
@@ -46,85 +109,93 @@
         .success-icon {
             width: 80px;
             height: 80px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: var(--success-bg);
+            border: 1px solid var(--success-border);
             border-radius: 50%;
             display: flex;
             justify-content: center;
             align-items: center;
             margin: 0 auto 24px;
-            animation: scaleIn 0.5s ease-out 0.2s backwards;
+            animation: scaleIn 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275) 0.2s backwards;
         }
 
         @keyframes scaleIn {
             from {
-                transform: scale(0);
+                transform: scale(0.6);
+                opacity: 0;
             }
             to {
                 transform: scale(1);
+                opacity: 1;
             }
         }
 
         .success-icon svg {
-            width: 50px;
-            height: 50px;
-            fill: white;
+            width: 40px;
+            height: 40px;
+            fill: var(--success-text);
         }
 
         .error-icon {
             width: 80px;
             height: 80px;
-            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            background: var(--error-bg);
+            border: 1px solid var(--error-border);
             border-radius: 50%;
             display: flex;
             justify-content: center;
             align-items: center;
             margin: 0 auto 24px;
-            animation: scaleIn 0.5s ease-out 0.2s backwards;
+            animation: scaleIn 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275) 0.2s backwards;
         }
 
         .error-icon svg {
-            width: 50px;
-            height: 50px;
-            fill: white;
+            width: 40px;
+            height: 40px;
+            fill: var(--error-text);
         }
 
         h1 {
-            color: #2c3e50;
-            font-size: 28px;
+            color: var(--foreground);
+            font-size: 26px;
             margin-bottom: 16px;
-            font-weight: 600;
+            font-weight: 700;
+            letter-spacing: -0.02em;
         }
 
         .message {
-            color: #546e7a;
-            font-size: 16px;
+            color: var(--muted-foreground);
+            font-size: 15px;
             line-height: 1.6;
-            margin-bottom: 12px;
+            margin-bottom: 8px;
         }
 
         .sub-message {
-            color: #78909c;
+            color: var(--muted-foreground);
             font-size: 14px;
-            margin-bottom: 32px;
+            opacity: 0.8;
+            margin-bottom: 24px;
             line-height: 1.5;
         }
 
         .login-button {
             display: inline-block;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 14px 40px;
+            background: var(--primary);
+            color: var(--primary-foreground);
+            padding: 12px 36px;
             text-decoration: none;
-            border-radius: 30px;
-            font-size: 16px;
+            border-radius: 9999px;
+            font-size: 15px;
             font-weight: 600;
-            transition: all 0.3s ease;
-            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+            transition: all 0.2s ease;
+            box-shadow: 0 4px 12px rgba(100, 74, 64, 0.15);
+            border: 1px solid transparent;
         }
 
         .login-button:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6);
+            transform: translateY(-1px);
+            opacity: 0.95;
+            box-shadow: 0 6px 16px rgba(100, 74, 64, 0.25);
         }
 
         .login-button:active {
@@ -132,29 +203,30 @@
         }
 
         .app-name {
-            color: #667eea;
-            font-weight: 600;
+            color: var(--primary);
+            font-weight: 700;
         }
 
         .footer {
             margin-top: 32px;
             padding-top: 24px;
-            border-top: 1px solid #eceff1;
-            color: #90a4ae;
+            border-top: 1px solid var(--border);
+            color: var(--muted-foreground);
             font-size: 13px;
+            opacity: 0.75;
         }
 
         @media (max-width: 480px) {
             .container {
-                padding: 30px 20px;
+                padding: 32px 24px;
             }
 
             h1 {
-                font-size: 24px;
+                font-size: 22px;
             }
 
             .message {
-                font-size: 15px;
+                font-size: 14px;
             }
         }
     </style>
@@ -192,7 +264,7 @@
 
     <!-- Footer -->
     <div class="footer">
-        <p>&copy; 2026 <span class="app-name">MediSecure</span>. All rights reserved.</p>
+        <p>&copy; 2026 <span class="app-name">RoleSync</span>. All rights reserved.</p>
     </div>
 </div>
 </body>

@@ -1,10 +1,10 @@
-package com.medisecure.authservice.services;
+package com.rolesync.authservice.services;
 
-import com.medisecure.authservice.configurations.TwilioConfig;
-import com.medisecure.authservice.dto.SmsRequest.SmsRequest;
-import com.medisecure.authservice.dto.SmsRequest.SmsResponse;
-import com.medisecure.authservice.models.SmsEventLog;
-import com.medisecure.authservice.repository.SmsEventLogRepository;
+import com.rolesync.authservice.configurations.TwilioConfig;
+import com.rolesync.authservice.dto.SmsRequest.SmsRequest;
+import com.rolesync.authservice.dto.SmsRequest.SmsResponse;
+import com.rolesync.authservice.models.SmsEventLog;
+import com.rolesync.authservice.repository.SmsEventLogRepository;
 import com.twilio.exception.ApiException;
 import com.twilio.exception.TwilioException;
 import com.twilio.rest.api.v2010.account.Message;
@@ -48,7 +48,7 @@ public class SmsService {
     @Value("${sms.otp.rate.limit.per-hour:3}")
     private int otpRateLimitPerHour;
 
-    @Value("${app.name:MediSecure}")
+    @Value("${app.name:M}")
     private String appName;
 
     private static final java.util.regex.Pattern E164_PATTERN = java.util.regex.Pattern.compile("^\\+[1-9]\\d{1,14}$");

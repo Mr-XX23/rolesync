@@ -1,11 +1,14 @@
-package com.medisecure.authservice.services.userregistration;
+package com.rolesync.authservice.services.userregistration;
 
-import com.medisecure.authservice.dto.userregistrations.RegistrationRequest;
-import com.medisecure.authservice.dto.userregistrations.RegistrationResponse;
-import com.medisecure.authservice.exceptions.BadRequestException;
-import com.medisecure.authservice.models.AuthUserCredentials;
-import com.medisecure.authservice.repository.UserRepository;
-import com.medisecure.authservice.services.*;
+import com.rolesync.authservice.dto.userregistrations.RegistrationRequest;
+import com.rolesync.authservice.dto.userregistrations.RegistrationResponse;
+import com.rolesync.authservice.exceptions.BadRequestException;
+import com.rolesync.authservice.models.AuthUserCredentials;
+import com.rolesync.authservice.repository.UserRepository;
+import com.rolesync.authservice.services.AuthSecurityEventService;
+import com.rolesync.authservice.services.EmailService;
+import com.rolesync.authservice.services.OtpService;
+import com.rolesync.authservice.services.SmsService;
 import jakarta.persistence.EntityManager;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
@@ -182,8 +185,7 @@ public class Registration {
                 emailSent = true;
             }
 
-            if (loginType == AuthUserCredentials.LoginType.PHONE
-                    || loginType == AuthUserCredentials.LoginType.BOTH) {
+            if (loginType == AuthUserCredentials.LoginType.PHONE) {
                 String otp = otpService.generatePhoneOtp(savedUser.getAuthUserId());
                 smsService.sendOtpSms(savedUser.getPhoneNumber(), otp, savedUser.getAuthUserId());
                 smsSent = true;

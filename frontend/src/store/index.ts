@@ -1,23 +1,50 @@
 import { configureStore } from '@reduxjs/toolkit';
 import { useDispatch, useSelector } from 'react-redux';
 import type { TypedUseSelectorHook } from 'react-redux';
+import { persistStore, persistReducer } from 'redux-persist';
+import storage from 'redux-persist/lib/storage';
 import authReducer from './authSlice';
 import roleReducer from './roleSlice';
 import taskReducer from './taskSlice';
 
+const safeStorage = (storage as any).default || storage;
+
+const persistConfig = {
+  key: 'auth',
+  storage: safeStorage,
+  whitelist: ['user', 'isAuthenticated'],
+};
+
+const persistedAuthReducer = persistReducer(persistConfig, authReducer);
+
 // Configure root store
 export const store = configureStore({
   reducer: {
-    auth: authReducer,
+    auth: persistedAuthReducer,
     role: roleReducer,
     task: taskReducer,
   },
+  middleware: (getDefaultMiddleware) =>
+    getDefaultMiddleware({
+      serializableCheck: {
+        ignoredActions: [
+          'persist/PERSIST',
+          'persist/REHYDRATE',
+          'persist/REGISTER',
+          'persist/PURGE',
+          'persist/FLUSH',
+          'persist/PAUSE',
+        ],
+      },
+    }),
 });
 
-  export type RootState = ReturnType<typeof store.getState>;
-  export type AppDispatch = typeof store.dispatch;
+export const persistor = persistStore(store);
 
-  export const useAppDispatch = () => useDispatch<AppDispatch>();
-  export const useAppSelector: TypedUseSelectorHook<RootState> = useSelector;
+export type RootState = ReturnType<typeof store.getState>;
+export type AppDispatch = typeof store.dispatch;
+
+export const useAppDispatch = () => useDispatch<AppDispatch>();
+export const useAppSelector: TypedUseSelectorHook<RootState> = useSelector;
 
 

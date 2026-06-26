@@ -1,4 +1,4 @@
-package com.medisecure.authservice.exceptions;
+package com.rolesync.authservice.exceptions;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;

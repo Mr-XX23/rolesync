@@ -1,4 +1,4 @@
-package com.medisecure.authservice.dto.SmsRequest;
+package com.rolesync.authservice.dto.SmsRequest;
 
 import lombok.AllArgsConstructor;
 import lombok.Builder;

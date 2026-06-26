@@ -1,15 +1,15 @@
-package com.medisecure.authservice.controllers;
+package com.rolesync.authservice.controllers;
 
-import com.medisecure.authservice.annotations.RateLimited;
-import com.medisecure.authservice.dto.email.EmailVerificationRequest;
-import com.medisecure.authservice.dto.passwordreset.PasswordResetConfirmRequest;
-import com.medisecure.authservice.dto.passwordreset.PasswordResetOtpConfirmRequest;
-import com.medisecure.authservice.dto.passwordreset.PasswordResetRequest;
-import com.medisecure.authservice.dto.phone.PhoneVerificationOtpRequest;
-import com.medisecure.authservice.dto.phone.PhoneVerificationRequest;
-import com.medisecure.authservice.dto.userregistrations.RegistrationRequest;
-import com.medisecure.authservice.dto.userregistrations.RegistrationResponse;
-import com.medisecure.authservice.services.userregistration.*;
+import com.rolesync.authservice.annotations.RateLimited;
+import com.rolesync.authservice.dto.email.EmailVerificationRequest;
+import com.rolesync.authservice.dto.passwordreset.PasswordResetConfirmRequest;
+import com.rolesync.authservice.dto.passwordreset.PasswordResetOtpConfirmRequest;
+import com.rolesync.authservice.dto.passwordreset.PasswordResetRequest;
+import com.rolesync.authservice.dto.phone.PhoneVerificationOtpRequest;
+import com.rolesync.authservice.dto.phone.PhoneVerificationRequest;
+import com.rolesync.authservice.dto.userregistrations.RegistrationRequest;
+import com.rolesync.authservice.dto.userregistrations.RegistrationResponse;
+import com.rolesync.authservice.services.userregistration.*;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
@@ -18,6 +18,9 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.ModelAndView;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import com.rolesync.authservice.services.SseNotificationService;
+import java.util.UUID;
 
 @RestController
 @RequestMapping("/api/v1/auth")
@@ -30,6 +33,7 @@ public class UserRegistration {
     private final VerifyEmail verifyEmail;
     private final VerifyPhone verifyPhone;
     private final ResetPassword resetPassword;
+    private final SseNotificationService sseNotificationService;
 
     /**
      * Register a new user with email or phone number.
@@ -158,6 +162,17 @@ public class UserRegistration {
                 httpRequest);
         HttpStatus status = response.isSuccess() ? HttpStatus.OK : HttpStatus.BAD_REQUEST;
         return ResponseEntity.status(status).body(response);
+    }
+
+    /**
+     * Subscribe to verification events for a user.
+     *
+     * @param userId The UUID of the user.
+     * @return The SseEmitter stream.
+     */
+    @GetMapping(value = "/verification-events/{userId}", produces = org.springframework.http.MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter subscribeVerificationEvents(@PathVariable("userId") UUID userId) {
+        return sseNotificationService.subscribe(userId);
     }
 
 }

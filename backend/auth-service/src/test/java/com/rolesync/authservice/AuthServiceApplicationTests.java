@@ -1,4 +1,4 @@
-package com.medisecure.authservice;
+package com.rolesync.authservice;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;

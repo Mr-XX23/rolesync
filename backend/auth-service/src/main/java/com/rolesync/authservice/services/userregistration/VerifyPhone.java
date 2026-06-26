@@ -1,12 +1,12 @@
-package com.medisecure.authservice.services.userregistration;
+package com.rolesync.authservice.services.userregistration;
 
-import com.medisecure.authservice.dto.userregistrations.RegistrationResponse;
-import com.medisecure.authservice.exceptions.BadRequestException;
-import com.medisecure.authservice.models.AuthUserCredentials;
-import com.medisecure.authservice.models.OtpEventLog;
-import com.medisecure.authservice.repository.OtpEventLogRepository;
-import com.medisecure.authservice.repository.UserRepository;
-import com.medisecure.authservice.services.*;
+import com.rolesync.authservice.dto.userregistrations.RegistrationResponse;
+import com.rolesync.authservice.exceptions.BadRequestException;
+import com.rolesync.authservice.models.AuthUserCredentials;
+import com.rolesync.authservice.models.OtpEventLog;
+import com.rolesync.authservice.repository.OtpEventLogRepository;
+import com.rolesync.authservice.repository.UserRepository;
+import com.rolesync.authservice.services.AuthSecurityEventService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.constraints.NotBlank;
 

@@ -1,4 +1,4 @@
-package com.medisecure.authservice.dto.user;
+package com.rolesync.authservice.dto.user;
 
 import jakarta.validation.constraints.Pattern;
 import lombok.AllArgsConstructor;

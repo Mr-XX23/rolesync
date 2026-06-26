@@ -1,4 +1,4 @@
-package com.medisecure.authservice.dto;
+package com.rolesync.authservice.dto;
 
 import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServletRequest;

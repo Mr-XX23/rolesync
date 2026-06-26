@@ -1,9 +1,9 @@
-package com.medisecure.authservice.services;
+package com.rolesync.authservice.services;
 
-import com.medisecure.authservice.models.AuthUserCredentials;
-import com.medisecure.authservice.models.OtpEventLog;
-import com.medisecure.authservice.repository.OtpEventLogRepository;
-import com.medisecure.authservice.repository.UserRepository;
+import com.rolesync.authservice.models.AuthUserCredentials;
+import com.rolesync.authservice.models.OtpEventLog;
+import com.rolesync.authservice.repository.OtpEventLogRepository;
+import com.rolesync.authservice.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -57,13 +57,9 @@ public class OtpService {
                 .otpType("EMAIL_VERIFICATION")
                 .createdAt(LocalDateTime.now())
                 .expiresAt(LocalDateTime.now().plusMinutes(otpExpiryMinutes))
-                .verified(false)
                 .build();
-
         otpEventLogRepository.save(otpLog);
-
         log.info("Email verification token generated for user ID: {}", authUserId);
-
         return token;
     }
 
@@ -170,4 +166,10 @@ public class OtpService {
         int randomNum = SECURE_RANDOM.nextInt(1000000); // 0 to 999999
         return String.format("%06d", randomNum); // Pad with leading zeros
     }
+
+    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.REQUIRES_NEW)
+    public String generatePhoneOtpRequiresNew(UUID authUserId) {
+        return generatePhoneOtp(authUserId);
+    }
 }
+

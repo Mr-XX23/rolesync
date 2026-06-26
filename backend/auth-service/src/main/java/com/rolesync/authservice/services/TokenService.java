@@ -1,9 +1,9 @@
-package com.medisecure.authservice.services;
+package com.rolesync.authservice.services;
 
-import com.medisecure.authservice.models.AuthUserCredentials;
-import com.medisecure.authservice.models.TokenStore;
-import com.medisecure.authservice.repository.TokenStoreRepository;
-import com.medisecure.authservice.repository.UserRepository;
+import com.rolesync.authservice.models.AuthUserCredentials;
+import com.rolesync.authservice.models.TokenStore;
+import com.rolesync.authservice.repository.TokenStoreRepository;
+import com.rolesync.authservice.repository.UserRepository;
 import jakarta.persistence.EntityManager;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;

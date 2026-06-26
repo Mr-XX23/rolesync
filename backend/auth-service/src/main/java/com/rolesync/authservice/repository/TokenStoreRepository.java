@@ -1,6 +1,6 @@
-package com.medisecure.authservice.repository;
+package com.rolesync.authservice.repository;
 
-import com.medisecure.authservice.models.TokenStore;
+import com.rolesync.authservice.models.TokenStore;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;

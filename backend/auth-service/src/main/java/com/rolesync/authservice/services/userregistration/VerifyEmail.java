@@ -1,11 +1,11 @@
-package com.medisecure.authservice.services.userregistration;
+package com.rolesync.authservice.services.userregistration;
 
-import com.medisecure.authservice.models.AuthUserCredentials;
-import com.medisecure.authservice.models.OtpEventLog;
-import com.medisecure.authservice.repository.OtpEventLogRepository;
-import com.medisecure.authservice.repository.UserRepository;
-import com.medisecure.authservice.services.AuthSecurityEventService;
-import com.medisecure.authservice.services.HashFormater;
+import com.rolesync.authservice.models.AuthUserCredentials;
+import com.rolesync.authservice.models.OtpEventLog;
+import com.rolesync.authservice.repository.OtpEventLogRepository;
+import com.rolesync.authservice.repository.UserRepository;
+import com.rolesync.authservice.services.AuthSecurityEventService;
+import com.rolesync.authservice.services.HashFormater;
 import jakarta.persistence.EntityManager;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.constraints.NotBlank;
@@ -16,6 +16,12 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.servlet.ModelAndView;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import com.rolesync.authservice.services.SseNotificationService;
+import com.rolesync.authservice.services.OtpService;
+import com.rolesync.authservice.services.SmsService;
+import java.util.UUID;
 
 import java.time.LocalDateTime;
 
@@ -29,6 +35,9 @@ public class VerifyEmail {
     private final HashFormater hashFormater;
     private final EntityManager entityManager;
     private final AuthSecurityEventService securityEventService;
+    private final SseNotificationService sseNotificationService;
+    private final OtpService otpService;
+    private final SmsService smsService;
 
     @Value("${app.frontend.url:http://localhost:3000}")
     private String frontendUrl;
@@ -141,6 +150,38 @@ public class VerifyEmail {
                 entityManager.flush();
 
                 log.info("Email verified successfully for user: {}", user.getAuthUserId());
+
+                // Trigger after-commit logic for SMS OTP and SSE notification
+                final UUID userId = user.getAuthUserId();
+                final String userPhone = user.getPhoneNumber();
+                final boolean hasPhone = user.getLoginType() == AuthUserCredentials.LoginType.BOTH;
+                if (TransactionSynchronizationManager.isSynchronizationActive()) {
+                    TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                        @Override
+                        public void afterCommit() {
+                            if (hasPhone) {
+                                try {
+                                    String otp = otpService.generatePhoneOtpRequiresNew(userId);
+                                    smsService.sendOtpSms(userPhone, otp, userId);
+                                    log.info("Sent phone verification OTP to user: {} after email verification commit", userId);
+                                } catch (Exception e) {
+                                    log.error("Failed to send phone OTP after email verification commit for user: {}", userId, e);
+                                }
+                            }
+                            sseNotificationService.notifyEmailVerified(userId, hasPhone);
+                        }
+                    });
+                } else {
+                    if (hasPhone) {
+                        try {
+                            String otp = otpService.generatePhoneOtpRequiresNew(userId);
+                            smsService.sendOtpSms(userPhone, otp, userId);
+                        } catch (Exception e) {
+                            log.error("Failed to send phone OTP for user: {}", userId, e);
+                        }
+                    }
+                    sseNotificationService.notifyEmailVerified(userId, hasPhone);
+                }
 
             } catch (DataIntegrityViolationException e) {
                 log.error("Database constraint violation during email verification: {}", e.getMessage());

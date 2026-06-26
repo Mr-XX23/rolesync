@@ -1,4 +1,4 @@
-package com.medisecure.authservice.configurations;
+package com.rolesync.authservice.configurations;
 
 import com.twilio.Twilio;
 import com.twilio.http.TwilioRestClient;

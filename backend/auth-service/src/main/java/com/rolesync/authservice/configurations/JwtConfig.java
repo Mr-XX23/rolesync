@@ -1,4 +1,4 @@
-package com.medisecure.authservice.configurations;
+package com.rolesync.authservice.configurations;
 
 import com.nimbusds.jose.jwk.JWK;
 import com.nimbusds.jose.jwk.JWKSet;

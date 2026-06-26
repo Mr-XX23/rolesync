@@ -36,7 +36,7 @@ const Signin: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-background text-foreground flex flex-col justify-center items-center py-8 px-4 sm:px-6">
-      <main className="w-full max-w-[440px] transition-all duration-700 ease-out">
+      <main className="w-full max-w-xl transition-all duration-700 ease-out">
 
         {/* Conditional Render: Authenticated Dashboard vs Sign In Form */}
         {isAuthenticated && user ? (

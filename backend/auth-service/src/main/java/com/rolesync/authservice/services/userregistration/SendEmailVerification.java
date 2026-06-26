@@ -1,12 +1,12 @@
-package com.medisecure.authservice.services.userregistration;
+package com.rolesync.authservice.services.userregistration;
 
-import com.medisecure.authservice.dto.userregistrations.RegistrationResponse;
-import com.medisecure.authservice.exceptions.BadRequestException;
-import com.medisecure.authservice.models.AuthUserCredentials;
-import com.medisecure.authservice.repository.UserRepository;
-import com.medisecure.authservice.services.AuthSecurityEventService;
-import com.medisecure.authservice.services.EmailService;
-import com.medisecure.authservice.services.OtpService;
+import com.rolesync.authservice.dto.userregistrations.RegistrationResponse;
+import com.rolesync.authservice.exceptions.BadRequestException;
+import com.rolesync.authservice.models.AuthUserCredentials;
+import com.rolesync.authservice.repository.UserRepository;
+import com.rolesync.authservice.services.AuthSecurityEventService;
+import com.rolesync.authservice.services.EmailService;
+import com.rolesync.authservice.services.OtpService;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;

@@ -1,4 +1,4 @@
-package com.medisecure.authservice.dto.userregistrations;
+package com.rolesync.authservice.dto.userregistrations;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import lombok.Builder;

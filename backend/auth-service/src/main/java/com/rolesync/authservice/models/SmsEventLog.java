@@ -1,4 +1,4 @@
-package com.medisecure.authservice.models;
+package com.rolesync.authservice.models;
 
 import jakarta.persistence.*;
 import lombok.AllArgsConstructor;
@@ -25,7 +25,9 @@ public class SmsEventLog {
         PENDING,
         SENT,
         DELIVERED,
-        FAILED
+        FAILED,
+        QUEUED,
+        UNDELIVERED
     }
 
     public enum SmsType {
@@ -57,13 +59,26 @@ public class SmsEventLog {
     @Column(nullable = false)
     private SmsStatus status;
 
-    // removed messageSid, errorMessage, errorCode and retryAttempts per simplified schema
+    @Column(length = 50)
+    private String messageSid;
+
+    @Column(columnDefinition = "TEXT")
+    private String errorMessage;
+
+    @Column(length = 10)
+    private String errorCode;
+
+    @Column(nullable = false)
+    @Builder.Default
+    private int retryAttempts = 0;
 
     @Column(precision = 10, scale = 4)
     private BigDecimal cost;
 
     @Column(nullable = false)
     private LocalDateTime createdAt;
+
+    private LocalDateTime sentAt;
 
     private LocalDateTime deliveredAt;
 
@@ -74,5 +89,6 @@ public class SmsEventLog {
     @Builder.Default
     private boolean isOtp = false;
 
-    // countryCode removed per simplified schema
+    @Column(length = 5)
+    private String countryCode;
 }

@@ -1,6 +1,6 @@
-package com.medisecure.authservice.repository;
+package com.rolesync.authservice.repository;
 
-import com.medisecure.authservice.models.AuthSecurityEvent;
+import com.rolesync.authservice.models.AuthSecurityEvent;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.stereotype.Repository;
 

@@ -1,4 +1,4 @@
-package com.medisecure.authservice.configurations;
+package com.rolesync.authservice.configurations;
 
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;

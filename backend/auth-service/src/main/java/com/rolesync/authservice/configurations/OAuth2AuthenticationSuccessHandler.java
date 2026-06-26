@@ -1,7 +1,7 @@
-package com.medisecure.authservice.configurations;
+package com.rolesync.authservice.configurations;
 
-import com.medisecure.authservice.dto.loginregistration.OAuth2LoginResponse;
-import com.medisecure.authservice.services.OAuth2Service;
+import com.rolesync.authservice.dto.loginregistration.OAuth2LoginResponse;
+import com.rolesync.authservice.services.OAuth2Service;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;

@@ -1,4 +1,4 @@
-package com.medisecure.authservice.services;
+package com.rolesync.authservice.services;
 
 import org.springframework.stereotype.Component;
 

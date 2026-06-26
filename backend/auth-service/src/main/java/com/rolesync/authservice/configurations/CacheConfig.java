@@ -1,8 +1,8 @@
-package com.medisecure.authservice.configurations;
+package com.rolesync.authservice.configurations;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
-import com.medisecure.authservice.aspects.RateLimitAspect;
+import com.rolesync.authservice.aspects.RateLimitAspect;
 import org.springframework.cache.CacheManager;
 import org.springframework.cache.annotation.EnableCaching;
 import org.springframework.cache.caffeine.CaffeineCacheManager;

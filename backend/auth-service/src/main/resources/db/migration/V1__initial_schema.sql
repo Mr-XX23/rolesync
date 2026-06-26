@@ -240,7 +240,7 @@ INSERT INTO auth_user_credentials (
     username, email, password_hash, status, role, email_verified
 ) VALUES (
     'admin',
-    'admin@medisecure.com',
+    'admin@medisecur.com',
     '$2a$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewY0lZhNGU5r.Gza',
     'ACTIVE',
     'ADMIN',

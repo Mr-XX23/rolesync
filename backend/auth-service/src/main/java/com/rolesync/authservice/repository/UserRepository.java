@@ -1,6 +1,6 @@
-package com.medisecure.authservice.repository;
+package com.rolesync.authservice.repository;
 
-import com.medisecure.authservice.models.AuthUserCredentials;
+import com.rolesync.authservice.models.AuthUserCredentials;
 import jakarta.validation.constraints.NotBlank;
 import org.springframework.stereotype.Repository;
 import org.springframework.data.jpa.repository.JpaRepository;

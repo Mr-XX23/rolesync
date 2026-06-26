@@ -1,7 +1,7 @@
-package com.medisecure.authservice.services;
+package com.rolesync.authservice.services;
 
-import com.medisecure.authservice.exceptions.UnauthorizedException;
-import com.medisecure.authservice.models.AuthUserCredentials;
+import com.rolesync.authservice.exceptions.UnauthorizedException;
+import com.rolesync.authservice.models.AuthUserCredentials;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -26,7 +26,7 @@ public class JwtService {
     @Value("${jwt.refresh-token-expiry-days:30}")
     private Long refreshTokenExpiryDays;
 
-    @Value("${jwt.issuer:medisecure-auth-service}")
+    @Value("${jwt.issuer:RoleSync-auth-service}")
     private String issuer;
 
     /**

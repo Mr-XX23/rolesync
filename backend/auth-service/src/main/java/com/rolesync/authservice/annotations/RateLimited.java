@@ -1,4 +1,4 @@
-package com.medisecure.authservice.annotations;
+package com.rolesync.authservice.annotations;
 
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;

@@ -10,6 +10,7 @@ const VerifyPhone: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const registeredPhone = location.state?.phone;
+  const userId = location.state?.userId;
   const [otp, setOtp] = useState<string[]>(Array(6).fill(''));
   const [countdown, setCountdown] = useState(60);
   const [localError, setLocalError] = useState<string | null>(null);
@@ -135,7 +136,12 @@ const VerifyPhone: React.FC = () => {
       return;
     }
 
-    dispatch(verifyPhone({ code }));
+    if (!userId) {
+      setLocalError('User identification is missing. Please register again.');
+      return;
+    }
+
+    dispatch(verifyPhone({ code, userId }));
   };
 
   const handleResendCode = (e: React.MouseEvent) => {

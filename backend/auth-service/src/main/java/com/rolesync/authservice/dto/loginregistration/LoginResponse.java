@@ -1,4 +1,4 @@
-package com.medisecure.authservice.dto.loginregistration;
+package com.rolesync.authservice.dto.loginregistration;
 
 import jakarta.validation.constraints.NotBlank;
 import lombok.Data;

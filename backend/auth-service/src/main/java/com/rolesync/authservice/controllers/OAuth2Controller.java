@@ -1,4 +1,4 @@
-package com.medisecure.authservice.controllers;
+package com.rolesync.authservice.controllers;
 
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;

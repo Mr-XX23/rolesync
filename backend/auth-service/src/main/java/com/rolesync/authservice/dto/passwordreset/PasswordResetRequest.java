@@ -1,4 +1,4 @@
-package com.medisecure.authservice.dto.passwordreset;
+package com.rolesync.authservice.dto.passwordreset;
 
 import jakarta.validation.constraints.NotBlank;
 import lombok.AllArgsConstructor;

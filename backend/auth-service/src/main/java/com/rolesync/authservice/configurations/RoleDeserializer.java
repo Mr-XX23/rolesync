@@ -1,9 +1,9 @@
-package com.medisecure.authservice.configurations;
+package com.rolesync.authservice.configurations;
 
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.DeserializationContext;
 import com.fasterxml.jackson.databind.JsonDeserializer;
-import com.medisecure.authservice.models.Role;
+import com.rolesync.authservice.models.Role;
 
 import java.io.IOException;
 
