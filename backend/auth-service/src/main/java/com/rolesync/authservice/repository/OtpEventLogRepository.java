@@ -42,6 +42,11 @@ public interface OtpEventLogRepository extends JpaRepository<OtpEventLog, UUID> 
             LocalDateTime createdAt
     );
 
+    Optional<OtpEventLog> findFirstByAuthUser_AuthUserIdAndOtpTypeOrderByCreatedAtDesc(
+            UUID authUserId,
+            String otpType
+    );
+
     // Pessimistic locking for OTP verification (prevents race conditions)
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("SELECT o FROM OtpEventLog o WHERE o.authUser.authUserId = :userId " +

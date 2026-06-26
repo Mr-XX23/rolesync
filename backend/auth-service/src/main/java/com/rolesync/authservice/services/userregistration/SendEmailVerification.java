@@ -4,6 +4,8 @@ import com.rolesync.authservice.dto.userregistrations.RegistrationResponse;
 import com.rolesync.authservice.exceptions.BadRequestException;
 import com.rolesync.authservice.models.AuthUserCredentials;
 import com.rolesync.authservice.repository.UserRepository;
+import com.rolesync.authservice.models.OtpEventLog;
+import com.rolesync.authservice.repository.OtpEventLogRepository;
 import com.rolesync.authservice.services.AuthSecurityEventService;
 import com.rolesync.authservice.services.EmailService;
 import com.rolesync.authservice.services.OtpService;
@@ -13,6 +15,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.LocalDateTime;
+import java.util.Optional;
 import java.util.UUID;
 
 @Service
@@ -24,6 +28,7 @@ public class SendEmailVerification {
     private final UserRepository userRepository;
     private final OtpService otpService;
     private final EmailService emailService;
+    private final OtpEventLogRepository otpEventLogRepository;
 
     /**
      * Verifies user's email address using the verification token.
@@ -56,6 +61,14 @@ public class SendEmailVerification {
                         httpRequest);
 
                 throw new BadRequestException("Email already verified");
+            }
+
+            // Cooldown check: 60 seconds limit
+            Optional<OtpEventLog> lastOtpOpt = otpEventLogRepository
+                    .findFirstByAuthUser_AuthUserIdAndOtpTypeOrderByCreatedAtDesc(userId, "EMAIL_VERIFICATION");
+            if (lastOtpOpt.isPresent() && lastOtpOpt.get().getCreatedAt().isAfter(LocalDateTime.now().minusSeconds(60))) {
+                long secondsLeft = 60 - java.time.Duration.between(lastOtpOpt.get().getCreatedAt(), LocalDateTime.now()).getSeconds();
+                throw new BadRequestException("Please wait " + secondsLeft + " seconds before requesting another email verification.");
             }
 
             String token = otpService.generateEmailVerificationToken(userId);

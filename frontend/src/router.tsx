@@ -9,6 +9,8 @@ import { RolePicker } from './pages/RolePicker';
 import { DashboardLayout } from './components/layout/DashboardLayout';
 import { ProtectedRoute } from './components/guards/ProtectedRoute';
 import { WorkspaceGuard } from './components/guards/WorkspaceGuard';
+import { RegistrationFlowGuard } from './components/guards/RegistrationFlowGuard';
+import { GuestRoute } from './components/guards/GuestRoute';
 import { KnowledgeVault } from './pages/salemans/knowledgeVault/KnowledgeVault';
 import { ExternalConnector } from './pages/salemans/externalConnector/ExternalConnector';
 import { AiTasks } from './pages/salemans/AiTasks';
@@ -23,7 +25,11 @@ export const router = createBrowserRouter([
   },
   {
     path: '/signin',
-    element: <Signin />,
+    element: (
+      <GuestRoute>
+        <Signin />
+      </GuestRoute>
+    ),
   },
   {
     path: '/login',
@@ -31,15 +37,27 @@ export const router = createBrowserRouter([
   },
   {
     path: '/register',
-    element: <Register />,
+    element: (
+      <GuestRoute>
+        <Register />
+      </GuestRoute>
+    ),
   },
   {
     path: '/verify-email',
-    element: <VerifyEmail />,
+    element: (
+      <RegistrationFlowGuard>
+        <VerifyEmail />
+      </RegistrationFlowGuard>
+    ),
   },
   {
     path: '/verify-phone',
-    element: <VerifyPhone />,
+    element: (
+      <RegistrationFlowGuard>
+        <VerifyPhone />
+      </RegistrationFlowGuard>
+    ),
   },
   {
     path: '/forgot-password',

@@ -35,6 +35,8 @@ interface AuthState {
   isSendPhoneLoading: boolean;
   sendPhoneSuccess: boolean;
   sendPhoneError: string | null;
+  tempUser: { userId: string; email: string; phone: string | null } | null;
+  registrationStep: 'email' | 'phone' | null;
 }
 
 // Initial state matching the schema
@@ -61,6 +63,8 @@ const initialState: AuthState = {
   isSendPhoneLoading: false,
   sendPhoneSuccess: false,
   sendPhoneError: null,
+  tempUser: null,
+  registrationStep: null,
 };
 
 // Role mapping from frontend dropdown to backend Enum
@@ -128,6 +132,7 @@ export const registerUser = createAsyncThunk(
         userId: data.userId,
         username: data.username,
         email: data.email,
+        phone: cleanPhone || null,
       };
     } catch (err: any) {
       return rejectWithValue(err.response?.data?.message || err.message || 'An error occurred during registration.');
@@ -269,6 +274,15 @@ const authSlice = createSlice({
       state.sendPhoneSuccess = false;
       state.sendPhoneError = null;
     },
+    abortRegistrationFlow: (state) => {
+      state.tempUser = null;
+      state.registrationStep = null;
+      state.registerSuccess = false;
+      state.verifySuccess = false;
+    },
+    setRegistrationStep: (state, action: PayloadAction<'email' | 'phone' | null>) => {
+      state.registrationStep = action.payload;
+    },
   },
   extraReducers: (builder) => {
     builder
@@ -281,6 +295,8 @@ const authSlice = createSlice({
         state.isLoading = false;
         state.isAuthenticated = true;
         state.user = action.payload;
+        state.tempUser = null;
+        state.registrationStep = null;
         state.error = null;
       })
       .addCase(loginUser.rejected, (state, action) => {
@@ -294,11 +310,17 @@ const authSlice = createSlice({
         state.registerSuccess = false;
         state.registerError = null;
       })
-      .addCase(registerUser.fulfilled, (state, action: PayloadAction<User>) => {
+      .addCase(registerUser.fulfilled, (state, action: PayloadAction<any>) => {
         state.isRegisterLoading = false;
         state.registerSuccess = true;
-        state.isAuthenticated = true;
-        state.user = action.payload;
+        state.isAuthenticated = false; // Do not authenticate during registration
+        state.user = null;
+        state.tempUser = {
+          userId: action.payload.userId,
+          email: action.payload.email,
+          phone: action.payload.phone,
+        };
+        state.registrationStep = 'email';
         state.registerError = null;
       })
       .addCase(registerUser.rejected, (state, action) => {
@@ -315,6 +337,8 @@ const authSlice = createSlice({
       .addCase(verifyPhone.fulfilled, (state) => {
         state.isVerifyLoading = false;
         state.verifySuccess = true;
+        state.tempUser = null;
+        state.registrationStep = null;
         state.verifyError = null;
       })
       .addCase(verifyPhone.rejected, (state, action) => {
@@ -347,6 +371,7 @@ const authSlice = createSlice({
       .addCase(sendPhoneVerification.fulfilled, (state) => {
         state.isSendPhoneLoading = false;
         state.sendPhoneSuccess = true;
+        state.registrationStep = 'phone'; // Transition step to phone
         state.sendPhoneError = null;
       })
       .addCase(sendPhoneVerification.rejected, (state, action) => {
@@ -389,5 +414,5 @@ const authSlice = createSlice({
   },
 });
 
-export const { logout, clearError, clearResetState, clearUpdateState, clearRegisterState, clearVerifyState, clearSendEmailState, clearSendPhoneState } = authSlice.actions;
+export const { logout, clearError, clearResetState, clearUpdateState, clearRegisterState, clearVerifyState, clearSendEmailState, clearSendPhoneState, abortRegistrationFlow, setRegistrationStep } = authSlice.actions;
 export default authSlice.reducer;

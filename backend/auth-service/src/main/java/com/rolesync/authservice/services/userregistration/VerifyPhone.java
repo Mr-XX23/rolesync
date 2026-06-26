@@ -94,9 +94,9 @@ public class VerifyPhone {
                         throw new BadRequestException("Email must be verified before phone verification");
                 }
 
-                // Load latest valid OTP for this user and type
+                // Load latest valid OTP for this user and type with Pessimistic Lock
                 OtpEventLog otpLog = otpEventLogRepository
-                                .findFirstByAuthUser_AuthUserIdAndOtpTypeAndVerifiedFalseAndExpiresAtAfter(
+                                .findFirstByUserAndTypeForUpdate(
                                                 userUuid,
                                                 "PHONE_VERIFICATION",
                                                 LocalDateTime.now())

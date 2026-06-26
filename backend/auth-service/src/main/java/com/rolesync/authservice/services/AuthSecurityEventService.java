@@ -23,7 +23,6 @@ public class AuthSecurityEventService {
     private final AuthSecurityEventRepository securityEvents;
     private final UserRepository userRepository;
 
-    @Async("securityEventExecutor")
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void logSecurityEvent(AuthUserCredentials user, String eventType, String eventData, HttpServletRequest httprequest) {
 

@@ -4,6 +4,8 @@ import com.rolesync.authservice.dto.userregistrations.RegistrationResponse;
 import com.rolesync.authservice.exceptions.BadRequestException;
 import com.rolesync.authservice.models.AuthUserCredentials;
 import com.rolesync.authservice.repository.UserRepository;
+import com.rolesync.authservice.models.OtpEventLog;
+import com.rolesync.authservice.repository.OtpEventLogRepository;
 import com.rolesync.authservice.services.AuthSecurityEventService;
 import com.rolesync.authservice.services.OtpService;
 import com.rolesync.authservice.services.SmsService;
@@ -11,7 +13,10 @@ import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
+import java.time.LocalDateTime;
+import java.util.Optional;
 import java.util.UUID;
 
 @Service
@@ -24,6 +29,7 @@ public class SendPhoneVerification {
     private final UserRepository userRepository;
     private final OtpService otpService;
     private final SmsService smsService;
+    private final OtpEventLogRepository otpEventLogRepository;
 
     /**
      * Verifies user's phone number using the OTP.
@@ -31,6 +37,7 @@ public class SendPhoneVerification {
      * @param userId The ID of the user.
      * @return A response entity with verification status.
      */
+    @Transactional
     public RegistrationResponse sendPhoneVerification(UUID userId, HttpServletRequest httpRequest) {
 
         log.info("Sending phone verification to user ID: {}", userId);
@@ -68,6 +75,14 @@ public class SendPhoneVerification {
                         httpRequest);
 
                 throw new BadRequestException("Email should verified before phone verification");
+            }
+
+            // Cooldown check: 60 seconds limit
+            Optional<OtpEventLog> lastOtpOpt = otpEventLogRepository
+                    .findFirstByAuthUser_AuthUserIdAndOtpTypeOrderByCreatedAtDesc(userId, "PHONE_VERIFICATION");
+            if (lastOtpOpt.isPresent() && lastOtpOpt.get().getCreatedAt().isAfter(LocalDateTime.now().minusSeconds(60))) {
+                long secondsLeft = 60 - java.time.Duration.between(lastOtpOpt.get().getCreatedAt(), LocalDateTime.now()).getSeconds();
+                throw new BadRequestException("Please wait " + secondsLeft + " seconds before requesting another OTP.");
             }
 
             String otp = otpService.generatePhoneOtp(userId);

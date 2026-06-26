@@ -200,6 +200,7 @@ const Changepassword: React.FC = () => {
                   label="NEW PASSWORD"
                   id="new-password"
                   type={showPassword ? 'text' : 'password'}
+                  autoComplete="new-password"
                   placeholder="••••••••••••"
                   value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
@@ -279,6 +280,7 @@ const Changepassword: React.FC = () => {
                   label="CONFIRM NEW PASSWORD"
                   id="confirm-password"
                   type="password"
+                  autoComplete="new-password"
                   placeholder="••••••••••••"
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}

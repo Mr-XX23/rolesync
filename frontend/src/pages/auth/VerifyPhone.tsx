@@ -1,16 +1,16 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Phone, Hash, ShieldCheck, ArrowLeft, AlertCircle, CheckCircle2 } from 'lucide-react';
-import { useNavigate, useLocation } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { Button } from '../../components/common/Button';
 import { OtpInput } from '../../components/common/OtpInput';
 import { useAppDispatch, useAppSelector } from '../../store';
-import { verifyPhone, clearVerifyState } from '../../store/authSlice';
+import { verifyPhone, clearVerifyState, sendPhoneVerification, abortRegistrationFlow } from '../../store/authSlice';
 
 const VerifyPhone: React.FC = () => {
   const navigate = useNavigate();
-  const location = useLocation();
-  const registeredPhone = location.state?.phone;
-  const userId = location.state?.userId;
+  const { tempUser } = useAppSelector((state) => state.auth);
+  const registeredPhone = tempUser?.phone;
+  const userId = tempUser?.userId;
   const [otp, setOtp] = useState<string[]>(Array(6).fill(''));
   const [countdown, setCountdown] = useState(60);
   const [localError, setLocalError] = useState<string | null>(null);
@@ -144,18 +144,27 @@ const VerifyPhone: React.FC = () => {
     dispatch(verifyPhone({ code, userId }));
   };
 
-  const handleResendCode = (e: React.MouseEvent) => {
+  const handleResendCode = async (e: React.MouseEvent) => {
     e.preventDefault();
     if (countdown > 0) return;
 
-    // Reset inputs, restart countdown, and mock API code dispatch
+    if (!userId) {
+      setLocalError('User identification is missing. Please register again.');
+      return;
+    }
+
     setOtp(Array(6).fill(''));
-    setCountdown(60);
     setLocalError(null);
     dispatch(clearVerifyState());
-    alert('SMS verification code resent successfully!');
-    if (inputRefs.current[0]) {
-      inputRefs.current[0].focus();
+    
+    try {
+      await dispatch(sendPhoneVerification({ userId })).unwrap();
+      setCountdown(60);
+      if (inputRefs.current[0]) {
+        inputRefs.current[0].focus();
+      }
+    } catch (err: any) {
+      setLocalError(err || 'Failed to resend verification code.');
     }
   };
 
@@ -369,6 +378,7 @@ const VerifyPhone: React.FC = () => {
                       href="#"
                       onClick={(e) => {
                         e.preventDefault();
+                        dispatch(abortRegistrationFlow());
                         navigate('/register');
                       }}
                     >

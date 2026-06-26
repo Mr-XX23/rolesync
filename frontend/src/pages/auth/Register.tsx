@@ -4,7 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { Button } from '../../components/common/Button';
 import { Input } from '../../components/common/Input';
 import { useAppDispatch, useAppSelector } from '../../store';
-import { registerUser, clearRegisterState } from '../../store/authSlice';
+import { registerUser, clearRegisterState, abortRegistrationFlow } from '../../store/authSlice';
 
 const Register: React.FC = () => {
   const navigate = useNavigate();
@@ -18,36 +18,22 @@ const Register: React.FC = () => {
   const [localError, setLocalError] = useState<string | null>(null);
 
   const dispatch = useAppDispatch();
-  const { isRegisterLoading, registerSuccess, registerError, user } = useAppSelector(
+  const { isRegisterLoading, registerSuccess, registerError } = useAppSelector(
     (state) => state.auth
   );
 
   // Redirect to correct verification page after successful registration
   useEffect(() => {
     if (registerSuccess) {
-      if (email) {
-        navigate('/verify-email', { 
-          state: { 
-            email: email,
-            phone: phone || null,
-            userId: user?.userId
-          } 
-        });
-      } else if (phone) {
-        navigate('/verify-phone', { 
-          state: { 
-            phone: phone,
-            userId: user?.userId
-          } 
-        });
-      }
+      navigate('/verify-email');
       dispatch(clearRegisterState());
     }
-  }, [registerSuccess, email, phone, user, navigate, dispatch]);
+  }, [registerSuccess, navigate, dispatch]);
 
   // Clear state on mount and unmount
   useEffect(() => {
     dispatch(clearRegisterState());
+    dispatch(abortRegistrationFlow()); // Clear any previous registration flow state
     return () => {
       dispatch(clearRegisterState());
     };
@@ -225,6 +211,7 @@ const Register: React.FC = () => {
                   label="Password"
                   id="password"
                   type={showPassword ? 'text' : 'password'}
+                  autoComplete="new-password"
                   placeholder="Min. 12 characters"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}

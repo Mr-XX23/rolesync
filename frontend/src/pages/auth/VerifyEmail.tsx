@@ -1,22 +1,24 @@
 import React, { useState, useEffect } from 'react';
 import { Mail, ShieldCheck, ArrowLeft, AlertCircle, CheckCircle2, ArrowRight } from 'lucide-react';
-import { useNavigate, useLocation } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { Button } from '../../components/common/Button';
 import { useAppDispatch, useAppSelector } from '../../store';
 import { 
   sendPhoneVerification, 
   sendEmailVerification, 
   clearSendPhoneState, 
-  clearSendEmailState 
+  clearSendEmailState,
+  abortRegistrationFlow,
+  setRegistrationStep
 } from '../../store/authSlice';
 import api from '../../api/axiosInstance';
 
 const VerifyEmail: React.FC = () => {
   const navigate = useNavigate();
-  const location = useLocation();
-  const registeredEmail = location.state?.email;
-  const registeredPhone = location.state?.phone;
-  const userId = location.state?.userId;
+  const { tempUser } = useAppSelector((state) => state.auth);
+  const registeredEmail = tempUser?.email;
+  const registeredPhone = tempUser?.phone;
+  const userId = tempUser?.userId;
 
   const [localError, setLocalError] = useState<string | null>(null);
   const [localSuccess, setLocalSuccess] = useState<string | null>(null);
@@ -67,22 +69,19 @@ const VerifyEmail: React.FC = () => {
       try {
         const data = JSON.parse(event.data);
         
-        setLocalSuccess('Your email has been verified successfully! Redirecting...');
+        setLocalSuccess('Your email has been verified successfully! Triggering phone verification...');
         setLocalError(null);
-
-        // Redirect after a short delay so user can see the success message
+ 
+        // Trigger phone OTP sending automatically when email is verified
         setTimeout(() => {
           if (data.hasPhone) {
-            navigate('/verify-phone', {
-              state: {
-                phone: registeredPhone,
-                userId
-              }
-            });
+            dispatch(setRegistrationStep('phone'));
+            navigate('/verify-phone');
           } else {
+            dispatch(abortRegistrationFlow());
             navigate('/signin');
           }
-        }, 2000);
+        }, 1500);
       } catch (err) {
         console.error('Failed to parse SSE email-verified payload:', err);
       }
@@ -101,14 +100,9 @@ const VerifyEmail: React.FC = () => {
   useEffect(() => {
     if (sendPhoneSuccess) {
       dispatch(clearSendPhoneState());
-      navigate('/verify-phone', { 
-        state: { 
-          phone: registeredPhone, 
-          userId 
-        } 
-      });
+      navigate('/verify-phone');
     }
-  }, [sendPhoneSuccess, registeredPhone, userId, navigate, dispatch]);
+  }, [sendPhoneSuccess, navigate, dispatch]);
 
   // Handle errors from sending phone verification (indicates email not verified yet)
   useEffect(() => {
@@ -172,15 +166,17 @@ const VerifyEmail: React.FC = () => {
 
       if (data.emailVerified) {
         if (registeredPhone) {
-          setLocalSuccess('Email verified! Sending SMS OTP...');
-          try {
-            await dispatch(sendPhoneVerification({ userId })).unwrap();
-            // sendPhoneSuccess will handle navigation
-          } catch (err: any) {
-            setLocalError(err || 'Failed to send phone verification OTP.');
-          }
+          setLocalSuccess('Email verified! Redirecting to phone verification...');
+          dispatch(setRegistrationStep('phone'));
+          // Dispatch phone verification send in background. If cooldown is active,
+          // user already has the code, so we proceed directly without blocking.
+          dispatch(sendPhoneVerification({ userId }));
+          setTimeout(() => {
+            navigate('/verify-phone');
+          }, 1000);
         } else {
           setLocalSuccess('Your email has been verified successfully! Redirecting...');
+          dispatch(abortRegistrationFlow());
           setTimeout(() => {
             navigate('/signin');
           }, 2000);
@@ -354,6 +350,7 @@ const VerifyEmail: React.FC = () => {
                       href="#"
                       onClick={(e) => {
                         e.preventDefault();
+                        dispatch(abortRegistrationFlow());
                         navigate('/register');
                       }}
                     >
