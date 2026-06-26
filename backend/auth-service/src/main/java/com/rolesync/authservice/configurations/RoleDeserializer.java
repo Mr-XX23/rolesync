@@ -19,9 +19,6 @@ public class RoleDeserializer extends JsonDeserializer<Role> {
 
         // Map legacy/alternative role names
         switch (value) {
-            case "HEALTH_PROVIDER":
-            case "HEALTHCARE_PROVIDER":
-                return Role.HEALTHCARE_PROVIDER;
             case "ADMIN":
                 return Role.ADMIN;
             case "SUPER_ADMIN":
