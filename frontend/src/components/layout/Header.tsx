@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Search, LogOut, Menu, User, Settings, ChevronDown } from 'lucide-react';
 import { useAppDispatch, useAppSelector } from '../../store';
-import { logout } from '../../store/authSlice';
+import { logoutUser } from '../../store/authSlice';
 import { clearActiveRole } from '../../store/roleSlice';
 import { setModalOpen } from '../../store/taskSlice';
 
@@ -19,7 +19,7 @@ export const Header: React.FC<HeaderProps> = ({
   const [profileOpen, setProfileOpen] = useState(false);
 
   const handleLogout = () => {
-    dispatch(logout());
+    dispatch(logoutUser());
     dispatch(clearActiveRole());
   };
 

@@ -34,4 +34,11 @@ public interface TokenStoreRepository extends JpaRepository<TokenStore, UUID> {
         int revokeAllByUserIdAndType(
                         @Param("userId") UUID userId,
                         @Param("tokenType") String tokenType);
+
+        /**
+         * Delete expired or revoked tokens to prevent database bloat.
+         */
+        @Modifying
+        @Query("DELETE FROM TokenStore t WHERE t.expiresAt < :now OR t.revoked = true")
+        int deleteExpiredOrRevoked(@Param("now") java.time.LocalDateTime now);
 }

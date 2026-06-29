@@ -1,5 +1,6 @@
 package com.rolesync.authservice.services.userlogin;
 
+import com.rolesync.authservice.exceptions.UnauthorizedException;
 import com.rolesync.authservice.models.AuthUserCredentials;
 import com.rolesync.authservice.repository.UserRepository;
 import com.rolesync.authservice.services.JwtService;
@@ -24,17 +25,19 @@ public class VerifyUser {
             String userId = jwtUtil.extractUserId(token);
 
             if (userId == null || jwtUtil.isTokenExpired(token)) {
-                throw new IllegalArgumentException("Invalid or expired token");
+                throw new UnauthorizedException("Invalid or expired token");
             }
 
             // Fetch user from database
             AuthUserCredentials user = userRepository.findById(UUID.fromString(userId))
-                    .orElseThrow(() -> new IllegalArgumentException("User not found"));
+                    .orElseThrow(() -> new UnauthorizedException("User not found"));
 
             return (getStringObjectMap(user));
 
+        } catch (UnauthorizedException e) {
+            throw e;
         } catch (Exception e) {
-            throw new IllegalArgumentException("Token verification failed: " + e.getMessage());
+            throw new UnauthorizedException("Token verification failed: " + e.getMessage());
         }
     }
 

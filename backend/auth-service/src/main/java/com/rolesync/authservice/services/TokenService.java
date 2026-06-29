@@ -8,6 +8,7 @@ import jakarta.persistence.EntityManager;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -28,30 +29,34 @@ public class TokenService {
 
     /**
      * Save access token using saveToken to the database
-     * 
-     * @param userId, accessToken AuthUserCredentials
      */
     @Transactional
     public void saveAccessToken(UUID userId, String accessToken) {
-        saveToken(userId, accessToken, "ACCESS");
+        saveAccessToken(userId, accessToken, UUID.randomUUID());
+    }
+
+    @Transactional
+    public void saveAccessToken(UUID userId, String accessToken, UUID sessionId) {
+        saveToken(userId, accessToken, "ACCESS", sessionId);
     }
 
     /**
      * Save RefreshToken using saveToken to the database
-     * 
-     * @param userId, accessToken AuthUserCredentials
      */
     @Transactional
     public void saveRefreshToken(UUID userId, String refreshToken) {
-        saveToken(userId, refreshToken, "REFRESH");
+        saveRefreshToken(userId, refreshToken, UUID.randomUUID());
+    }
+
+    @Transactional
+    public void saveRefreshToken(UUID userId, String refreshToken, UUID sessionId) {
+        saveToken(userId, refreshToken, "REFRESH", sessionId);
     }
 
     /**
      * Save token functions to store tokens in the database
-     * 
-     * @param userId, accessToken, tokenType AuthUserCredentials
      */
-    private void saveToken(UUID userId, String token, String tokenType) {
+    private void saveToken(UUID userId, String token, String tokenType, UUID sessionId) {
 
         AuthUserCredentials user = userRepository.findById(userId)
                 .orElseThrow(() -> new IllegalArgumentException("User not found with ID: " + userId));
@@ -62,6 +67,7 @@ public class TokenService {
                 .authUser(user)
                 .tokenString(token)
                 .tokenType(tokenType)
+                .sessionId(sessionId)
                 .issuedAt(convertToLocalDateTime(jwt.getIssuedAt()))
                 .expiresAt(convertToLocalDateTime(jwt.getExpiresAt()))
                 .deviceFingerprint("Win")
@@ -71,7 +77,23 @@ public class TokenService {
         tokenStoreRepository.save(tokenStore);
         entityManager.flush();
 
-        log.info("{} token saved for user ID: {}", tokenType, userId);
+        log.info("{} token saved with session ID {} for user ID: {}", tokenType, sessionId, userId);
+    }
+
+    /**
+     * Scheduled cleanup task for expired or revoked tokens.
+     * Runs daily at 2:00 AM.
+     */
+    @Scheduled(cron = "0 0 2 * * *")
+    @Transactional
+    public void cleanupExpiredTokens() {
+        try {
+            LocalDateTime now = LocalDateTime.now();
+            int deleted = tokenStoreRepository.deleteExpiredOrRevoked(now);
+            log.info("Cleanup completed: Pruned {} expired or revoked tokens from TokenStore", deleted);
+        } catch (Exception e) {
+            log.error("Error during scheduled cleanup of TokenStore: {}", e.getMessage(), e);
+        }
     }
 
     /**

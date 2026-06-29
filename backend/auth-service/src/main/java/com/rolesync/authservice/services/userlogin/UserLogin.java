@@ -106,9 +106,12 @@ public class UserLogin {
             String accessToken = jwtService.generateAccessToken(user);
             String refreshToken = jwtService.generateRefreshToken(user);
 
-            // Save tokens in database
-            tokenService.saveAccessToken(user.getAuthUserId(), accessToken);
-            tokenService.saveRefreshToken(user.getAuthUserId(), refreshToken);
+            // Generate single session ID for this login session
+            java.util.UUID sessionId = java.util.UUID.randomUUID();
+
+            // Save tokens in database associated with the session ID
+            tokenService.saveAccessToken(user.getAuthUserId(), accessToken, sessionId);
+            tokenService.saveRefreshToken(user.getAuthUserId(), refreshToken, sessionId);
 
             // SECURITY: Reset failed login attempts after successful login
             accountLockoutService.resetFailedAttempts(username);
@@ -131,7 +134,7 @@ public class UserLogin {
             log.info("User {} logged in successfully", username);
             return loginResponse;
         } catch (RuntimeException e) {
-            throw new RuntimeException(e);
+            throw e;
         }
     }
 

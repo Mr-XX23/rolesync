@@ -37,6 +37,7 @@ interface AuthState {
   sendPhoneError: string | null;
   tempUser: { userId: string; email: string; phone: string | null } | null;
   registrationStep: 'email' | 'phone' | null;
+  isCheckingSession: boolean;
 }
 
 // Initial state matching the schema
@@ -65,6 +66,7 @@ const initialState: AuthState = {
   sendPhoneError: null,
   tempUser: null,
   registrationStep: null,
+  isCheckingSession: true,
 };
 
 // Role mapping from frontend dropdown to backend Enum
@@ -103,6 +105,26 @@ export const loginUser = createAsyncThunk(
       };
     } catch (err: any) {
       return rejectWithValue(err.response?.data?.message || err.message || 'An error occurred during authentication.');
+    }
+  }
+);
+
+// Async thunk checking session on load / reload
+export const checkSession = createAsyncThunk(
+  'auth/checkSession',
+  async (_, { rejectWithValue }) => {
+    try {
+      const response = await api.get('/auth/verify-token');
+      const data = response.data;
+      return {
+        userId: data.user.userId,
+        username: data.user.username,
+        email: data.user.email,
+        role: data.user.role,
+        status: data.user.status,
+      };
+    } catch (err: any) {
+      return rejectWithValue(err.response?.data?.message || err.message || 'Session invalid');
     }
   }
 );
@@ -231,6 +253,19 @@ export const updatePassword = createAsyncThunk(
   }
 );
 
+// Async thunk making real logout request
+export const logoutUser = createAsyncThunk(
+  'auth/logoutUser',
+  async (_, { rejectWithValue }) => {
+    try {
+      await api.post('/auth/logout');
+      return { success: true };
+    } catch (err: any) {
+      return rejectWithValue(err.response?.data?.message || err.message || 'Logout failed');
+    }
+  }
+);
+
 const authSlice = createSlice({
   name: 'auth',
   initialState,
@@ -283,9 +318,47 @@ const authSlice = createSlice({
     setRegistrationStep: (state, action: PayloadAction<'email' | 'phone' | null>) => {
       state.registrationStep = action.payload;
     },
+    skipSessionCheck: (state) => {
+      state.isCheckingSession = false;
+    },
   },
   extraReducers: (builder) => {
     builder
+      // Check session flow
+      .addCase(checkSession.pending, (state) => {
+        state.isCheckingSession = true;
+      })
+      .addCase(checkSession.fulfilled, (state, action: PayloadAction<User>) => {
+        state.isCheckingSession = false;
+        state.isAuthenticated = true;
+        state.user = action.payload;
+        state.error = null;
+      })
+      .addCase(checkSession.rejected, (state) => {
+        state.isCheckingSession = false;
+        state.isAuthenticated = false;
+        state.user = null;
+      })
+      // Logout flow
+      .addCase(logoutUser.pending, (state) => {
+        state.isLoading = true;
+      })
+      .addCase(logoutUser.fulfilled, (state) => {
+        state.isLoading = false;
+        state.user = null;
+        state.isAuthenticated = false;
+        state.error = null;
+        state.tempUser = null;
+        state.registrationStep = null;
+      })
+      .addCase(logoutUser.rejected, (state) => {
+        state.isLoading = false;
+        state.user = null;
+        state.isAuthenticated = false;
+        state.error = null;
+        state.tempUser = null;
+        state.registrationStep = null;
+      })
       // Login flow
       .addCase(loginUser.pending, (state) => {
         state.isLoading = true;
@@ -414,5 +487,5 @@ const authSlice = createSlice({
   },
 });
 
-export const { logout, clearError, clearResetState, clearUpdateState, clearRegisterState, clearVerifyState, clearSendEmailState, clearSendPhoneState, abortRegistrationFlow, setRegistrationStep } = authSlice.actions;
+export const { logout, clearError, clearResetState, clearUpdateState, clearRegisterState, clearVerifyState, clearSendEmailState, clearSendPhoneState, abortRegistrationFlow, setRegistrationStep, skipSessionCheck } = authSlice.actions;
 export default authSlice.reducer;

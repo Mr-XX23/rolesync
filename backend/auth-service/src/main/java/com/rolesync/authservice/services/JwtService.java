@@ -20,8 +20,8 @@ public class JwtService {
     private final JwtEncoder jwtEncoder;
     private final JwtDecoder jwtDecoder;
 
-    @Value("${jwt.access-token-expiry-days:7}")
-    private Long accessTokenExpiryDays;
+    @Value("${jwt.access-token-expiry-minutes:15}")
+    private Long accessTokenExpiryMinutes;
 
     @Value("${jwt.refresh-token-expiry-days:30}")
     private Long refreshTokenExpiryDays;
@@ -40,8 +40,8 @@ public class JwtService {
             // Get current time
             Instant now = Instant.now();
 
-            // Calculate expiry time ( add accessTokenExpiryDays to current time )
-            Instant expiry = now.plus(accessTokenExpiryDays, ChronoUnit.DAYS);
+            // Calculate expiry time ( add accessTokenExpiryMinutes to current time )
+            Instant expiry = now.plus(accessTokenExpiryMinutes, ChronoUnit.MINUTES);
 
             // Build JWT claims
             JwtClaimsSet claims = JwtClaimsSet.builder()

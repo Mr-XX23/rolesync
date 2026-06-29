@@ -1,15 +1,16 @@
 import React, { useState } from 'react';
-import { ArrowRight, LogOut, Home, Mail, MessageCircle, UserRoundKey, Sparkles, AlertCircle } from 'lucide-react';
+import { ArrowRight, LogOut, Home, Mail, MessageCircle, UserRoundKey, Sparkles, AlertCircle, Eye, EyeOff } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '../../components/common/Button';
 import { Input } from '../../components/common/Input';
 import { useAppDispatch, useAppSelector } from '../../store';
-import { loginUser, logout, clearError } from '../../store/authSlice';
+import { loginUser, logoutUser, clearError } from '../../store/authSlice';
 
 const Signin: React.FC = () => {
   const navigate = useNavigate();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
 
   const dispatch = useAppDispatch();
   const { isLoading: isSubmitting, error, isAuthenticated, user } = useAppSelector(
@@ -29,7 +30,7 @@ const Signin: React.FC = () => {
   };
 
   const handleLogout = () => {
-    dispatch(logout());
+    dispatch(logoutUser());
     setEmail('');
     setPassword('');
   };
@@ -148,7 +149,7 @@ const Signin: React.FC = () => {
                 <Input
                   label="Password"
                   id="password"
-                  type="password"
+                  type={showPassword ? 'text' : 'password'}
                   placeholder="••••••••"
                   autoComplete="current-password"
                   value={password}
@@ -166,6 +167,20 @@ const Signin: React.FC = () => {
                     >
                       Forgot password?
                     </a>
+                  }
+                  rightElementInside={
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword(!showPassword)}
+                      className="text-muted-foreground hover:text-foreground transition-colors cursor-pointer focus:outline-none flex items-center justify-center"
+                      aria-label={showPassword ? 'Hide password' : 'Show password'}
+                    >
+                      {showPassword ? (
+                        <EyeOff className="w-[16px] h-[16px]" />
+                      ) : (
+                        <Eye className="w-[16px] h-[16px]" />
+                      )}
+                    </button>
                   }
                 />
 

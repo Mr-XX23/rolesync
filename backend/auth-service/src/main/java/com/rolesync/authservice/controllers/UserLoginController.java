@@ -7,6 +7,7 @@ import com.rolesync.authservice.dto.loginregistration.LoginResponse;
 import com.rolesync.authservice.services.userlogin.Logout;
 import com.rolesync.authservice.services.userlogin.RefreshToken;
 import com.rolesync.authservice.services.userlogin.UserLogin;
+import com.rolesync.authservice.exceptions.UnauthorizedException;
 import com.rolesync.authservice.services.userlogin.VerifyUser;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -56,7 +57,7 @@ public class UserLoginController {
     public ResponseEntity<Map<String, Object>> verifyToken(HttpServletRequest request) {
 
         String accessToken = CookieUtil.getCookieValue(request, "access_token")
-                .orElseThrow(() -> new IllegalArgumentException("No token provided"));
+                .orElseThrow(() -> new UnauthorizedException("No token provided"));
 
         Map<String, Object> userDetails = verifyUserService.verifyAndGetUserDetails(accessToken);
 
@@ -77,13 +78,19 @@ public class UserLoginController {
      */
     @PostMapping("/refresh")
     @RateLimited(maxRequests = 10, windowSeconds = 60, message = "Too many refresh requests. Please wait a moment.")
-    public ResponseEntity<String> refreshToken(HttpServletRequest request, HttpServletResponse response) {
+    public ResponseEntity<Map<String, Object>> refreshToken(HttpServletRequest request, HttpServletResponse response) {
 
         String refreshToken = CookieUtil.getCookieValue(request, "refresh_token")
-                .orElseThrow(() -> new IllegalArgumentException("Refresh token not found"));
+                .orElseThrow(() -> new UnauthorizedException("Refresh token not found"));
 
-        String newAccessToken = refreshTokenService.refreshAccessToken(refreshToken, response, request);
-        return ResponseEntity.ok(newAccessToken);
+        refreshTokenService.refreshAccessToken(refreshToken, response, request);
+
+        Map<String, Object> responseBody = Map.of(
+                "message", "Token refreshed successfully",
+                "success", true,
+                "timestamp", LocalDateTime.now().toString());
+
+        return ResponseEntity.ok(responseBody);
     }
 
     /**

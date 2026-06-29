@@ -3,6 +3,8 @@ package com.rolesync.authservice.services.userlogin;
 import com.rolesync.authservice.exceptions.BadRequestException;
 import com.rolesync.authservice.exceptions.ForbiddenException;
 import com.rolesync.authservice.models.AuthUserCredentials;
+import com.rolesync.authservice.models.TokenStore;
+import com.rolesync.authservice.repository.TokenStoreRepository;
 import com.rolesync.authservice.repository.UserRepository;
 import com.rolesync.authservice.services.CookiesService;
 import com.rolesync.authservice.services.JwtService;
@@ -22,6 +24,7 @@ import java.util.Set;
 public class RefreshToken {
 
     private final UserRepository userRepository;
+    private final TokenStoreRepository tokenStoreRepository;
 
     private final JwtService jwtService;
     private final TokenService tokenService;
@@ -61,11 +64,16 @@ public class RefreshToken {
                 throw new ForbiddenException("Account is blocked or suspended");
             }
 
+            // Retrieve session ID of the existing refresh token
+            java.util.UUID sessionId = tokenStoreRepository.findByTokenStringAndRevokedFalse(refreshToken)
+                    .map(TokenStore::getSessionId)
+                    .orElseGet(java.util.UUID::randomUUID);
+
             // Generate new access token
             String newAccessToken = jwtService.generateAccessToken(user);
 
-            // Save new access token in database
-            tokenService.saveAccessToken(user.getAuthUserId(), newAccessToken);
+            // Save new access token in database associated with the session ID
+            tokenService.saveAccessToken(user.getAuthUserId(), newAccessToken, sessionId);
 
             // Set new Cookies
             cookiesService.setAccessTokenCookie(response, newAccessToken);
@@ -76,6 +84,8 @@ public class RefreshToken {
 
             log.info("Generated new access token for user ID: {}", userId);
             return newAccessToken;
+        } catch (ForbiddenException | BadRequestException e) {
+            throw e;
         } catch (Exception e) {
             log.error("Error refreshing access token: {}", e.getMessage());
             throw new BadRequestException("Error refreshing access token");
