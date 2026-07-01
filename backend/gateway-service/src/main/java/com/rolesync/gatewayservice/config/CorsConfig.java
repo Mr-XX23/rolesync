@@ -28,7 +28,7 @@ public class CorsConfig {
     @Value("${cors.allowed-methods:GET,POST,PUT,DELETE,OPTIONS,PATCH}")
     private String allowedMethods;
 
-    @Value("${cors.allowed-headers:Authorization,Content-Type,X-Requested-With,Accept,Origin}")
+    @Value("${cors.allowed-headers:Authorization,Content-Type,X-Requested-With,Accept,Origin,X-CSRF-TOKEN,X-User-Id,X-Auth-User-Id}")
     private String allowedHeaders;
 
     @Value("${cors.allow-credentials:true}")

@@ -95,8 +95,51 @@ public class WorkspaceProfileServiceImpl implements WorkspaceProfileService {
 
             if (request.getCurrentStep() != null) onboarding.setCurrentStep(request.getCurrentStep());
             if (request.getCompletedSteps() != null) onboarding.setCompletedSteps(request.getCompletedSteps());
+            if (request.getIsCompleted() != null) onboarding.setIsCompleted(request.getIsCompleted());
 
             return onboardingStateRepository.save(onboarding);
+        }).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @Override
+    public Mono<WorkspaceProfile> getProfile(UUID authUserId) {
+        return Mono.fromCallable(() -> workspaceProfileRepository.findByAuthUserId(authUserId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Workspace profile not found")))
+                .subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @Override
+    public Mono<WorkspacePreferences> getPreferences(UUID authUserId) {
+        return Mono.fromCallable(() -> {
+            WorkspaceProfile profile = workspaceProfileRepository.findByAuthUserId(authUserId)
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Workspace profile not found"));
+            return workspacePreferencesRepository.findByProfileProfileId(profile.getProfileId())
+                    .orElseGet(() -> {
+                        WorkspacePreferences prefs = WorkspacePreferences.builder()
+                                .profile(profile)
+                                .theme("dark")
+                                .language("en")
+                                .timezone("UTC")
+                                .build();
+                        return workspacePreferencesRepository.save(prefs);
+                    });
+        }).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @Override
+    public Mono<OnboardingState> getOnboardingState(UUID authUserId) {
+        return Mono.fromCallable(() -> {
+            WorkspaceProfile profile = workspaceProfileRepository.findByAuthUserId(authUserId)
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Workspace profile not found"));
+            return onboardingStateRepository.findByProfileProfileId(profile.getProfileId())
+                    .orElseGet(() -> {
+                        OnboardingState onboarding = OnboardingState.builder()
+                                .profile(profile)
+                                .currentStep("PROFILE_SETUP")
+                                .isCompleted(false)
+                                .build();
+                        return onboardingStateRepository.save(onboarding);
+                    });
         }).subscribeOn(Schedulers.boundedElastic());
     }
 }

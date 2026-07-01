@@ -6,7 +6,8 @@ import storage from 'redux-persist/lib/storage';
 import authReducer, { logout } from './authSlice';
 import roleReducer from './roleSlice';
 import taskReducer from './taskSlice';
-import { injectLogoutCallback } from '../api/axiosInstance';
+import workspaceReducer, { clearWorkspaceState } from './workspaceSlice';
+import { injectLogoutCallback, injectUserId } from '../api/axiosInstance';
 
 const safeStorage = (storage as any).default || storage;
 
@@ -24,6 +25,7 @@ export const store = configureStore({
     auth: persistedAuthReducer,
     role: roleReducer,
     task: taskReducer,
+    workspace: workspaceReducer,
   },
   middleware: (getDefaultMiddleware) =>
     getDefaultMiddleware({
@@ -51,6 +53,24 @@ export const useAppSelector: TypedUseSelectorHook<RootState> = useSelector;
 // Inject the store dispatch callback into Axios to break the circular import loop
 injectLogoutCallback(() => {
   store.dispatch(logout());
+  store.dispatch(clearWorkspaceState());
+});
+
+// Inject initial user ID if already persisted/authenticated
+const initialUser = store.getState().auth.user;
+if (initialUser && initialUser.userId) {
+  injectUserId(initialUser.userId);
+}
+
+// Subscribe to store updates to keep the userId sync'd in Axios
+let currentUserId = initialUser ? initialUser.userId : null;
+store.subscribe(() => {
+  const user = store.getState().auth.user;
+  const nextUserId = user ? user.userId : null;
+  if (nextUserId !== currentUserId) {
+    currentUserId = nextUserId;
+    injectUserId(nextUserId);
+  }
 });
 
 

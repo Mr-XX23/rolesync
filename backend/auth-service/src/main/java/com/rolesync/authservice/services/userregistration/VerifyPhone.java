@@ -28,6 +28,7 @@ public class VerifyPhone {
         private final PasswordEncoder passwordEncoder;
         private final OtpEventLogRepository otpEventLogRepository;
         private final AuthSecurityEventService securityEventService;
+        private final com.rolesync.authservice.kafka.producer.AuthEventPublisher authEventPublisher;
 
         /**
          * Verify user's phone using the verification token.
@@ -150,6 +151,34 @@ public class VerifyPhone {
                                         "Phone verification failed due to database error.",
                                         httpRequest);
                         throw new RuntimeException("Error verifying phone. Please try again.");
+                }
+
+                // Publish USER_REGISTERED event after database transaction successfully commits
+                final boolean active = shouldActivate;
+                final AuthUserCredentials finalUser = user;
+                if (org.springframework.transaction.support.TransactionSynchronizationManager.isSynchronizationActive()) {
+                        org.springframework.transaction.support.TransactionSynchronizationManager.registerSynchronization(
+                                new org.springframework.transaction.support.TransactionSynchronization() {
+                                        @Override
+                                        public void afterCommit() {
+                                                if (active) {
+                                                        try {
+                                                                authEventPublisher.publishUserRegistered(finalUser);
+                                                        } catch (Exception e) {
+                                                                log.error("Failed to publish USER_REGISTERED event after phone verification commit", e);
+                                                        }
+                                                }
+                                        }
+                                }
+                        );
+                } else {
+                        if (active) {
+                                try {
+                                        authEventPublisher.publishUserRegistered(user);
+                                } catch (Exception e) {
+                                        log.error("Failed to publish USER_REGISTERED event after phone verification", e);
+                                }
+                        }
                 }
 
                 // Success event (only after DB updates succeed)

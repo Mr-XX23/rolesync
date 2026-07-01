@@ -1,9 +1,14 @@
 import axios from 'axios';
 
 let logoutCallback: (() => void) | null = null;
+let activeUserId: string | null = null;
 
 export const injectLogoutCallback = (cb: () => void) => {
   logoutCallback = cb;
+};
+
+export const injectUserId = (userId: string | null) => {
+  activeUserId = userId;
 };
 
 const api = axios.create({
@@ -13,6 +18,18 @@ const api = axios.create({
   },
   withCredentials: true,
 });
+
+api.interceptors.request.use(
+  (config) => {
+    if (activeUserId) {
+      config.headers['X-User-Id'] = activeUserId;
+    }
+    return config;
+  },
+  (error) => {
+    return Promise.reject(error);
+  }
+);
 
 let isRefreshing = false;
 let failedQueue: any[] = [];

@@ -17,4 +17,7 @@ public class OnboardingStepRequest {
 
     @JsonProperty("completed_steps")
     private List<String> completedSteps;
+
+    @JsonProperty("is_completed")
+    private Boolean isCompleted;
 }

@@ -1,4 +1,6 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
+import { useAppDispatch, useAppSelector } from '../store';
+import { updateThemePreference } from '../store/workspaceSlice';
 
 type Theme = 'light' | 'dark' | 'system';
 
@@ -20,6 +22,10 @@ export const ThemeProvider: React.FC<ThemeProviderProps> = ({
   defaultTheme = 'system',
   storageKey = 'rolesync-theme',
 }) => {
+  const dispatch = useAppDispatch();
+  const { preferences } = useAppSelector((state) => state.workspace);
+  const { isAuthenticated } = useAppSelector((state) => state.auth);
+
   const [theme, setThemeState] = useState<Theme>(
     () => (localStorage.getItem(storageKey) as Theme) || defaultTheme
   );
@@ -53,9 +59,18 @@ export const ThemeProvider: React.FC<ThemeProviderProps> = ({
     }
   }, [theme]);
 
+  useEffect(() => {
+    if (preferences && preferences.theme) {
+      setThemeState(preferences.theme as Theme);
+    }
+  }, [preferences]);
+
   const setTheme = (newTheme: Theme) => {
     localStorage.setItem(storageKey, newTheme);
     setThemeState(newTheme);
+    if (isAuthenticated) {
+      dispatch(updateThemePreference(newTheme));
+    }
   };
 
   return (

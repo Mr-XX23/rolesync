@@ -16,6 +16,7 @@ export const Header: React.FC<HeaderProps> = ({
 }) => {
   const dispatch = useAppDispatch();
   const { user } = useAppSelector((state) => state.auth);
+  const { profile } = useAppSelector((state) => state.workspace);
   const [profileOpen, setProfileOpen] = useState(false);
 
   const handleLogout = () => {
@@ -34,13 +35,13 @@ export const Header: React.FC<HeaderProps> = ({
           <Menu className="w-5 h-5" />
         </button>
 
-        <div className="relative w-full max-w-xs md:max-w-md hidden sm:block">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground/60 w-4 h-4" />
+        <div className="relative max-w-xs md:max-w-md w-full hidden sm:block">
           <input
-            className="bg-background border border-border/70 rounded-full pl-9 pr-4 py-3 w-full focus:outline-none focus:ring-1 focus:ring-primary focus:border-primary text-xs font-medium placeholder-muted-foreground/50 transition-all duration-300"
-            placeholder={searchPlaceholder}
             type="text"
+            placeholder={searchPlaceholder}
+            className="w-full pl-9 pr-4 py-1.5 text-xs bg-muted/65 border border-border/80 rounded-full focus:outline-none focus:border-primary/40 focus:ring-4 focus:ring-primary/5 transition-all duration-300 font-sans"
           />
+          <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground/80" />
         </div>
       </div>
 
@@ -72,7 +73,9 @@ export const Header: React.FC<HeaderProps> = ({
             className="flex items-center gap-1.5 p-1 rounded-full hover:bg-muted border border-transparent hover:border-border/60 transition-all duration-200"
           >
             <div className="h-7 w-7 rounded-full overflow-hidden bg-primary/20 border border-primary/15 flex items-center justify-center font-bold text-xs text-primary">
-              {user?.email ? user.email.slice(0, 2).toUpperCase() : 'OP'}
+              {profile && profile.firstName && profile.lastName
+                ? (profile.firstName.slice(0, 1) + profile.lastName.slice(0, 1)).toUpperCase()
+                : (user?.email ? user.email.slice(0, 2).toUpperCase() : 'OP')}
             </div>
             <ChevronDown className={`w-3.5 h-3.5 text-muted-foreground transition-transform duration-300 ${profileOpen ? 'rotate-180' : ''}`} />
           </button>
@@ -86,10 +89,23 @@ export const Header: React.FC<HeaderProps> = ({
               />
               <div className="absolute right-0 mt-2.5 w-56 bg-card border border-border rounded-xl shadow-md p-2 z-50 animate-in fade-in slide-in-from-top-2 duration-200">
                 <div className="px-3.5 py-2 border-b border-border/60 mb-1.5">
-                  <p className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest leading-none mb-1">
-                    operator account
-                  </p>
-                  <p className="text-xs font-semibold text-foreground font-mono truncate break-all leading-tight">
+                  {profile && profile.firstName ? (
+                    <div className="mb-1.5">
+                      <p className="text-xs font-bold text-foreground truncate leading-none mb-0.5">
+                        {profile.firstName} {profile.lastName}
+                      </p>
+                      {profile.jobTitle ? (
+                        <span className="text-[9px] font-mono text-muted-foreground uppercase tracking-wider leading-none">
+                          {profile.jobTitle}
+                        </span>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <p className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest leading-none mb-1">
+                      operator account
+                    </p>
+                  )}
+                  <p className="text-[11px] text-muted-foreground font-mono truncate break-all leading-none">
                     {user?.email || 'operator@rolesync.ai'}
                   </p>
                 </div>

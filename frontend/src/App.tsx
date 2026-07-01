@@ -5,6 +5,7 @@ import { ThemeProvider } from './components/ThemeProvider';
 import { ThemeToggle } from './components/ThemeToggle';
 import { useAppDispatch, useAppSelector } from './store';
 import { checkSession, skipSessionCheck } from './store/authSlice';
+import { fetchProfile, fetchPreferences, fetchOnboarding } from './store/workspaceSlice';
 
 const App = () => {
   const dispatch = useAppDispatch();
@@ -18,6 +19,14 @@ const App = () => {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      dispatch(fetchProfile());
+      dispatch(fetchPreferences());
+      dispatch(fetchOnboarding());
+    }
+  }, [isAuthenticated, dispatch]);
 
   if (isCheckingSession) {
     return (

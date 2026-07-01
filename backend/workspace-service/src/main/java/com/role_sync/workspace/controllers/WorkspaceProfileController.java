@@ -5,6 +5,7 @@ import com.role_sync.workspace.dto.PreferencesRequest;
 import com.role_sync.workspace.dto.WorkspaceProfileRequest;
 import com.role_sync.workspace.models.OnboardingState;
 import com.role_sync.workspace.models.WorkspacePreferences;
+import com.role_sync.workspace.models.WorkspaceProfile;
 import com.role_sync.workspace.services.WorkspaceProfileService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -33,6 +34,33 @@ public class WorkspaceProfileController {
                                 "profile_id", profile.getProfileId(),
                                 "message", "Workspace profile processed successfully"
                         )));
+    }
+
+    @GetMapping
+    public Mono<ResponseEntity<WorkspaceProfile>> getProfile(
+            @RequestHeader(value = "X-User-Id", required = false) String userIdHeader,
+            @RequestHeader(value = "X-Auth-User-Id", required = false) String authUserIdHeader) {
+        UUID authUserId = resolveAuthUserId(userIdHeader, authUserIdHeader);
+        return workspaceProfileService.getProfile(authUserId)
+                .map(ResponseEntity::ok);
+    }
+
+    @GetMapping("/preferences")
+    public Mono<ResponseEntity<WorkspacePreferences>> getPreferences(
+            @RequestHeader(value = "X-User-Id", required = false) String userIdHeader,
+            @RequestHeader(value = "X-Auth-User-Id", required = false) String authUserIdHeader) {
+        UUID authUserId = resolveAuthUserId(userIdHeader, authUserIdHeader);
+        return workspaceProfileService.getPreferences(authUserId)
+                .map(ResponseEntity::ok);
+    }
+
+    @GetMapping("/onboarding")
+    public Mono<ResponseEntity<OnboardingState>> getOnboardingState(
+            @RequestHeader(value = "X-User-Id", required = false) String userIdHeader,
+            @RequestHeader(value = "X-Auth-User-Id", required = false) String authUserIdHeader) {
+        UUID authUserId = resolveAuthUserId(userIdHeader, authUserIdHeader);
+        return workspaceProfileService.getOnboardingState(authUserId)
+                .map(ResponseEntity::ok);
     }
 
     @PutMapping("/preferences")

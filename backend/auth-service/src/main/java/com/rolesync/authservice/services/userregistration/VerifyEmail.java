@@ -38,6 +38,7 @@ public class VerifyEmail {
     private final SseNotificationService sseNotificationService;
     private final OtpService otpService;
     private final SmsService smsService;
+    private final com.rolesync.authservice.kafka.producer.AuthEventPublisher authEventPublisher;
 
     @Value("${app.frontend.url:http://localhost:3000}")
     private String frontendUrl;
@@ -167,6 +168,12 @@ public class VerifyEmail {
                                 } catch (Exception e) {
                                     log.error("Failed to send phone OTP after email verification commit for user: {}", userId, e);
                                 }
+                            } else {
+                                try {
+                                    authEventPublisher.publishUserRegistered(user);
+                                } catch (Exception e) {
+                                    log.error("Failed to publish USER_REGISTERED event after email verification commit for user: {}", userId, e);
+                                }
                             }
                             sseNotificationService.notifyEmailVerified(userId, hasPhone);
                         }
@@ -178,6 +185,12 @@ public class VerifyEmail {
                             smsService.sendOtpSms(userPhone, otp, userId);
                         } catch (Exception e) {
                             log.error("Failed to send phone OTP for user: {}", userId, e);
+                        }
+                    } else {
+                        try {
+                            authEventPublisher.publishUserRegistered(user);
+                        } catch (Exception e) {
+                            log.error("Failed to publish USER_REGISTERED event for user: {}", userId, e);
                         }
                     }
                     sseNotificationService.notifyEmailVerified(userId, hasPhone);

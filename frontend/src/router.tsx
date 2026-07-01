@@ -11,6 +11,8 @@ import { ProtectedRoute } from './components/guards/ProtectedRoute';
 import { WorkspaceGuard } from './components/guards/WorkspaceGuard';
 import { RegistrationFlowGuard } from './components/guards/RegistrationFlowGuard';
 import { GuestRoute } from './components/guards/GuestRoute';
+import { OnboardingGuard } from './components/guards/OnboardingGuard';
+import OnboardingWizard from './pages/auth/OnboardingWizard';
 import { KnowledgeVault } from './pages/salemans/knowledgeVault/KnowledgeVault';
 import { ExternalConnector } from './pages/salemans/externalConnector/ExternalConnector';
 import { AiTasks } from './pages/salemans/AiTasks';
@@ -68,10 +70,20 @@ export const router = createBrowserRouter([
     element: <Changepassword />,
   },
   {
+    path: '/onboarding',
+    element: (
+      <ProtectedRoute>
+        <OnboardingWizard />
+      </ProtectedRoute>
+    ),
+  },
+  {
     path: '/select-role',
     element: (
       <ProtectedRoute>
-        <RolePicker />
+        <OnboardingGuard>
+          <RolePicker />
+        </OnboardingGuard>
       </ProtectedRoute>
     ),
   },
@@ -79,9 +91,11 @@ export const router = createBrowserRouter([
     path: '/salesman',
     element: (
       <ProtectedRoute>
-        <WorkspaceGuard requiredRole="sales">
-          <DashboardLayout />
-        </WorkspaceGuard>
+        <OnboardingGuard>
+          <WorkspaceGuard requiredRole="sales">
+            <DashboardLayout />
+          </WorkspaceGuard>
+        </OnboardingGuard>
       </ProtectedRoute>
     ),
     children: [

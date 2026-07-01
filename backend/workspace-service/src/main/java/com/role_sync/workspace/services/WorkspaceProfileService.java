@@ -14,4 +14,7 @@ public interface WorkspaceProfileService {
     Mono<WorkspaceProfile> createOrUpdateProfile(WorkspaceProfileRequest request);
     Mono<WorkspacePreferences> updatePreferences(UUID authUserId, PreferencesRequest request);
     Mono<OnboardingState> updateOnboardingStep(UUID authUserId, OnboardingStepRequest request);
+    Mono<WorkspaceProfile> getProfile(UUID authUserId);
+    Mono<WorkspacePreferences> getPreferences(UUID authUserId);
+    Mono<OnboardingState> getOnboardingState(UUID authUserId);
 }
