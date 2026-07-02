@@ -29,6 +29,7 @@ public class OnboardingState {
 
     @OneToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "profile_id", unique = true, nullable = false)
+    @com.fasterxml.jackson.annotation.JsonIgnore
     private WorkspaceProfile profile;
 
     @Column(name = "current_step", length = 50)

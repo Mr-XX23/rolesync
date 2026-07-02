@@ -29,6 +29,7 @@ public class WorkspacePreferences {
 
     @OneToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "profile_id", unique = true, nullable = false)
+    @com.fasterxml.jackson.annotation.JsonIgnore
     private WorkspaceProfile profile;
 
     @Column(name = "theme", length = 20)
