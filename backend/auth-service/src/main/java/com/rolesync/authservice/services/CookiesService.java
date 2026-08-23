@@ -22,6 +22,9 @@ public class CookiesService {
     @Value("${cookie.domain:localhost}")
     private String cookieDomain;
 
+    @Value("${cookie.same-site:Lax}")
+    private String sameSite;
+
     @Value("${cookie.secure:true}")
     private boolean secure;
 
@@ -86,7 +89,7 @@ public class CookiesService {
                 .path("/")
                 .maxAge(Duration.ofSeconds(maxAge))
                 .domain(cookieDomain)
-                .sameSite("Strict") // Strict CSRF protection
+                .sameSite(sameSite) // Configurable CSRF protection (Lax/Strict)
                 .build();
     }
 }

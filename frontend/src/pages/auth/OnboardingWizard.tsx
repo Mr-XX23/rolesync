@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Sparkles, User, Settings, Check, ArrowRight, Sun, Moon, Monitor } from 'lucide-react';
+import { Sparkles, User, Settings, Check, ArrowRight, Sun, Moon, Monitor, Loader2 } from 'lucide-react';
 import { useAppDispatch, useAppSelector } from '../../store';
-import { updateProfile, updateOnboarding } from '../../store/workspaceSlice';
+import { updateProfile, updateOnboarding, fetchProfile, fetchOnboarding } from '../../store/workspaceSlice';
 import { useTheme } from '../../components/ThemeProvider';
 
 export const OnboardingWizard: React.FC = () => {
@@ -12,11 +12,37 @@ export const OnboardingWizard: React.FC = () => {
   const { onboarding, profile, preferences, isLoading } = useAppSelector((state) => state.workspace);
   const { theme, setTheme } = useTheme();
 
+  const [pollCount, setPollCount] = useState(0);
+  const [isPolling, setIsPolling] = useState(!profile);
+
   useEffect(() => {
     if (onboarding && onboarding.isCompleted) {
       navigate('/select-role', { replace: true });
     }
   }, [onboarding, navigate]);
+
+  // Polling loop for profile creation (3s interval, max 30s timeout = 10 attempts)
+  useEffect(() => {
+    if (profile) {
+      setIsPolling(false);
+      return;
+    }
+
+    if (pollCount >= 10) {
+      console.warn('Workspace profile creation timed out after 30s. Skipping to role selection.');
+      setIsPolling(false);
+      navigate('/select-role', { replace: true });
+      return;
+    }
+
+    const interval = setInterval(() => {
+      setPollCount((prev) => prev + 1);
+      dispatch(fetchProfile());
+      dispatch(fetchOnboarding());
+    }, 3000);
+
+    return () => clearInterval(interval);
+  }, [profile, pollCount, dispatch, navigate]);
 
   const [step, setStep] = useState(1);
   const [firstName, setFirstName] = useState(profile?.firstName || '');
@@ -61,6 +87,33 @@ export const OnboardingWizard: React.FC = () => {
         navigate('/select-role', { replace: true });
       });
   };
+
+  if (isPolling && !profile) {
+    return (
+      <div className="min-h-screen bg-background text-foreground flex flex-col justify-center items-center py-12 px-4 sm:px-6 relative overflow-hidden font-sans">
+        <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-primary/10 rounded-full blur-3xl -z-10 animate-pulse duration-5000"></div>
+        <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-secondary/15 rounded-full blur-3xl -z-10 animate-pulse duration-7000"></div>
+
+        <div className="w-full max-w-md bg-card border border-border rounded-2xl p-8 shadow-lg text-center space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+          <div className="mx-auto w-14 h-14 bg-primary/10 rounded-2xl flex items-center justify-center text-primary relative">
+            <Sparkles className="w-7 h-7 animate-pulse" />
+          </div>
+
+          <div className="space-y-2">
+            <h2 className="text-2xl font-serif font-bold text-foreground">Initializing Workspace</h2>
+            <p className="text-xs text-muted-foreground max-w-xs mx-auto">
+              Provisioning your persona environment and workspace parameters...
+            </p>
+          </div>
+
+          <div className="flex items-center justify-center gap-2 text-primary font-mono text-xs bg-muted/50 py-2.5 px-4 rounded-xl border border-border/60">
+            <Loader2 className="w-4 h-4 animate-spin" />
+            <span>Synchronizing workspace event stream... ({pollCount * 3}s / 30s)</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-background text-foreground flex flex-col justify-center items-center py-12 px-4 sm:px-6 relative overflow-hidden font-sans">

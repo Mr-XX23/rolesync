@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { ArrowRight, LogOut, Home, Mail, MessageCircle, UserRoundKey, Sparkles, AlertCircle, Eye, EyeOff } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams, useLocation } from 'react-router-dom';
 import { Button } from '../../components/common/Button';
 import { Input } from '../../components/common/Input';
 import { useAppDispatch, useAppSelector } from '../../store';
@@ -8,18 +8,29 @@ import { loginUser, logoutUser, clearError } from '../../store/authSlice';
 
 const Signin: React.FC = () => {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const location = useLocation();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
+  const [dismissedUrlError, setDismissedUrlError] = useState(false);
 
   const dispatch = useAppDispatch();
   const { isLoading: isSubmitting, error, isAuthenticated, user } = useAppSelector(
     (state) => state.auth
   );
 
+  const urlError = searchParams.get('error') || (location.state as { error?: string })?.error;
+  const activeError = error || (!dismissedUrlError ? urlError : null);
+
   React.useEffect(() => {
     if (isAuthenticated && user) {
-      navigate('/select-role', { replace: true });
+      const savedRole = localStorage.getItem('rolesync-active-role');
+      let targetRoute = '/select-role';
+      if (savedRole === 'sales') targetRoute = '/salesman';
+      else if (savedRole === 'teacher') targetRoute = '/teacher';
+      else if (savedRole === 'student') targetRoute = '/student';
+      navigate(targetRoute, { replace: true });
     }
   }, [isAuthenticated, user, navigate]);
 
@@ -113,16 +124,23 @@ const Signin: React.FC = () => {
             {/* Authentication Card */}
             <div className="bg-card rounded-lg border border-border p-4 md:p-6 lg:p-8 shadow-sm">
 
-              {/* Redux State Error Alert Banner */}
-              {error && (
+              {/* Authentication Error Alert Banner */}
+              {activeError && (
                 <div className="bg-destructive/10 border border-destructive/20 text-destructive text-xs py-2.5 px-3 rounded-lg mb-4 flex items-start gap-2 animate-in fade-in slide-in-from-top-1 duration-200">
                   <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
                   <div className="grow">
                     <p className="font-semibold">Authentication Error</p>
-                    <p className="opacity-90">{error}</p>
+                    <p className="opacity-90">{activeError}</p>
                   </div>
                   <button
-                    onClick={() => dispatch(clearError())}
+                    onClick={() => {
+                      dispatch(clearError());
+                      setDismissedUrlError(true);
+                      if (searchParams.has('error')) {
+                        searchParams.delete('error');
+                        setSearchParams(searchParams, { replace: true });
+                      }
+                    }}
                     className="text-destructive hover:opacity-80 font-bold ml-1 cursor-pointer select-none focus:outline-none"
                     aria-label="Clear error banner"
                   >
@@ -209,7 +227,9 @@ const Signin: React.FC = () => {
               <div className="grid grid-cols-2 gap-4 mb-8">
                 <Button
                   variant="outline"
-                  onClick={() => alert('Google auth clicked')}
+                  onClick={() => {
+                    window.location.href = 'http://localhost:8080/api/v1/auth/oauth2/authorization/google';
+                  }}
                 >
                   <svg className="w-4 h-4" viewBox="0 0 24 24">
                     <path

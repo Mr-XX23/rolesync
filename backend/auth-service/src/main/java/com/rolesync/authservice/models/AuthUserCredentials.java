@@ -51,7 +51,7 @@ public class AuthUserCredentials {
     @Column(name = "auth_user_id", columnDefinition = "UUID", updatable = false, nullable = false)
     private UUID authUserId;
 
-    @Column(unique = true, length = 100, updatable = false)
+    @Column(unique = true, length = 100, updatable = true)
     private String googleId;
 
     @Column(nullable = false, length = 20)

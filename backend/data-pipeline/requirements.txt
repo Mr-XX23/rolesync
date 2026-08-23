@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+celery[redis]
+sqlalchemy
+alembic
+psycopg2-binary
+boto3
+pydantic-settings
+py-eureka-client
+composio-core
+llama-index
+llama-parse
+python-multipart
+clamd

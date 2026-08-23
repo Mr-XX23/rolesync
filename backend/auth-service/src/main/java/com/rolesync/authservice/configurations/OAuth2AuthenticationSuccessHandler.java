@@ -1,6 +1,7 @@
 package com.rolesync.authservice.configurations;
 
 import com.rolesync.authservice.dto.loginregistration.OAuth2LoginResponse;
+import com.rolesync.authservice.exceptions.BadRequestException;
 import com.rolesync.authservice.services.OAuth2Service;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -32,9 +33,13 @@ public class OAuth2AuthenticationSuccessHandler implements AuthenticationSuccess
             HttpServletResponse response,
             Authentication authentication) throws IOException {
 
-        OAuth2User oauth2User = (OAuth2User) authentication.getPrincipal();
-
         try {
+            if (authentication == null || !(authentication.getPrincipal() instanceof OAuth2User)) {
+                log.error("Invalid authentication or missing OAuth2 principal");
+                throw new BadRequestException("Invalid authentication details");
+            }
+
+            OAuth2User oauth2User = (OAuth2User) authentication.getPrincipal();
             log.info("OAuth2 authentication successful for user: {}",
                     (Object) oauth2User.getAttribute("email"));
 
@@ -54,12 +59,15 @@ public class OAuth2AuthenticationSuccessHandler implements AuthenticationSuccess
             response.sendRedirect(redirectUrl);
 
         } catch (Exception e) {
-            log.error("OAuth2 authentication processing failed: {}", e.getMessage(), e);
+            log.error("OAuth2 authentication processing failed: {}", e != null ? e.getMessage() : "Unknown error", e);
+
+            String rawMessage = (e != null) ? e.getMessage() : null;
+            String errorMessage = (rawMessage != null && !rawMessage.isBlank()) ? rawMessage : "OAuth2 authentication failed";
 
             String errorUrl = String.format(
                     "%s/login?error=oauth_failed&message=%s",
                     frontendUrl,
-                    URLEncoder.encode(e.getMessage(), StandardCharsets.UTF_8)
+                    URLEncoder.encode(errorMessage, StandardCharsets.UTF_8)
             );
 
             response.sendRedirect(errorUrl);

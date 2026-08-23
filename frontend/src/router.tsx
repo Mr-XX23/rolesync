@@ -1,5 +1,6 @@
 import { createBrowserRouter, Navigate } from 'react-router-dom';
 import Signin from './pages/auth/Signin';
+import OAuthCallback from './pages/auth/OAuthCallback';
 import Passwordreset from './pages/auth/Passwordreset';
 import Changepassword from './pages/auth/Changepassword';
 import Register from './pages/auth/Register';
@@ -32,6 +33,10 @@ export const router = createBrowserRouter([
         <Signin />
       </GuestRoute>
     ),
+  },
+  {
+    path: '/auth/callback',
+    element: <OAuthCallback />,
   },
   {
     path: '/login',
@@ -76,6 +81,14 @@ export const router = createBrowserRouter([
         <OnboardingWizard />
       </ProtectedRoute>
     ),
+  },
+  {
+    path: '/auth/onboarding',
+    element: <Navigate to="/onboarding" replace />,
+  },
+  {
+    path: '/workspace',
+    element: <Navigate to="/select-role" replace />,
   },
   {
     path: '/select-role',

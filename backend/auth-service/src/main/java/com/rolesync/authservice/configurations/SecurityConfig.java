@@ -100,8 +100,8 @@ public class SecurityConfig {
                                                 .requestMatchers(publicEndpointsConfig.getPublicEndpoints()).permitAll()
                                                 .anyRequest().authenticated())
                                 .oauth2Login(oauth2 -> oauth2
-                                                .loginPage("/oauth2/authorization/google")
-                                                .defaultSuccessUrl("/api/v1/auth/oauth2/callback/google", true)
+                                                .authorizationEndpoint(a -> a.baseUri("/api/v1/auth/oauth2/authorization"))
+                                                .redirectionEndpoint(r -> r.baseUri("/api/v1/auth/oauth2/callback/*"))
                                                 .successHandler(oauth2SuccessHandler)
                                                 .failureUrl("/login?error=oauth_failed"))
                                 .oauth2ResourceServer(oauth2 -> oauth2.jwt(jwt -> jwt.decoder(jwtDecoder)))

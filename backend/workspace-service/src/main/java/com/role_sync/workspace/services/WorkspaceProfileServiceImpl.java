@@ -66,11 +66,40 @@ public class WorkspaceProfileServiceImpl implements WorkspaceProfileService {
         }).subscribeOn(Schedulers.boundedElastic());
     }
 
+    private WorkspaceProfile getOrCreateProfile(UUID authUserId) {
+        return workspaceProfileRepository.findByAuthUserId(authUserId)
+                .orElseGet(() -> {
+                    WorkspaceProfile profile = WorkspaceProfile.builder()
+                            .authUserId(authUserId)
+                            .firstName("User")
+                            .lastName("")
+                            .jobTitle("Member")
+                            .build();
+                    profile = workspaceProfileRepository.save(profile);
+
+                    WorkspacePreferences prefs = WorkspacePreferences.builder()
+                            .profile(profile)
+                            .theme("dark")
+                            .language("en")
+                            .timezone("UTC")
+                            .build();
+                    workspacePreferencesRepository.save(prefs);
+
+                    OnboardingState onboarding = OnboardingState.builder()
+                            .profile(profile)
+                            .currentStep("PROFILE_SETUP")
+                            .isCompleted(false)
+                            .build();
+                    onboardingStateRepository.save(onboarding);
+
+                    return profile;
+                });
+    }
+
     @Override
     public Mono<WorkspacePreferences> updatePreferences(UUID authUserId, PreferencesRequest request) {
         return Mono.fromCallable(() -> {
-            WorkspaceProfile profile = workspaceProfileRepository.findByAuthUserId(authUserId)
-                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Workspace profile not found"));
+            WorkspaceProfile profile = getOrCreateProfile(authUserId);
 
             WorkspacePreferences prefs = workspacePreferencesRepository.findByProfileProfileId(profile.getProfileId())
                     .orElseGet(() -> WorkspacePreferences.builder().profile(profile).build());
@@ -87,8 +116,7 @@ public class WorkspaceProfileServiceImpl implements WorkspaceProfileService {
     @Override
     public Mono<OnboardingState> updateOnboardingStep(UUID authUserId, OnboardingStepRequest request) {
         return Mono.fromCallable(() -> {
-            WorkspaceProfile profile = workspaceProfileRepository.findByAuthUserId(authUserId)
-                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Workspace profile not found"));
+            WorkspaceProfile profile = getOrCreateProfile(authUserId);
 
             OnboardingState onboarding = onboardingStateRepository.findByProfileProfileId(profile.getProfileId())
                     .orElseGet(() -> OnboardingState.builder().profile(profile).build());
@@ -103,16 +131,14 @@ public class WorkspaceProfileServiceImpl implements WorkspaceProfileService {
 
     @Override
     public Mono<WorkspaceProfile> getProfile(UUID authUserId) {
-        return Mono.fromCallable(() -> workspaceProfileRepository.findByAuthUserId(authUserId)
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Workspace profile not found")))
+        return Mono.fromCallable(() -> getOrCreateProfile(authUserId))
                 .subscribeOn(Schedulers.boundedElastic());
     }
 
     @Override
     public Mono<WorkspacePreferences> getPreferences(UUID authUserId) {
         return Mono.fromCallable(() -> {
-            WorkspaceProfile profile = workspaceProfileRepository.findByAuthUserId(authUserId)
-                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Workspace profile not found"));
+            WorkspaceProfile profile = getOrCreateProfile(authUserId);
             return workspacePreferencesRepository.findByProfileProfileId(profile.getProfileId())
                     .orElseGet(() -> {
                         WorkspacePreferences prefs = WorkspacePreferences.builder()
@@ -129,8 +155,7 @@ public class WorkspaceProfileServiceImpl implements WorkspaceProfileService {
     @Override
     public Mono<OnboardingState> getOnboardingState(UUID authUserId) {
         return Mono.fromCallable(() -> {
-            WorkspaceProfile profile = workspaceProfileRepository.findByAuthUserId(authUserId)
-                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Workspace profile not found"));
+            WorkspaceProfile profile = getOrCreateProfile(authUserId);
             return onboardingStateRepository.findByProfileProfileId(profile.getProfileId())
                     .orElseGet(() -> {
                         OnboardingState onboarding = OnboardingState.builder()

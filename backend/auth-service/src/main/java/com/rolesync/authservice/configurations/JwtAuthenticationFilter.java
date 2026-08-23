@@ -13,6 +13,7 @@ import org.springframework.security.authentication.UsernamePasswordAuthenticatio
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.web.authentication.WebAuthenticationDetailsSource;
+import org.springframework.util.AntPathMatcher;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
@@ -26,6 +27,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     private final JwtService jwtService;
     private final TokenService tokenService;
     private final String[] publicEndpoints;
+    private final AntPathMatcher pathMatcher = new AntPathMatcher();
 
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain) throws ServletException, IOException {
@@ -33,7 +35,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         log.debug("I am here in JWT Filter for path: {}", requestPath);
 
         // Skip JWT validation for public endpoints
-        if (Arrays.stream(publicEndpoints).anyMatch(requestPath::startsWith)) {
+        if (Arrays.stream(publicEndpoints).anyMatch(pattern -> pathMatcher.match(pattern, requestPath))) {
             filterChain.doFilter(request, response);
             return;
         }

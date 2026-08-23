@@ -387,7 +387,9 @@ const Register: React.FC = () => {
             <div className="grid grid-cols-2 gap-4">
               <Button
                 variant="outline"
-                onClick={() => alert('Google Register clicked')}
+                onClick={() => {
+                  window.location.href = 'http://localhost:8080/api/v1/auth/oauth2/authorization/google';
+                }}
                 className="py-2.5"
               >
                 <svg className="w-4 h-4" viewBox="0 0 24 24">

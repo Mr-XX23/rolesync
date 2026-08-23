@@ -31,6 +31,8 @@ public interface UserRepository extends JpaRepository<AuthUserCredentials, UUID>
 
     Optional<AuthUserCredentials> findByUsernameId(String usernameId);
 
+    boolean existsByUsernameId(String usernameId);
+
     @Query("SELECT u FROM AuthUserCredentials u WHERE u.authUserId = :userId AND u.status != 'DELETED'")
     Optional<AuthUserCredentials> findActiveUserById(@Param("userId") UUID userId);
 }
