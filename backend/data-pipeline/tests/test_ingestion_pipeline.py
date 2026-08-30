@@ -1,13 +1,13 @@
 from datetime import datetime, timezone
-from parsing.parsed_document import ParsedDocument
-from ingestion.chunker import HierarchicalChunker
-from ingestion.delta_checker import DeltaChecker, VersionedHashDB
-from ingestion.embedding_worker import EmbeddingWorker
-from ingestion.vector_store import VectorStore
-from ingestion.bulk_writer import BulkWriter
-from ingestion.checkpoint_store import CheckpointStore
-from ingestion.dlq import DeadLetterQueue
-from ingestion.ingestion_pipeline import BatchIngestionPipeline
+from module_1_document_processing.parsing.parsed_document import ParsedDocument
+from module_3_batch_ingestion_vector.chunker import HierarchicalChunker
+from module_3_batch_ingestion_vector.delta_checker import DeltaChecker, VersionedHashDB
+from module_3_batch_ingestion_vector.embedding_worker import EmbeddingWorker
+from module_3_batch_ingestion_vector.vector_store import VectorStore
+from module_3_batch_ingestion_vector.bulk_writer import BulkWriter
+from module_3_batch_ingestion_vector.checkpoint_store import CheckpointStore
+from module_3_batch_ingestion_vector.dlq import DeadLetterQueue
+from module_3_batch_ingestion_vector.ingestion_pipeline import BatchIngestionPipeline
 
 def test_hierarchical_chunker():
     chunker = HierarchicalChunker(chunk_size=100, chunk_overlap=10)

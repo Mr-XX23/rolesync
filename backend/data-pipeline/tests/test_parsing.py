@@ -1,10 +1,10 @@
 from datetime import datetime, timezone
-from connectors.events.canonical_event import CanonicalEvent, EventType
-from parsing.mime_router import MIMERouter, ParserCategory
-from parsing.direct_text_parser import DirectTextParser
-from parsing.llama_parser import LlamaParserService
-from parsing.parse_failure_store import ParseFailureStore
-from parsing.parser_service import ParserService
+from module_1_document_processing.composio_connector.events.canonical_event import CanonicalEvent, EventType
+from module_1_document_processing.parsing.mime_router import MIMERouter, ParserCategory
+from module_1_document_processing.parsing.direct_text_parser import DirectTextParser
+from module_1_document_processing.parsing.llama_parser import LlamaParserService
+from module_1_document_processing.parsing.parse_failure_store import ParseFailureStore
+from module_1_document_processing.parsing.parser_service import ParserService
 
 def test_mime_router():
     router = MIMERouter()

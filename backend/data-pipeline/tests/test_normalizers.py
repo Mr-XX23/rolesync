@@ -1,10 +1,10 @@
 from datetime import datetime
-from connectors.events.canonical_event import EventType
-from connectors.normalizers.gmail_normalizer import normalize_gmail
-from connectors.normalizers.gdrive_normalizer import normalize_gdrive
-from connectors.normalizers.calendar_normalizer import normalize_calendar
-from connectors.normalizers.slack_normalizer import normalize_slack
-from connectors.normalizers.notion_normalizer import normalize_notion
+from module_1_document_processing.composio_connector.events.canonical_event import EventType
+from module_1_document_processing.composio_connector.normalizers.gmail_normalizer import normalize_gmail
+from module_1_document_processing.composio_connector.normalizers.gdrive_normalizer import normalize_gdrive
+from module_1_document_processing.composio_connector.normalizers.calendar_normalizer import normalize_calendar
+from module_1_document_processing.composio_connector.normalizers.slack_normalizer import normalize_slack
+from module_1_document_processing.composio_connector.normalizers.notion_normalizer import normalize_notion
 
 def test_normalize_gmail():
     payload = {

@@ -1,9 +1,9 @@
 from datetime import datetime, timezone
-from connectors.events.canonical_event import CanonicalEvent, EventType
-from pipeline.canonical_store import CanonicalStore
-from connectors.deletion_handler import DeletionHandler
-from connectors.acl_sync import ACLSyncService
-from connectors.reconciliation_sweeper import ReconciliationSweeper
+from module_1_document_processing.composio_connector.events.canonical_event import CanonicalEvent, EventType
+from module_1_document_processing.pipeline.canonical_store import CanonicalStore
+from module_1_document_processing.del_acl_and_reconc.deletion_handler import DeletionHandler
+from module_1_document_processing.del_acl_and_reconc.acl_sync import ACLSyncService
+from module_1_document_processing.del_acl_and_reconc.reconciliation_sweeper import ReconciliationSweeper
 
 def test_deletion_handler():
     store = CanonicalStore()

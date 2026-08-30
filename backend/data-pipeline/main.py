@@ -3,8 +3,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 # pyrefly: ignore [missing-import]
 import py_eureka_client.eureka_client as eureka_client
-from connectors.handlers.webhook_handler import router as webhook_router, queue_worker
-from connectors.handlers.connector_routes import router as connector_router
+from module_1_document_processing.composio_connector.webhook_handler import router as webhook_router, queue_worker
+from module_1_document_processing.composio_connector.connector_routes import router as connector_router
 
 raw_eureka = os.environ.get("EUREKA_SERVER", "http://eureka-service:8761/eureka/")
 if "localhost" in raw_eureka or "127.0.0.1" in raw_eureka:

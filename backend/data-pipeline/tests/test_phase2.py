@@ -1,9 +1,9 @@
 import asyncio
 from datetime import datetime, timezone
-from connectors.events.canonical_event import CanonicalEvent, EventType
-from pipeline.security_scanner import SecurityScanner
-from pipeline.canonical_store import CanonicalStore
-from pipeline.queue_worker import QueueWorker
+from module_1_document_processing.composio_connector.events.canonical_event import CanonicalEvent, EventType
+from module_1_document_processing.security.security_scanner import SecurityScanner
+from module_1_document_processing.pipeline.canonical_store import CanonicalStore
+from module_1_document_processing.pipeline.queue_worker import QueueWorker
 
 def test_security_scanner_clean_event():
     scanner = SecurityScanner()

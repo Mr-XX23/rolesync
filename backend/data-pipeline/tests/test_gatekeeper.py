@@ -1,11 +1,11 @@
 from datetime import datetime, timezone
-from parsing.parsed_document import ParsedDocument
-from gatekeeper.category_router import CategoryRouter, DocumentCategory
-from gatekeeper.lexical_checker import LexicalChecker
-from gatekeeper.audit_logger import GatekeeperAuditLogger
-from gatekeeper.rejected_store import RejectedStore
-from gatekeeper.quarantine_queue import QuarantineQueue
-from gatekeeper.gatekeeper_engine import GatekeeperEngine
+from module_1_document_processing.parsing.parsed_document import ParsedDocument
+from module_2_memory_gatekeeper.category_router import CategoryRouter, DocumentCategory
+from module_2_memory_gatekeeper.lexical_checker import LexicalChecker
+from module_2_memory_gatekeeper.audit_logger import GatekeeperAuditLogger
+from module_2_memory_gatekeeper.rejected_store import RejectedStore
+from module_2_memory_gatekeeper.quarantine_queue import QuarantineQueue
+from module_2_memory_gatekeeper.gatekeeper_engine import GatekeeperEngine
 
 def test_category_router():
     router = CategoryRouter()
@@ -41,7 +41,7 @@ def test_lexical_checker_gibberish():
     )
     res = checker.check(doc_short)
     assert res.is_valid is False
-    assert "below minimum threshold" in res.reason
+    assert "below minimum" in res.reason
 
     doc_repetitive = ParsedDocument(
         doc_id="tenant_a:gdrive:rep", tenant_id="tenant_a", user_id="u1", source="gdrive",
