@@ -20,6 +20,7 @@ import { AiTasks } from './pages/salemans/AiTasks';
 import { Workspace } from './pages/salemans/Workspace';
 import { Settings } from './pages/salemans/Settings';
 import { Support } from './pages/salemans/Support';
+import { Profile } from './pages/salemans/Profile';
 
 export const router = createBrowserRouter([
   {
@@ -131,6 +132,10 @@ export const router = createBrowserRouter([
       {
         path: 'workspace',
         element: <Workspace />,
+      },
+      {
+        path: 'profile',
+        element: <Profile />,
       },
       {
         path: 'settings',

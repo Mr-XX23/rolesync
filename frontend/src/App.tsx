@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { RouterProvider } from 'react-router-dom';
 import { router } from './router';
 import { ThemeProvider } from './components/ThemeProvider';
-import { ThemeToggle } from './components/ThemeToggle';
+import { ToastProvider } from './context/ToastContext';
 import { useAppDispatch, useAppSelector } from './store';
 import { checkSession, skipSessionCheck } from './store/authSlice';
 import { fetchProfile, fetchPreferences, fetchOnboarding } from './store/workspaceSlice';
@@ -55,10 +55,11 @@ const App = () => {
 
   return (
     <ThemeProvider>
-      <div className="relative min-h-screen bg-background text-foreground transition-colors duration-300">
-        <RouterProvider router={router} />
-        <ThemeToggle />
-      </div>
+      <ToastProvider>
+        <div className="relative min-h-screen bg-background text-foreground transition-colors duration-300">
+          <RouterProvider router={router} />
+        </div>
+      </ToastProvider>
     </ThemeProvider>
   );
 };

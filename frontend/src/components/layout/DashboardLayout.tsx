@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Outlet } from 'react-router-dom';
-import { Database, CheckSquare, Briefcase, Settings, HelpCircle, Plus, Share2 } from 'lucide-react';
+import { Database, CheckSquare, Briefcase, HelpCircle, Plus, Share2 } from 'lucide-react';
 import { Sidebar } from './Sidebar';
 import type { SidebarItem } from './Sidebar';
 import { Header } from './Header';
@@ -50,12 +50,6 @@ export const DashboardLayout: React.FC = () => {
             },
           ] as SidebarItem[],
           bottomItems: [
-            {
-              id: 'settings',
-              label: 'Settings',
-              icon: Settings,
-              path: '/salesman/settings',
-            },
             {
               id: 'support',
               label: 'Support',

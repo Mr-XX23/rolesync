@@ -10,5 +10,9 @@ py-eureka-client
 composio-core
 llama-index
 llama-parse
+pypdf
+python-docx
+openpyxl
 python-multipart
 clamd
+pymongo

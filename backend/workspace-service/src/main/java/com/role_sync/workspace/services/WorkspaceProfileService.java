@@ -12,6 +12,7 @@ import java.util.UUID;
 
 public interface WorkspaceProfileService {
     Mono<WorkspaceProfile> createOrUpdateProfile(WorkspaceProfileRequest request);
+    Mono<WorkspaceProfile> updateAvatarUrl(UUID authUserId, String avatarUrl);
     Mono<WorkspacePreferences> updatePreferences(UUID authUserId, PreferencesRequest request);
     Mono<OnboardingState> updateOnboardingStep(UUID authUserId, OnboardingStepRequest request);
     Mono<WorkspaceProfile> getProfile(UUID authUserId);

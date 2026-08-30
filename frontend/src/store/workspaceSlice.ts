@@ -3,11 +3,45 @@ import type { PayloadAction } from '@reduxjs/toolkit';
 import api from '../api/axiosInstance';
 
 export interface WorkspaceProfile {
-  profileId: string;
-  authUserId: string;
-  firstName: string;
-  lastName: string;
-  jobTitle: string;
+  profileId?: string;
+  authUserId?: string;
+  firstName?: string;
+  lastName?: string;
+  displayName?: string;
+  avatarUrl?: string;
+  jobTitle?: string;
+  department?: string;
+  organization?: string;
+  location?: string;
+  secondaryEmail?: string;
+  phoneNumber?: string;
+  education?: string;
+  expertise?: string;
+  skills?: string;
+  interests?: string;
+  hobbies?: string;
+  aiPersonaContext?: string;
+  communicationStyle?: string;
+  linkedinUrl?: string;
+  githubUrl?: string;
+  websiteUrl?: string;
+  facebookUrl?: string;
+  xUrl?: string;
+  instagramUrl?: string;
+  bio?: string;
+  dailyUpdateCount?: number;
+  updateWindowStart?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface WorkspaceItem {
+  workspaceId: string;
+  name: string;
+  description: string;
+  isActive: boolean;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface WorkspacePreferences {
@@ -28,6 +62,8 @@ interface WorkspaceState {
   profile: WorkspaceProfile | null;
   preferences: WorkspacePreferences | null;
   onboarding: OnboardingStateSchema | null;
+  workspaces: WorkspaceItem[];
+  currentWorkspace: WorkspaceItem | null;
   isLoading: boolean;
   error: string | null;
 }
@@ -36,6 +72,8 @@ const initialState: WorkspaceState = {
   profile: null,
   preferences: null,
   onboarding: null,
+  workspaces: [],
+  currentWorkspace: null,
   isLoading: false,
   error: null,
 };
@@ -56,19 +94,111 @@ export const fetchProfile = createAsyncThunk(
 
 export const updateProfile = createAsyncThunk(
   'workspace/updateProfile',
-  async (profileData: { firstName: string; lastName: string; jobTitle: string; authUserId: string }, { rejectWithValue }) => {
+  async (profileData: Partial<WorkspaceProfile> & { authUserId: string }, { rejectWithValue }) => {
     try {
       await api.post('/workspaces/profile', {
         auth_user_id: profileData.authUserId,
         first_name: profileData.firstName,
         last_name: profileData.lastName,
+        display_name: profileData.displayName,
+        avatar_url: profileData.avatarUrl,
         job_title: profileData.jobTitle,
+        department: profileData.department,
+        organization: profileData.organization,
+        location: profileData.location,
+        secondary_email: profileData.secondaryEmail,
+        phone_number: profileData.phoneNumber,
+        education: profileData.education,
+        expertise: profileData.expertise,
+        skills: profileData.skills,
+        interests: profileData.interests,
+        hobbies: profileData.hobbies,
+        ai_persona_context: profileData.aiPersonaContext,
+        communication_style: profileData.communicationStyle,
+        linkedin_url: profileData.linkedinUrl,
+        github_url: profileData.githubUrl,
+        website_url: profileData.websiteUrl,
+        facebook_url: profileData.facebookUrl,
+        x_url: profileData.xUrl,
+        instagram_url: profileData.instagramUrl,
+        bio: profileData.bio,
       });
       const profileRes = await api.get('/workspaces/profile');
       return profileRes.data as WorkspaceProfile;
     } catch (error: any) {
+      if (error.response?.status === 429) {
+        return rejectWithValue(
+          error.response?.data?.message || 'Profile update limit reached. You can only update your profile 2 times every 24 hours.'
+        );
+      }
       return rejectWithValue(
         error.response?.data?.message || 'Failed to update workspace profile'
+      );
+    }
+  }
+);
+
+export const uploadAvatar = createAsyncThunk(
+  'workspace/uploadAvatar',
+  async (file: File, { rejectWithValue }) => {
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const response = await api.post('/workspaces/profile/avatar', formData, {
+        headers: {
+          'Content-Type': undefined,
+        },
+      });
+      return response.data as { avatar_url: string; message: string };
+    } catch (error: any) {
+      return rejectWithValue(
+        error.response?.data?.message || 'Failed to upload profile photo'
+      );
+    }
+  }
+);
+
+export const uploadAvatarUrl = createAsyncThunk(
+  'workspace/uploadAvatarUrl',
+  async (url: string, { rejectWithValue }) => {
+    try {
+      const response = await api.post('/workspaces/profile/avatar/url', { url });
+      return response.data as { avatar_url: string; message: string };
+    } catch (error: any) {
+      return rejectWithValue(
+        error.response?.data?.message || 'Failed to process and save image from URL'
+      );
+    }
+  }
+);
+
+export const fetchWorkspaces = createAsyncThunk(
+  'workspace/fetchWorkspaces',
+  async (_, { rejectWithValue }) => {
+    try {
+      const response = await api.get('/workspaces');
+      return response.data as WorkspaceItem[];
+    } catch (error: any) {
+      return rejectWithValue(
+        error.response?.data?.message || 'Failed to fetch workspaces'
+      );
+    }
+  }
+);
+
+export const updateWorkspaceDetails = createAsyncThunk(
+  'workspace/updateWorkspaceDetails',
+  async ({ workspaceId, name, description }: { workspaceId: string; name: string; description: string }, { rejectWithValue }) => {
+    try {
+      const response = await api.put(`/workspaces/${workspaceId}`, {
+        name,
+        description,
+      });
+      return response.data as WorkspaceItem;
+    } catch (error: any) {
+      return rejectWithValue(
+        error.response?.data?.message || 'Failed to update workspace details'
       );
     }
   }
@@ -147,7 +277,12 @@ const workspaceSlice = createSlice({
       state.profile = null;
       state.preferences = null;
       state.onboarding = null;
+      state.workspaces = [];
+      state.currentWorkspace = null;
       state.error = null;
+    },
+    setCurrentWorkspace: (state, action: PayloadAction<WorkspaceItem>) => {
+      state.currentWorkspace = action.payload;
     },
   },
   extraReducers: (builder) => {
@@ -166,8 +301,61 @@ const workspaceSlice = createSlice({
         state.error = action.payload as string;
       })
       // updateProfile
+      .addCase(updateProfile.pending, (state) => {
+        state.isLoading = true;
+        state.error = null;
+      })
       .addCase(updateProfile.fulfilled, (state, action: PayloadAction<WorkspaceProfile>) => {
+        state.isLoading = false;
         state.profile = action.payload;
+      })
+      .addCase(updateProfile.rejected, (state, action) => {
+        state.isLoading = false;
+        state.error = action.payload as string;
+      })
+      // uploadAvatar
+      .addCase(uploadAvatar.pending, (state) => {
+        state.isLoading = true;
+        state.error = null;
+      })
+      .addCase(uploadAvatar.fulfilled, (state, action: PayloadAction<{ avatar_url: string; message: string }>) => {
+        state.isLoading = false;
+        if (state.profile) {
+          state.profile.avatarUrl = action.payload.avatar_url;
+        }
+      })
+      .addCase(uploadAvatar.rejected, (state, action) => {
+        state.isLoading = false;
+        state.error = action.payload as string;
+      })
+      // uploadAvatarUrl
+      .addCase(uploadAvatarUrl.pending, (state) => {
+        state.isLoading = true;
+        state.error = null;
+      })
+      .addCase(uploadAvatarUrl.fulfilled, (state, action: PayloadAction<{ avatar_url: string; message: string }>) => {
+        state.isLoading = false;
+        if (state.profile) {
+          state.profile.avatarUrl = action.payload.avatar_url;
+        }
+      })
+      .addCase(uploadAvatarUrl.rejected, (state, action) => {
+        state.isLoading = false;
+        state.error = action.payload as string;
+      })
+      // fetchWorkspaces
+      .addCase(fetchWorkspaces.fulfilled, (state, action: PayloadAction<WorkspaceItem[]>) => {
+        state.workspaces = action.payload;
+        if (action.payload.length > 0 && !state.currentWorkspace) {
+          state.currentWorkspace = action.payload[0];
+        }
+      })
+      // updateWorkspaceDetails
+      .addCase(updateWorkspaceDetails.fulfilled, (state, action: PayloadAction<WorkspaceItem>) => {
+        state.currentWorkspace = action.payload;
+        state.workspaces = state.workspaces.map((ws) =>
+          ws.workspaceId === action.payload.workspaceId ? action.payload : ws
+        );
       })
       // fetchPreferences
       .addCase(fetchPreferences.pending, (state) => {
@@ -206,5 +394,5 @@ const workspaceSlice = createSlice({
   },
 });
 
-export const { clearWorkspaceState } = workspaceSlice.actions;
+export const { clearWorkspaceState, setCurrentWorkspace } = workspaceSlice.actions;
 export default workspaceSlice.reducer;

@@ -2,9 +2,9 @@ package com.role_sync.workspace.controllers;
 
 import com.role_sync.workspace.dto.AddMemberRequest;
 import com.role_sync.workspace.dto.UpdateMemberRoleRequest;
+import com.role_sync.workspace.dto.WorkspaceMembershipResponse;
 import com.role_sync.workspace.dto.WorkspaceRequest;
-import com.role_sync.workspace.models.Workspace;
-import com.role_sync.workspace.models.WorkspaceMembership;
+import com.role_sync.workspace.dto.WorkspaceResponse;
 import com.role_sync.workspace.services.WorkspaceService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -26,7 +26,7 @@ public class WorkspaceController {
     private final WorkspaceService workspaceService;
 
     @PostMapping
-    public Mono<ResponseEntity<Workspace>> createWorkspace(
+    public Mono<ResponseEntity<WorkspaceResponse>> createWorkspace(
             @RequestHeader(value = "X-User-Id", required = false) String userIdHeader,
             @RequestHeader(value = "X-Auth-User-Id", required = false) String authUserIdHeader,
             @Valid @RequestBody WorkspaceRequest request) {
@@ -37,7 +37,7 @@ public class WorkspaceController {
     }
 
     @GetMapping
-    public Flux<Workspace> getWorkspaces(
+    public Flux<WorkspaceResponse> getWorkspaces(
             @RequestHeader(value = "X-User-Id", required = false) String userIdHeader,
             @RequestHeader(value = "X-Auth-User-Id", required = false) String authUserIdHeader) {
 
@@ -59,12 +59,24 @@ public class WorkspaceController {
     }
 
     @PutMapping("/{workspaceId}/members/{membershipId}/role")
-    public Mono<ResponseEntity<WorkspaceMembership>> updateMemberRole(
+    public Mono<ResponseEntity<WorkspaceMembershipResponse>> updateMemberRole(
             @PathVariable UUID workspaceId,
             @PathVariable UUID membershipId,
             @Valid @RequestBody UpdateMemberRoleRequest request) {
 
         return workspaceService.updateMemberRole(workspaceId, membershipId, request)
+                .map(ResponseEntity::ok);
+    }
+
+    @PutMapping("/{workspaceId}")
+    public Mono<ResponseEntity<WorkspaceResponse>> updateWorkspace(
+            @PathVariable UUID workspaceId,
+            @RequestHeader(value = "X-User-Id", required = false) String userIdHeader,
+            @RequestHeader(value = "X-Auth-User-Id", required = false) String authUserIdHeader,
+            @Valid @RequestBody WorkspaceRequest request) {
+
+        UUID authUserId = resolveAuthUserId(userIdHeader, authUserIdHeader);
+        return workspaceService.updateWorkspace(workspaceId, authUserId, request)
                 .map(ResponseEntity::ok);
     }
 

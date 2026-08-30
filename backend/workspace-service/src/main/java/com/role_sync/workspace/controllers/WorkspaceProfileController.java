@@ -6,11 +6,14 @@ import com.role_sync.workspace.dto.WorkspaceProfileRequest;
 import com.role_sync.workspace.models.OnboardingState;
 import com.role_sync.workspace.models.WorkspacePreferences;
 import com.role_sync.workspace.models.WorkspaceProfile;
+import com.role_sync.workspace.services.CloudinaryService;
 import com.role_sync.workspace.services.WorkspaceProfileService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.codec.multipart.FilePart;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.Mono;
@@ -24,6 +27,43 @@ import java.util.UUID;
 public class WorkspaceProfileController {
 
     private final WorkspaceProfileService workspaceProfileService;
+    private final CloudinaryService cloudinaryService;
+
+    @PostMapping(value = "/avatar", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public Mono<ResponseEntity<Map<String, Object>>> uploadAvatar(
+            @RequestPart("file") FilePart filePart,
+            @RequestHeader(value = "X-User-Id", required = false) String userIdHeader,
+            @RequestHeader(value = "X-Auth-User-Id", required = false) String authUserIdHeader) {
+        
+        UUID authUserId = resolveAuthUserId(userIdHeader, authUserIdHeader);
+        return cloudinaryService.uploadAvatar(filePart, authUserId.toString())
+                .flatMap(url -> workspaceProfileService.updateAvatarUrl(authUserId, url)
+                        .thenReturn(url))
+                .map(url -> ResponseEntity.ok(Map.of(
+                        "avatar_url", url,
+                        "message", "Profile photo uploaded successfully"
+                )));
+    }
+
+    @PostMapping("/avatar/url")
+    public Mono<ResponseEntity<Map<String, Object>>> uploadAvatarFromUrl(
+            @RequestBody Map<String, String> body,
+            @RequestHeader(value = "X-User-Id", required = false) String userIdHeader,
+            @RequestHeader(value = "X-Auth-User-Id", required = false) String authUserIdHeader) {
+        
+        UUID authUserId = resolveAuthUserId(userIdHeader, authUserIdHeader);
+        String url = body.get("url");
+        if (url == null || url.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Missing 'url' parameter in request body");
+        }
+        return cloudinaryService.uploadImageUrl(url, authUserId.toString())
+                .flatMap(hostedUrl -> workspaceProfileService.updateAvatarUrl(authUserId, hostedUrl)
+                        .thenReturn(hostedUrl))
+                .map(hostedUrl -> ResponseEntity.ok(Map.of(
+                        "avatar_url", hostedUrl,
+                        "message", "Image processed and saved successfully"
+                )));
+    }
 
     @PostMapping
     public Mono<ResponseEntity<Map<String, Object>>> createOrUpdateProfile(
