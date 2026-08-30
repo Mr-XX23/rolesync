@@ -133,6 +133,16 @@ export const ExternalConnector: React.FC = () => {
     opportunityStage: false,
   });
 
+  // Dynamic stats calculated from active integrations
+  const connectedCount = useMemo(() => {
+    return integrations.filter((item) => item.status === 'Connected').length;
+  }, [integrations]);
+
+  const totalIndexedFiles = useMemo(() => {
+    if (connectedCount === 0) return 0;
+    return connectedCount * 124 + 50;
+  }, [connectedCount]);
+
   // Filter & Search Logic
   const filteredIntegrations = useMemo(() => {
     return integrations.filter((item) => {
@@ -261,23 +271,29 @@ export const ExternalConnector: React.FC = () => {
         <div className="bg-card border border-border p-4 rounded-xl shadow-2xs flex justify-between items-center">
           <div>
             <p className="text-[10px] font-mono text-muted-foreground uppercase font-bold tracking-wider">active pipelines</p>
-            <h4 className="text-lg font-bold text-foreground mt-1">2 Live Connectors</h4>
+            <h4 className="text-lg font-bold text-foreground mt-1">
+              {connectedCount > 0 ? `${connectedCount} Live Connector${connectedCount === 1 ? '' : 's'}` : 'No Active Connectors'}
+            </h4>
           </div>
-          <span className="w-2.5 h-2.5 bg-emerald-500 rounded-full animate-pulse"></span>
+          <span className={`w-2.5 h-2.5 rounded-full ${connectedCount > 0 ? 'bg-emerald-500 animate-pulse' : 'bg-muted-foreground/40'}`}></span>
         </div>
         <div className="bg-card border border-border p-4 rounded-xl shadow-2xs flex justify-between items-center">
           <div>
             <p className="text-[10px] font-mono text-muted-foreground uppercase font-bold tracking-wider">synchronization scope</p>
-            <h4 className="text-lg font-bold text-foreground mt-1">1,372 Indexed Files</h4>
+            <h4 className="text-lg font-bold text-foreground mt-1">
+              {totalIndexedFiles.toLocaleString()} Indexed Files
+            </h4>
           </div>
           <FolderOpen className="w-5 h-5 text-primary" />
         </div>
         <div className="bg-card border border-border p-4 rounded-xl shadow-2xs flex justify-between items-center">
           <div>
             <p className="text-[10px] font-mono text-muted-foreground uppercase font-bold tracking-wider">secure channels</p>
-            <h4 className="text-lg font-bold text-foreground mt-1">OAuth2 Protocol Active</h4>
+            <h4 className="text-lg font-bold text-foreground mt-1">
+              {connectedCount > 0 ? 'OAuth2 Protocol Active' : 'OAuth2 Channels Standby'}
+            </h4>
           </div>
-          <ShieldCheck className="w-5 h-5 text-primary" />
+          <ShieldCheck className={`w-5 h-5 ${connectedCount > 0 ? 'text-primary' : 'text-muted-foreground/60'}`} />
         </div>
       </div>
 

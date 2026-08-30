@@ -14,12 +14,13 @@ class ConnectorService:
     def connect_source_with_auth(self, source: str, user_id: str) -> dict[str, Any]:
         source_lower = source.lower()
         
-        # Map frontend source names to Composio App names
+        # Map frontend source names to Composio Toolkit names
         app_map = {
             "gmail": "gmail",
-            "gdrive": "gdrive",
-            "google_drive": "gdrive",
-            "drive": "gdrive",
+            "gdrive": "googledrive",
+            "google_drive": "googledrive",
+            "googledrive": "googledrive",
+            "drive": "googledrive",
             "calendar": "googlecalendar",
             "gcalendar": "googlecalendar",
             "google_calendar": "googlecalendar",
@@ -48,7 +49,7 @@ class ConnectorService:
         source_lower = source.lower()
         if source_lower == "gmail":
             return self._client.create_gmail_trigger(user_id)
-        elif source_lower in ("gdrive", "google_drive", "drive"):
+        elif source_lower in ("gdrive", "google_drive", "drive", "googledrive"):
             return self._client.create_gdrive_trigger(user_id)
         elif source_lower in ("gcalendar", "google_calendar", "calendar"):
             return self._client.create_calendar_trigger(user_id)
