@@ -7,7 +7,7 @@ except ImportError:
     Composio = None
 
 class ComposioClient:
-    """Wrapper around Composio V3 SDK with OAuth Gateway redirect link generation."""
+    """Wrapper around Composio V3 SDK with OAuth Gateway redirect link generation, token lifecycle management, and webhook triggers."""
 
     GMAIL_NEW_MESSAGE = "GMAIL_NEW_GMAIL_MESSAGE"
     GDRIVE_FILE_CREATED = "GOOGLE_DRIVE_FILE_CREATED"
@@ -78,6 +78,41 @@ class ComposioClient:
         except Exception as err:
             print(f"[ComposioClient] Error initiating connection for {source}: {err}")
             return f"https://connect.composio.dev/link/{user_id}/{toolkit}"
+
+    def is_account_connected(self, user_id: str, source: str = "gmail") -> bool:
+        """Verifies if the user has an active OAuth authorization in Composio.
+        Composio manages token refreshes, access tokens, and expirations automatically."""
+        toolkit_map = {
+            "gmail": "gmail",
+            "gdrive": "googledrive",
+            "google_drive": "googledrive",
+            "googledrive": "googledrive",
+            "google_calendar": "googlecalendar",
+            "calendar": "googlecalendar",
+            "slack": "slack",
+            "notion": "notion",
+        }
+        toolkit = toolkit_map.get(source.lower(), source.lower())
+
+        if not self._composio:
+            return False
+
+        try:
+            accounts = self._composio.connected_accounts.list(user_ids=[user_id])
+            items = getattr(accounts, "items", accounts)
+            if not items and hasattr(accounts, "data"):
+                items = accounts.data
+            if items:
+                for acc in items:
+                    acc_app = getattr(acc, "toolkit", None) or getattr(acc, "app_unique_id", None) or (acc.get("toolkit") if isinstance(acc, dict) else None)
+                    acc_status = getattr(acc, "status", None) or (acc.get("status") if isinstance(acc, dict) else None)
+                    if (acc_app == toolkit or not acc_app) and acc_status in ("ACTIVE", "CONNECTED", "INITIATED"):
+                        print(f"[ComposioClient] Verified active OAuth connection for user_id={user_id}, source={source}, status={acc_status}")
+                        return True
+            return False
+        except Exception as err:
+            print(f"[ComposioClient] Could not verify OAuth status from Composio API: {err}")
+            return False
 
     def enable_trigger(self, trigger_slug: str, user_id: str) -> str:
         if not self._composio:

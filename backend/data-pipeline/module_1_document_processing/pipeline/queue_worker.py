@@ -11,7 +11,7 @@ from module_2_memory_gatekeeper.gatekeeper_engine import GatekeeperEngine
 from module_3_batch_ingestion_vector.ingestion_pipeline import BatchIngestionPipeline
 
 class QueueWorker:
-    """Asynchronous Queue Worker for offloading incoming webhooks to the staging, parsing, gatekeeper, ingestion, deletion & ACL sync pipeline."""
+    """Asynchronous Queue Worker for offloading incoming webhooks and backfill items to the staging, parsing, gatekeeper, ingestion, deletion & ACL sync pipeline."""
 
     def __init__(
         self,
@@ -97,14 +97,14 @@ class QueueWorker:
         # 2. Stage Event Lineage
         self.store.record_event(sanitized_event, status="STAGED")
 
-        # 3. Document Parsing
+        # 3. Document Parsing (Supports SUCCESS and PARTIAL_SUCCESS with skipped oversized attachments)
         parsed_doc = self.parser_service.parse_event(sanitized_event)
-        if parsed_doc.parse_status != "SUCCESS":
+        if parsed_doc.parse_status not in ("SUCCESS", "PARTIAL_SUCCESS"):
             print(f"[QueueWorker] Parsing failed for doc_id={doc_id}: status={parsed_doc.parse_status}")
             self.store.record_event(sanitized_event, status="PARSED_FAILED")
             return
 
-        print(f"[QueueWorker] Parsed doc_id={doc_id} using '{parsed_doc.parser_used}' (Status: SUCCESS, Content length: {len(parsed_doc.text_content)})")
+        print(f"[QueueWorker] Parsed doc_id={doc_id} using '{parsed_doc.parser_used}' (Status: {parsed_doc.parse_status}, Content length: {len(parsed_doc.text_content)})")
         self.store.record_event(sanitized_event, status="PARSED_SUCCESS")
 
         # 4. Memory Gatekeeper Evaluation
