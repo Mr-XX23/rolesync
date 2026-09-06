@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Sliders, Layers, X, AlertCircle } from 'lucide-react';
+import { Sliders, Layers, X, AlertCircle, Clock } from 'lucide-react';
 import { Button } from '../../../components/common/Button';
 
 export interface CategoryOption {
@@ -12,6 +12,7 @@ export interface ConnectorConfigModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSave: (maxItems: number, categories: string[], syncFreq?: string) => Promise<void>;
+  onOpenAutoSyncModal?: () => void;
   connectorId: string;
   connectorName: string;
   logoUrl?: string;
@@ -19,6 +20,7 @@ export interface ConnectorConfigModalProps {
   initialCategories?: string[];
   initialSyncFreq?: string;
   isLocked?: boolean;
+  isInitialSync?: boolean;
 }
 
 const CONNECTOR_CATEGORIES: Record<string, { label: string; itemNoun: string; options: CategoryOption[] }> = {
@@ -83,13 +85,15 @@ export const ConnectorConfigModal: React.FC<ConnectorConfigModalProps> = ({
   isOpen,
   onClose,
   onSave,
+  onOpenAutoSyncModal,
   connectorId,
   connectorName,
   logoUrl,
   initialMaxItems = 10,
   initialCategories = [],
-  initialSyncFreq = '30m',
+  initialSyncFreq = 'off',
   isLocked = false,
+  isInitialSync = false,
 }) => {
   const meta = CONNECTOR_CATEGORIES[connectorId.toLowerCase()] || CONNECTOR_CATEGORIES.gmail;
 
@@ -98,8 +102,7 @@ export const ConnectorConfigModal: React.FC<ConnectorConfigModalProps> = ({
   const [selectedCategories, setSelectedCategories] = useState<string[]>(
     initialCategories.length > 0 ? initialCategories : [defaultCategory]
   );
-  const [syncFreq, setSyncFreq] = useState<string>(initialSyncFreq);
-  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+  const syncFreq = initialSyncFreq;
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   if (!isOpen) return null;
@@ -126,15 +129,12 @@ export const ConnectorConfigModal: React.FC<ConnectorConfigModalProps> = ({
       setErrorMsg('Cannot modify configuration while synchronization is actively in progress.');
       return;
     }
-    setIsSubmitting(true);
     setErrorMsg(null);
+    onClose();
     try {
       await onSave(maxItems, selectedCategories, syncFreq);
-      onClose();
     } catch (err: any) {
-      setErrorMsg(err?.response?.data?.detail || err?.message || 'Failed to save configuration.');
-    } finally {
-      setIsSubmitting(false);
+      console.error('[ConnectorConfigModal] Save error:', err);
     }
   };
 
@@ -270,34 +270,49 @@ export const ConnectorConfigModal: React.FC<ConnectorConfigModalProps> = ({
             </div>
           </div>
 
-          {/* Setting 3: Sync Frequency Option */}
-          <div className="space-y-2">
-            <label className="text-xs font-bold text-foreground">
-              Synchronization Schedule
-            </label>
-            <select
-              value={syncFreq}
-              disabled={isLocked}
-              onChange={(e) => setSyncFreq(e.target.value)}
-              className="w-full bg-background border border-border rounded-xl p-2.5 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-primary cursor-pointer disabled:opacity-50"
-            >
-              <option value="realtime">Real-time Webhook (Instant indexing on change)</option>
-              <option value="30m">30-Minute Auto-Sync Interval</option>
-              <option value="hourly">Hourly Interval Scrape</option>
-              <option value="daily">Daily Cron Sequence (02:00 AM)</option>
-            </select>
+          {/* Setting 3: Auto-Sync Schedule Notice & Action */}
+          <div className="p-3.5 rounded-xl bg-muted/20 border border-border/80 flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <Clock className="w-4 h-4 text-primary shrink-0" />
+              <div>
+                <p className="text-xs font-bold text-foreground">Auto-Sync Cadence: {syncFreq.toUpperCase()}</p>
+                <p className="text-[11px] text-muted-foreground">
+                  {isInitialSync
+                    ? 'Automated background intervals can be configured once initial synchronization completes.'
+                    : 'Automated background intervals are configured via the dedicated schedule menu.'}
+                </p>
+              </div>
+            </div>
+            {onOpenAutoSyncModal && (
+              <button
+                type="button"
+                disabled={isInitialSync || isLocked}
+                onClick={() => {
+                  if (!isInitialSync && !isLocked) {
+                    onClose();
+                    onOpenAutoSyncModal();
+                  }
+                }}
+                className={`text-xs font-bold shrink-0 ml-2 transition-all ${
+                  isInitialSync || isLocked
+                    ? 'text-muted-foreground/40 cursor-not-allowed'
+                    : 'text-primary hover:underline cursor-pointer'
+                }`}
+                title={isInitialSync ? 'Schedule changes will be available after initial sync completes' : undefined}
+              >
+                Change Schedule →
+              </button>
+            )}
           </div>
 
           {/* Bottom Actions */}
           <div className="pt-4 flex justify-end gap-2 border-t border-border/60">
-            <Button variant="outline" type="button" onClick={onClose} disabled={isSubmitting}>
+            <Button variant="outline" type="button" onClick={onClose}>
               Cancel
             </Button>
             <Button
               variant="primary"
               type="submit"
-              isLoading={isSubmitting}
-              loadingText="Saving & Starting..."
               disabled={isLocked || selectedCategories.length === 0}
             >
               Save & Start Synchronization

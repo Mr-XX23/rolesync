@@ -1,6 +1,7 @@
 import { createBrowserRouter, Navigate } from 'react-router-dom';
 import Signin from './pages/auth/Signin';
 import OAuthCallback from './pages/auth/OAuthCallback';
+import { ConnectorOAuthCallback } from './pages/salemans/externalConnector/ConnectorOAuthCallback';
 import Passwordreset from './pages/auth/Passwordreset';
 import Changepassword from './pages/auth/Changepassword';
 import Register from './pages/auth/Register';
@@ -38,6 +39,10 @@ export const router = createBrowserRouter([
   {
     path: '/auth/callback',
     element: <OAuthCallback />,
+  },
+  {
+    path: '/connectors/callback',
+    element: <ConnectorOAuthCallback />,
   },
   {
     path: '/login',

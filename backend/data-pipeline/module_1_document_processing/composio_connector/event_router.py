@@ -10,18 +10,25 @@ class EventRouter:
     """Routes incoming raw webhook payloads to their respective source normalizers."""
 
     def route_payload(self, payload: dict[str, Any], tenant_id: str = "tenant_default") -> CanonicalEvent | None:
-        metadata = payload.get("metadata", {})
-        trigger_slug = metadata.get("trigger_slug", "")
+        metadata = payload.get("metadata", {}) if isinstance(payload.get("metadata"), dict) else {}
+        trigger_slug = (
+            metadata.get("trigger_slug", "")
+            or payload.get("trigger_slug", "")
+            or payload.get("trigger_name", "")
+            or payload.get("type", "")
+            or payload.get("toolkit_slug", "")
+        )
 
-        if trigger_slug.startswith("GMAIL_"):
+        slug_upper = str(trigger_slug).upper()
+        if slug_upper.startswith("GMAIL_") or "GMAIL" in slug_upper:
             return normalize_gmail(payload, tenant_id)
-        elif trigger_slug.startswith("GOOGLE_DRIVE_") or "DRIVE" in trigger_slug:
+        elif slug_upper.startswith("GOOGLE_DRIVE_") or "DRIVE" in slug_upper:
             return normalize_gdrive(payload, tenant_id)
-        elif trigger_slug.startswith("GOOGLE_CALENDAR_") or "CALENDAR" in trigger_slug:
+        elif slug_upper.startswith("GOOGLE_CALENDAR_") or "CALENDAR" in slug_upper:
             return normalize_calendar(payload, tenant_id)
-        elif trigger_slug.startswith("SLACK_") or "SLACK" in trigger_slug:
+        elif slug_upper.startswith("SLACK_") or "SLACK" in slug_upper:
             return normalize_slack(payload, tenant_id)
-        elif trigger_slug.startswith("NOTION_") or "NOTION" in trigger_slug:
+        elif slug_upper.startswith("NOTION_") or "NOTION" in slug_upper:
             return normalize_notion(payload, tenant_id)
 
         return None

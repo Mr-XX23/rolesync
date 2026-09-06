@@ -23,6 +23,7 @@ class BatchIngestionPipeline:
         self.delta_checker = delta_checker or DeltaChecker()
         self.embedding_worker = embedding_worker or EmbeddingWorker()
         self.bulk_writer = bulk_writer or BulkWriter(delta_checker=self.delta_checker)
+        self.vector_store = self.bulk_writer.vector_store
         self.checkpoint_store = checkpoint_store or CheckpointStore()
         self.dlq = dlq or DeadLetterQueue()
 

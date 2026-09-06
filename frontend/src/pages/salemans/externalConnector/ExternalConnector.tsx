@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import {
   FolderOpen,
   FileText,
@@ -17,16 +17,17 @@ import {
   Calendar as CalendarIcon,
   Mail as MailIcon,
   Activity,
-  RotateCcw,
   Clock,
   CheckCircle2,
 } from 'lucide-react';
 import { Button } from '../../../components/common/Button';
 import { Input } from '../../../components/common/Input';
 import { useAppSelector } from '../../../store';
+import { useToast } from '../../../context/ToastContext';
 import { connectorApi, type GmailConnectionDetails } from '../../../api/connectorApi';
 import { ConnectorConfigModal } from './ConnectorConfigModal';
 import { GmailSyncActivityModal } from './GmailSyncActivityModal';
+import { AutoSyncModal } from './AutoSyncModal';
 
 interface Integration {
   id: string;
@@ -39,6 +40,8 @@ interface Integration {
   bgColor: string;
   details: string;
   syncFrequency: string;
+  autoSyncEnabled?: boolean;
+  webhookEnabled?: boolean;
   syncCaptured: number;
   syncSuccess: number;
   syncSkipped: number;
@@ -58,10 +61,23 @@ export const isConnectedState = (status: string) => {
   ].includes(status);
 };
 
-const getInitialConnectorState = (id: string, defaultStatus: Integration['status'] = 'Available', defaultCaptured = 0): {
+export const isAuthorizedState = (status: string) => {
+  return [
+    'Configuration Required',
+    'Connected',
+    'Syncing',
+    'Waiting for Next Auto Sync',
+    'Up to Date',
+    'Partial Success',
+  ].includes(status);
+};
+
+const getInitialConnectorState = (id: string, defaultStatus: Integration['status'] = 'Available'): {
   status: Integration['status'];
   currentProgress: string;
   syncFrequency: string;
+  autoSyncEnabled: boolean;
+  webhookEnabled: boolean;
   syncCaptured: number;
   details: any;
 } => {
@@ -70,12 +86,25 @@ const getInitialConnectorState = (id: string, defaultStatus: Integration['status
     const isConnectedFlag = localStorage.getItem(`rolesync_${id}_connected`) === 'true';
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (parsed?.status) {
-        const captured = parsed.backfill_state?.total_synced_so_far ?? defaultCaptured;
+      if (parsed?.status && parsed.status !== 'Disconnected') {
+        const captured = parsed.backfill_state?.total_synced_so_far ?? 0;
+        const autoEnabled = parsed.config?.auto_sync_enabled ?? false;
+        const webhookActive = parsed.config?.webhook_enabled ?? false;
+        let freq = 'OFF';
+        if (autoEnabled && (parsed.config?.auto_sync_interval_minutes || 0) > 0) {
+          const mins = parsed.config.auto_sync_interval_minutes;
+          if (mins === 1440) freq = '24H (2 AM)';
+          else if (mins === 360) freq = '6H AUTO';
+          else if (mins === 60) freq = '1H AUTO';
+          else if (mins === 2) freq = '2M AUTO';
+          else freq = `${mins}M AUTO`;
+        }
         return {
           status: parsed.status as any,
           currentProgress: parsed.current_progress || '',
-          syncFrequency: parsed.backfill_state?.is_backfill_complete ? 'REALTIME' : `${parsed.config?.auto_sync_interval_minutes || 30}M AUTO`,
+          syncFrequency: freq,
+          autoSyncEnabled: autoEnabled,
+          webhookEnabled: webhookActive,
           syncCaptured: captured,
           details: parsed,
         };
@@ -85,8 +114,10 @@ const getInitialConnectorState = (id: string, defaultStatus: Integration['status
       return {
         status: 'Connected',
         currentProgress: '',
-        syncFrequency: 'REALTIME',
-        syncCaptured: defaultCaptured || 20,
+        syncFrequency: 'OFF',
+        autoSyncEnabled: false,
+        webhookEnabled: false,
+        syncCaptured: 0,
         details: null,
       };
     }
@@ -96,23 +127,26 @@ const getInitialConnectorState = (id: string, defaultStatus: Integration['status
   return {
     status: defaultStatus,
     currentProgress: '',
-    syncFrequency: 'REALTIME',
-    syncCaptured: defaultCaptured,
+    syncFrequency: 'OFF',
+    autoSyncEnabled: false,
+    webhookEnabled: false,
+    syncCaptured: 0,
     details: null,
   };
 };
 
 export const ExternalConnector: React.FC = () => {
+  const toast = useToast();
   const { user } = useAppSelector((state) => state.auth);
   const activeUserId = user?.userId || user?.email || 'usr_active';
 
-  const initialGmail = getInitialConnectorState('gmail', 'Available', 20);
-  const initialGDrive = getInitialConnectorState('gdrive', 'Connected', 124);
-  const initialCalendar = getInitialConnectorState('calendar', 'Available', 45);
-  const initialSlack = getInitialConnectorState('slack', 'Available', 82);
-  const initialNotion = getInitialConnectorState('notion', 'Available', 36);
+  const initialGmail = getInitialConnectorState('gmail', 'Available');
+  const initialGDrive = getInitialConnectorState('gdrive', 'Available');
+  const initialCalendar = getInitialConnectorState('calendar', 'Available');
+  const initialSlack = getInitialConnectorState('slack', 'Available');
+  const initialNotion = getInitialConnectorState('notion', 'Available');
 
-  // Active Real Connectors List (Gmail, GDrive, Google Calendar, Slack, Notion)
+  // Real Production Connectors (Gmail, Google Drive, Google Calendar, Slack, Notion)
   const [integrations, setIntegrations] = useState<Integration[]>([
     {
       id: 'gmail',
@@ -126,8 +160,8 @@ export const ExternalConnector: React.FC = () => {
       details: 'Sync inbox messages, customer correspondence threads, and attachments.',
       syncFrequency: initialGmail.syncFrequency,
       syncCaptured: initialGmail.syncCaptured,
-      syncSuccess: 18,
-      syncSkipped: 2,
+      syncSuccess: initialGmail.syncCaptured,
+      syncSkipped: 0,
       syncFailed: 0,
       logoUrl: 'https://res.cloudinary.com/dkmhskfmq/image/upload/v1787482194/gmail.svg',
       currentProgress: initialGmail.currentProgress,
@@ -139,12 +173,12 @@ export const ExternalConnector: React.FC = () => {
       status: initialGDrive.status,
       description: 'Automated document synchronization to index spreadsheets, contract PDFs, and slides into your vector workspace.',
       icon: FolderOpen,
-      iconColor: 'text-emerald-600 dark:text-emerald-400',
-      bgColor: 'bg-emerald-50 dark:bg-emerald-950/30 border-emerald-200/50 dark:border-emerald-800/30',
-      details: 'Auto-sync from specified folders. Active indexing enabled: 124 files verified.',
+      iconColor: 'text-blue-500',
+      bgColor: 'bg-blue-50 dark:bg-blue-950/30 border-blue-200/50 dark:border-blue-800/30',
+      details: 'Sync team spreadsheets, presentation slides, and shared documents.',
       syncFrequency: initialGDrive.syncFrequency,
       syncCaptured: initialGDrive.syncCaptured,
-      syncSuccess: 124,
+      syncSuccess: initialGDrive.syncCaptured,
       syncSkipped: 0,
       syncFailed: 0,
       logoUrl: 'https://res.cloudinary.com/dkmhskfmq/image/upload/v1787482194/google-drive.svg',
@@ -154,38 +188,38 @@ export const ExternalConnector: React.FC = () => {
       name: 'Google Calendar',
       category: 'Productivity',
       status: initialCalendar.status,
-      description: 'Sync meeting schedules, event agendas, attendee notes, and recurring calendar appointments.',
+      description: 'Synchronize client demos, recurring sales reviews, and meeting agenda transcripts into contextual memory.',
       icon: CalendarIcon,
-      iconColor: 'text-blue-500',
-      bgColor: 'bg-blue-50 dark:bg-blue-950/30 border-blue-200/50 dark:border-blue-800/30',
-      details: 'Sync calendar event titles, attendee lists, descriptions, and recurring schedules.',
+      iconColor: 'text-emerald-500',
+      bgColor: 'bg-emerald-50 dark:bg-emerald-950/30 border-emerald-200/50 dark:border-emerald-800/30',
+      details: 'Sync scheduled calls, customer meet notes, and calendar events.',
       syncFrequency: initialCalendar.syncFrequency,
       syncCaptured: initialCalendar.syncCaptured,
-      syncSuccess: 45,
+      syncSuccess: initialCalendar.syncCaptured,
       syncSkipped: 0,
       syncFailed: 0,
-      logoUrl: 'https://res.cloudinary.com/dkmhskfmq/image/upload/v1787482194/google-calendar.svg',
+      logoUrl: 'https://res.cloudinary.com/dkmhskfmq/image/upload/v1787482184/google-calendar.svg',
     },
     {
       id: 'slack',
-      name: 'Slack channels',
+      name: 'Slack',
       category: 'Communication',
       status: initialSlack.status,
-      description: 'Calibrate companion agents on chat transcripts, support logs, and historical feedback loops.',
+      description: 'Capture inbound lead threads, sales alerts, and internal channel problem-solving discussions into vector context.',
       icon: SlackIcon,
-      iconColor: 'text-purple-600 dark:text-purple-400',
-      bgColor: 'bg-purple-50 dark:bg-purple-950/30 border-purple-200/50 dark:border-purple-800/30',
-      details: 'Ingest public channels and support logs.',
+      iconColor: 'text-amber-500',
+      bgColor: 'bg-amber-50 dark:bg-amber-950/30 border-amber-200/50 dark:border-amber-800/30',
+      details: 'Sync public discussions, deal discussions, and client support channels.',
       syncFrequency: initialSlack.syncFrequency,
       syncCaptured: initialSlack.syncCaptured,
-      syncSuccess: 80,
-      syncSkipped: 2,
+      syncSuccess: initialSlack.syncCaptured,
+      syncSkipped: 0,
       syncFailed: 0,
       logoUrl: 'https://res.cloudinary.com/dkmhskfmq/image/upload/v1787482194/slack.svg',
     },
     {
       id: 'notion',
-      name: 'Notion Workspace',
+      name: 'Notion',
       category: 'Productivity',
       status: initialNotion.status,
       description: 'Map internal wikis, database boards, and procedural guidepages directly into Legacydb context embeddings.',
@@ -195,7 +229,7 @@ export const ExternalConnector: React.FC = () => {
       details: 'Sync workspace directories, page trees, and markdown blocks.',
       syncFrequency: initialNotion.syncFrequency,
       syncCaptured: initialNotion.syncCaptured,
-      syncSuccess: 36,
+      syncSuccess: initialNotion.syncCaptured,
       syncSkipped: 0,
       syncFailed: 0,
       logoUrl: 'https://res.cloudinary.com/dkmhskfmq/image/upload/v1787482194/notion.svg',
@@ -206,49 +240,133 @@ export const ExternalConnector: React.FC = () => {
   const [activeTab, setActiveTab] = useState<string>('All');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [activeConfigConnector, setActiveConfigConnector] = useState<Integration | null>(null);
+  const [activeAutoSyncConnector, setActiveAutoSyncConnector] = useState<Integration | null>(null);
+  const [selectedActivityConnector, setSelectedActivityConnector] = useState<Integration | null>(null);
   const [showActivityModal, setShowActivityModal] = useState<boolean>(false);
   const [showEnterpriseModal, setShowEnterpriseModal] = useState<boolean>(false);
 
   const [gmailDetails, setGmailDetails] = useState<GmailConnectionDetails | null>(initialGmail.details);
+  const [allConnections, setAllConnections] = useState<Record<string, any>>({});
   const [lockNotice, setLockNotice] = useState<string | null>(null);
 
   // Connection Simulation States
   const [connectingId, setConnectingId] = useState<string | null>(null);
   const [disconnectingId, setDisconnectingId] = useState<string | null>(null);
+  const [isDisconnecting, setIsDisconnecting] = useState<boolean>(false);
   const [activeSyncingId, setActiveSyncingId] = useState<string | null>(null);
+
+  // Popup and OAuth Event Listeners Ref
+  const oauthPopupRef = useRef<Window | null>(null);
+  const popupWatcherRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const hasHandledAuthSuccessRef = useRef<boolean>(false);
 
   // Form State inside modals
   const [enterpriseDatabase, setEnterpriseDatabase] = useState<string>('');
   const [enterpriseMessage, setEnterpriseMessage] = useState<string>('');
   const [isSubmittingEnterprise, setIsSubmittingEnterprise] = useState<boolean>(false);
 
-  // Fetch real Gmail status from backend
-  const fetchGmailStatus = async () => {
+  // Helper to open a centered OAuth popup window
+  const openOAuthPopup = (url: string, title: string = 'RoleSync Connector Authorization') => {
+    const width = 600;
+    const height = 700;
+    const left = window.screenX + (window.outerWidth - width) / 2;
+    const top = window.screenY + (window.outerHeight - height) / 2;
+
+    if (oauthPopupRef.current && !oauthPopupRef.current.closed) {
+      oauthPopupRef.current.focus();
+      return oauthPopupRef.current;
+    }
+
+    const popup = window.open(
+      url,
+      title,
+      `width=${width},height=${height},left=${left},top=${top},scrollbars=yes,status=yes,resizable=yes`
+    );
+    oauthPopupRef.current = popup;
+    return popup;
+  };
+
+  // Fetch real status for ALL 5 connectors from backend
+  const fetchAllConnectorsStatus = async () => {
     try {
-      const res = await connectorApi.getGmailStatus(activeUserId);
-      if (res?.connection) {
-        setGmailDetails(res.connection);
-        localStorage.setItem('rolesync_gmail_connection', JSON.stringify(res.connection));
-        const gConn = res.connection;
-        const isConnectedBackend = isConnectedState(gConn.status);
-        if (isConnectedBackend) {
-          localStorage.setItem('rolesync_gmail_connected', 'true');
+      const res = await connectorApi.getAllConnectorsStatus(activeUserId);
+      if (res?.connections) {
+        const conns = res.connections;
+        setAllConnections(conns);
+
+        const gConn = conns.gmail;
+        if (gConn) {
+          setGmailDetails(gConn);
+          if (isConnectedState(gConn.status)) {
+            localStorage.setItem('rolesync_gmail_connection', JSON.stringify(gConn));
+            localStorage.setItem('rolesync_gmail_connected', 'true');
+          } else if (gConn.status === 'Disconnected') {
+            localStorage.removeItem('rolesync_gmail_connection');
+            localStorage.removeItem('rolesync_gmail_connected');
+          }
         }
 
-        const totalCaptured = gConn.backfill_state?.total_synced_so_far ?? 20;
+        const gdConn = conns.gdrive;
+        if (gdConn) {
+          if (isConnectedState(gdConn.status)) {
+            localStorage.setItem('rolesync_gdrive_connection', JSON.stringify(gdConn));
+            localStorage.setItem('rolesync_gdrive_connected', 'true');
+          } else if (gdConn.status === 'Disconnected') {
+            localStorage.removeItem('rolesync_gdrive_connection');
+            localStorage.removeItem('rolesync_gdrive_connected');
+          }
+        }
+
 
         setIntegrations((prev) =>
           prev.map((item) => {
-            if (item.id === 'gmail') {
+            const liveConn = conns[item.id];
+            if (liveConn) {
+              const isConn = isConnectedState(liveConn.status);
+              const captured = liveConn.backfill_state?.total_synced_so_far ?? liveConn.sync_captured ?? 0;
+              
+              // Clear local syncing lock if backend has completed sync
+              if (activeSyncingId === item.id && liveConn.status !== 'Syncing' && !liveConn.lock?.is_locked) {
+                setActiveSyncingId(null);
+              }
+
+              // Determine formatted sync frequency label
+              let freqDisplay = 'OFF';
+              const autoEnabled = liveConn.config?.auto_sync_enabled ?? false;
+              const webhookActive = liveConn.config?.webhook_enabled ?? false;
+
+              if ((isConn || liveConn.status === 'Configuration Required') && autoEnabled) {
+                const interval = liveConn.config?.auto_sync_interval_minutes;
+                const freqStr = (liveConn.config?.sync_frequency || liveConn.sync_frequency || '').toLowerCase();
+                if (freqStr === 'off' || interval === 0) {
+                  freqDisplay = 'OFF';
+                } else if (freqStr === '24h' || interval === 1440) {
+                  freqDisplay = '24H (2 AM)';
+                } else if (freqStr === '6h' || interval === 360) {
+                  freqDisplay = '6H AUTO';
+                } else if (freqStr === '1h' || interval === 60) {
+                  freqDisplay = '1H AUTO';
+                } else if (freqStr === '2m' || interval === 2) {
+                  freqDisplay = '2M AUTO';
+                } else if (freqStr === '30m' || interval === 30) {
+                  freqDisplay = '30M AUTO';
+                } else if (interval && interval > 0) {
+                  freqDisplay = `${interval}M AUTO`;
+                } else {
+                  freqDisplay = 'OFF';
+                }
+              }
+
               return {
                 ...item,
-                status: gConn.status as any,
-                currentProgress: gConn.current_progress || '',
-                isLocked: gConn.lock?.is_locked || false,
-                syncCaptured: totalCaptured,
-                syncFrequency: gConn.backfill_state?.is_backfill_complete
-                  ? 'REALTIME'
-                  : `${gConn.config?.auto_sync_interval_minutes || 30}M AUTO`,
+                status: liveConn.status as any,
+                currentProgress: liveConn.current_progress || '',
+                isLocked: liveConn.lock?.is_locked || liveConn.is_locked || false,
+                syncCaptured: captured,
+                syncSuccess: captured,
+                syncFrequency: freqDisplay,
+                autoSyncEnabled: autoEnabled,
+                webhookEnabled: webhookActive,
               };
             }
             return item;
@@ -256,15 +374,84 @@ export const ExternalConnector: React.FC = () => {
         );
       }
     } catch (err) {
-      console.warn('[ExternalConnector] Could not poll Gmail status:', err);
+      console.warn('[ExternalConnector] Could not poll all connectors status:', err);
     }
   };
 
-  // Poll status periodically
+  // Listen for OAuth completion from popup callback window
   useEffect(() => {
-    fetchGmailStatus();
+    const handleAuthMessage = async (event: MessageEvent) => {
+      if (event.data?.type === 'ROLESYNC_CONNECTOR_AUTH_SUCCESS') {
+        if (hasHandledAuthSuccessRef.current) return;
+        hasHandledAuthSuccessRef.current = true;
+
+        let rawSource = (
+          event.data.source ||
+          sessionStorage.getItem('rolesync_oauth_connecting_source') ||
+          localStorage.getItem('rolesync_oauth_connecting_source') ||
+          connectingId ||
+          ''
+        ).toLowerCase().trim();
+
+        if (rawSource === 'googledrive' || rawSource === 'google_drive') {
+          rawSource = 'gdrive';
+        } else if (rawSource === 'googlecalendar' || rawSource === 'google_calendar') {
+          rawSource = 'calendar';
+        }
+
+        const sourceId = rawSource || 'gdrive';
+        console.log(`[Frontend] Received OAuth authorization success for ${sourceId}`);
+
+        sessionStorage.removeItem('rolesync_oauth_connecting_source');
+        localStorage.removeItem('rolesync_oauth_connecting_source');
+
+        // 1. Clean up popup & polling watcher
+        if (popupWatcherRef.current) {
+          clearInterval(popupWatcherRef.current);
+          popupWatcherRef.current = null;
+        }
+        if (oauthPopupRef.current && !oauthPopupRef.current.closed) {
+          oauthPopupRef.current.close();
+        }
+        oauthPopupRef.current = null;
+        setConnectingId(null);
+
+        // 2. Immediately reflect post-authorization state in UI and fetch latest backend status
+        setIntegrations((prev) =>
+          prev.map((c) => (c.id === sourceId ? { ...c, status: 'Configuration Required' } : c))
+        );
+        await fetchAllConnectorsStatus();
+
+        // 3. Open Configuration Modal for the specific authorized connector
+        const matchedItem = integrations.find((i) => i.id === sourceId);
+        if (matchedItem) {
+          setActiveConfigConnector({
+            ...matchedItem,
+            status: 'Configuration Required',
+          });
+          toast.success(
+            `${matchedItem.name} connected successfully! Please choose your synchronization preferences.`,
+            'Authorization Complete'
+          );
+        }
+      }
+    };
+
+
+    window.addEventListener('message', handleAuthMessage);
+    return () => {
+      window.removeEventListener('message', handleAuthMessage);
+      if (popupWatcherRef.current) {
+        clearInterval(popupWatcherRef.current);
+      }
+    };
+  }, [connectingId, integrations]);
+
+  // Poll status periodically for all connectors
+  useEffect(() => {
+    fetchAllConnectorsStatus();
     const interval = setInterval(() => {
-      fetchGmailStatus();
+      fetchAllConnectorsStatus();
     }, 4000);
     return () => clearInterval(interval);
   }, [activeUserId]);
@@ -298,32 +485,107 @@ export const ExternalConnector: React.FC = () => {
     });
   }, [integrations, activeTab, searchQuery]);
 
-  // Connect Source via API Gateway
+  // Connect Source via API Gateway & Composio OAuth with Popup
   const handleToggleConnection = async (item: Integration) => {
     const { id, status: currentStatus } = item;
 
     if (id === 'gmail') {
       if (currentStatus === 'Available' || currentStatus === 'Disconnected') {
+        hasHandledAuthSuccessRef.current = false;
         setConnectingId('gmail');
+        sessionStorage.setItem('rolesync_oauth_connecting_source', 'gmail');
+        localStorage.setItem('rolesync_oauth_connecting_source', 'gmail');
         try {
-          const res = await connectorApi.connectSource('gmail', activeUserId);
-          localStorage.setItem('rolesync_gmail_connected', 'true');
+          const callbackUrl = `${window.location.origin}/connectors/callback?source=gmail`;
+          const res = await connectorApi.connectSource('gmail', activeUserId, callbackUrl);
+
           if (res.redirect_url) {
-            window.open(res.redirect_url, '_blank');
+            const popup = openOAuthPopup(res.redirect_url);
+
+            // Start polling watcher to detect popup closure or completion fallback
+            if (popupWatcherRef.current) clearInterval(popupWatcherRef.current);
+            let pollCount = 0;
+            popupWatcherRef.current = setInterval(async () => {
+              pollCount += 1;
+              if (!popup || popup.closed) {
+                if (popupWatcherRef.current) clearInterval(popupWatcherRef.current);
+                popupWatcherRef.current = null;
+                oauthPopupRef.current = null;
+                setConnectingId(null);
+
+                // If handleAuthMessage already handled it, do nothing
+                if (hasHandledAuthSuccessRef.current) {
+                  return;
+                }
+
+                // Check final status upon close
+                try {
+                  const statusRes = await connectorApi.getGmailStatus(activeUserId);
+                  if (statusRes?.connection && isAuthorizedState(statusRes.connection.status)) {
+                    hasHandledAuthSuccessRef.current = true;
+                    await fetchAllConnectorsStatus();
+                    if (statusRes.connection.status === 'Configuration Required') {
+                      setActiveConfigConnector({
+                        ...item,
+                        status: 'Configuration Required',
+                      });
+                    }
+                    toast.success(
+                      'Gmail authorized successfully! Please configure your sync preferences.',
+                      'Authorization Complete'
+                    );
+                  } else {
+                    setIntegrations((prev) =>
+                      prev.map((c) => (c.id === 'gmail' ? { ...c, status: 'Available' } : c))
+                    );
+                    await fetchAllConnectorsStatus();
+                  }
+                } catch {
+                  setIntegrations((prev) =>
+                    prev.map((c) => (c.id === 'gmail' ? { ...c, status: 'Available' } : c))
+                  );
+                }
+                return;
+              }
+
+              // Periodic status check fallback (every 3 seconds up to 90s)
+              if (pollCount % 2 === 0) {
+                if (hasHandledAuthSuccessRef.current) {
+                  if (popupWatcherRef.current) clearInterval(popupWatcherRef.current);
+                  popupWatcherRef.current = null;
+                  return;
+                }
+
+                try {
+                  const statusRes = await connectorApi.getGmailStatus(activeUserId);
+                  if (statusRes?.connection && isAuthorizedState(statusRes.connection.status)) {
+                    hasHandledAuthSuccessRef.current = true;
+                    if (popupWatcherRef.current) clearInterval(popupWatcherRef.current);
+                    popupWatcherRef.current = null;
+                    if (popup && !popup.closed) popup.close();
+                    oauthPopupRef.current = null;
+                    setConnectingId(null);
+                    await fetchAllConnectorsStatus();
+                    if (statusRes.connection.status === 'Configuration Required') {
+                      setActiveConfigConnector({
+                        ...item,
+                        status: 'Configuration Required',
+                      });
+                    }
+                    toast.success(
+                      'Gmail authorized successfully! Please configure your sync preferences.',
+                      'Authorization Complete'
+                    );
+                  }
+                } catch {
+                  // Ignore transient network errors during poll
+                }
+              }
+            }, 1500);
           }
-          setIntegrations((prev) =>
-            prev.map((conn) =>
-              conn.id === 'gmail'
-                ? { ...conn, status: 'Configuration Required' }
-                : conn
-            )
-          );
-          setActiveConfigConnector(item);
-          await fetchGmailStatus();
         } catch (err: any) {
           console.error('[Frontend] Gmail connect error:', err);
-          setActiveConfigConnector(item);
-        } finally {
+          toast.error('Failed to initiate Gmail connection. Please try again.', 'Connection Error');
           setConnectingId(null);
         }
       } else if (currentStatus === 'Configuration Required') {
@@ -334,60 +596,189 @@ export const ExternalConnector: React.FC = () => {
       return;
     }
 
+    if (id === 'gdrive') {
+      if (currentStatus === 'Available' || currentStatus === 'Disconnected') {
+        hasHandledAuthSuccessRef.current = false;
+        setConnectingId('gdrive');
+        sessionStorage.setItem('rolesync_oauth_connecting_source', 'gdrive');
+        localStorage.setItem('rolesync_oauth_connecting_source', 'gdrive');
+        try {
+          const callbackUrl = `${window.location.origin}/connectors/callback?source=gdrive`;
+          const res = await connectorApi.connectSource('gdrive', activeUserId, callbackUrl);
+
+          if (res.redirect_url) {
+            const popup = openOAuthPopup(res.redirect_url);
+
+            if (popupWatcherRef.current) clearInterval(popupWatcherRef.current);
+            let pollCount = 0;
+            popupWatcherRef.current = setInterval(async () => {
+              pollCount += 1;
+              if (!popup || popup.closed) {
+                if (popupWatcherRef.current) clearInterval(popupWatcherRef.current);
+                popupWatcherRef.current = null;
+                oauthPopupRef.current = null;
+                setConnectingId(null);
+
+                if (hasHandledAuthSuccessRef.current) {
+                  return;
+                }
+
+                try {
+                  const statusRes = await connectorApi.getGDriveStatus(activeUserId);
+                  if (statusRes?.connection && isAuthorizedState(statusRes.connection.status)) {
+                    hasHandledAuthSuccessRef.current = true;
+                    await fetchAllConnectorsStatus();
+                    if (statusRes.connection.status === 'Configuration Required') {
+                      setActiveConfigConnector({
+                        ...item,
+                        status: 'Configuration Required',
+                      });
+                    }
+                    toast.success(
+                      'Google Drive authorized successfully! Please configure your sync preferences.',
+                      'Authorization Complete'
+                    );
+                  } else {
+                    setIntegrations((prev) =>
+                      prev.map((c) => (c.id === 'gdrive' ? { ...c, status: 'Available' } : c))
+                    );
+                    await fetchAllConnectorsStatus();
+                  }
+                } catch {
+                  setIntegrations((prev) =>
+                    prev.map((c) => (c.id === 'gdrive' ? { ...c, status: 'Available' } : c))
+                  );
+                }
+                return;
+              }
+
+              if (pollCount % 2 === 0) {
+                if (hasHandledAuthSuccessRef.current) {
+                  if (popupWatcherRef.current) clearInterval(popupWatcherRef.current);
+                  popupWatcherRef.current = null;
+                  return;
+                }
+
+                try {
+                  const statusRes = await connectorApi.getGDriveStatus(activeUserId);
+                  if (statusRes?.connection && isAuthorizedState(statusRes.connection.status)) {
+                    hasHandledAuthSuccessRef.current = true;
+                    if (popupWatcherRef.current) clearInterval(popupWatcherRef.current);
+                    popupWatcherRef.current = null;
+                    if (popup && !popup.closed) popup.close();
+                    oauthPopupRef.current = null;
+                    setConnectingId(null);
+                    await fetchAllConnectorsStatus();
+                    if (statusRes.connection.status === 'Configuration Required') {
+                      setActiveConfigConnector({
+                        ...item,
+                        status: 'Configuration Required',
+                      });
+                    }
+                    toast.success(
+                      'Google Drive authorized successfully! Please configure your sync preferences.',
+                      'Authorization Complete'
+                    );
+                  }
+                } catch {}
+              }
+            }, 1500);
+          }
+        } catch (err: any) {
+          console.error('[Frontend] Google Drive connect error:', err);
+          toast.error('Failed to initiate Google Drive connection. Please try again.', 'Connection Error');
+          setConnectingId(null);
+        }
+      } else if (currentStatus === 'Configuration Required') {
+        setActiveConfigConnector(item);
+      } else {
+        setDisconnectingId('gdrive');
+      }
+      return;
+    }
+
+
     if (currentStatus === 'Available' || currentStatus === 'Disconnected') {
       setConnectingId(id);
+      sessionStorage.setItem('rolesync_oauth_connecting_source', id);
+      localStorage.setItem('rolesync_oauth_connecting_source', id);
       try {
-        const res = await connectorApi.connectSource(id, activeUserId);
-        localStorage.setItem(`rolesync_${id}_connected`, 'true');
+        const callbackUrl = `${window.location.origin}/connectors/callback?source=${id}`;
+        const res = await connectorApi.connectSource(id, activeUserId, callbackUrl);
+
         if (res.redirect_url) {
-          window.open(res.redirect_url, '_blank');
+          const popup = openOAuthPopup(res.redirect_url);
+
+          if (popupWatcherRef.current) clearInterval(popupWatcherRef.current);
+          popupWatcherRef.current = setInterval(async () => {
+            if (!popup || popup.closed) {
+              if (popupWatcherRef.current) clearInterval(popupWatcherRef.current);
+              popupWatcherRef.current = null;
+              oauthPopupRef.current = null;
+              setConnectingId(null);
+              setIntegrations((prev) =>
+                prev.map((c) => (c.id === id ? { ...c, status: 'Available' } : c))
+              );
+              await fetchAllConnectorsStatus();
+            }
+          }, 1500);
         }
-        setIntegrations((prev) =>
-          prev.map((conn) =>
-            conn.id === id ? { ...conn, status: 'Connected', syncFrequency: 'REALTIME' } : conn
-          )
-        );
-        setActiveConfigConnector(item);
       } catch (err: any) {
         console.error(`[Frontend] Connection failed for ${id}:`, err);
-        localStorage.setItem(`rolesync_${id}_connected`, 'true');
-        setIntegrations((prev) =>
-          prev.map((conn) =>
-            conn.id === id ? { ...conn, status: 'Connected', syncFrequency: 'REALTIME' } : conn
-          )
-        );
-        setActiveConfigConnector(item);
-      } finally {
+        toast.error(`Failed to initiate ${item.name} connection. Please try again.`, 'Connection Error');
         setConnectingId(null);
       }
+    } else if (currentStatus === 'Configuration Required') {
+      setActiveConfigConnector(item);
     } else {
       setDisconnectingId(id);
     }
   };
 
-  // Confirm Disconnection Action
+  // Confirm Disconnection Action (Revokes OAuth Token in Backend and Resets State)
   const confirmDisconnection = async () => {
-    if (!disconnectingId) return;
+    if (!disconnectingId || isDisconnecting) return;
     const targetId = disconnectingId;
+    setIsDisconnecting(true);
 
-    localStorage.removeItem(`rolesync_${targetId}_connection`);
-    localStorage.removeItem(`rolesync_${targetId}_connected`);
-    setIntegrations((prev) =>
-      prev.map((item) =>
-        item.id === targetId ? { ...item, status: 'Available' } : item
-      )
-    );
-
-    if (targetId === 'gmail') {
-      try {
+    try {
+      // 1. Call backend API to revoke & invalidate OAuth token in Composio
+      if (targetId === 'gmail') {
         await connectorApi.disconnectGmail(activeUserId);
-        await fetchGmailStatus();
-      } catch (err) {
-        console.error('Failed to disconnect Gmail:', err);
+        await fetchAllConnectorsStatus();
+      } else {
+        await connectorApi.disconnectSource(targetId, activeUserId);
       }
-    }
 
-    setDisconnectingId(null);
+      // 2. Wipe local cached credentials and connection flags
+      localStorage.removeItem(`rolesync_${targetId}_connection`);
+      localStorage.removeItem(`rolesync_${targetId}_connected`);
+
+      // 3. Reset frontend UI state to Available
+      setIntegrations((prev) =>
+        prev.map((item) =>
+          item.id === targetId
+            ? {
+                ...item,
+                status: 'Available',
+                syncCaptured: 0,
+                syncSuccess: 0,
+                syncSkipped: 0,
+                syncFailed: 0,
+                currentProgress: '',
+              }
+            : item
+        )
+      );
+
+      toast.info(`Disconnected ${targetId}. Saved vector memories remain preserved.`, 'Connector Disconnected');
+      setDisconnectingId(null);
+    } catch (err) {
+      console.error(`[Frontend] Failed to disconnect ${targetId}:`, err);
+      toast.error(`Failed to disconnect ${targetId}. Please try again.`, 'Disconnect Failed');
+    } finally {
+      setIsDisconnecting(false);
+    }
   };
 
   // Trigger Manual Sync Now
@@ -398,12 +789,16 @@ export const ExternalConnector: React.FC = () => {
     if (id === 'gmail') {
       try {
         await connectorApi.triggerGmailSyncNow(activeUserId);
-        await fetchGmailStatus();
+        await fetchAllConnectorsStatus();
+        toast.info('Manual sync batch started for Gmail.', 'Sync Initiated');
       } catch (err: any) {
         if (err?.response?.status === 409) {
-          setLockNotice('Your Gmail data is currently being processed. Please wait a moment before starting another sync.');
+          const msg = 'Your Gmail data is currently being processed. Please wait a moment before starting another sync.';
+          setLockNotice(msg);
+          toast.warning(msg, 'Sync In Progress');
         } else {
           console.error('[Frontend] Gmail manual sync error:', err);
+          toast.error(err?.message || 'Failed to start Gmail sync.', 'Sync Failed');
         }
       } finally {
         setActiveSyncingId(null);
@@ -411,34 +806,19 @@ export const ExternalConnector: React.FC = () => {
       return;
     }
 
-    try {
-      await connectorApi.reconcileSource(id, 'tenant_default');
-      setIntegrations((prev) =>
-        prev.map((conn) =>
-          conn.id === id ? { ...conn, syncCaptured: conn.syncCaptured + 5, syncSuccess: conn.syncSuccess + 5 } : conn
-        )
-      );
-    } catch (err: any) {
-      console.error(`[Frontend] Manual sync failed for ${id}:`, err);
-    } finally {
-      setActiveSyncingId(null);
-    }
-  };
-
-  // Trigger Resync (Verification Pass)
-  const triggerResyncAction = async (id: string) => {
-    setActiveSyncingId(id);
-    setLockNotice(null);
-
-    if (id === 'gmail') {
+    if (id === 'gdrive') {
       try {
-        await connectorApi.triggerGmailResync(activeUserId);
-        await fetchGmailStatus();
+        await connectorApi.triggerGDriveSyncNow(activeUserId);
+        await fetchAllConnectorsStatus();
+        toast.info('Manual sync batch started for Google Drive.', 'Sync Initiated');
       } catch (err: any) {
         if (err?.response?.status === 409) {
-          setLockNotice('Your Gmail data is currently being processed. Please wait a moment before starting another sync.');
+          const msg = 'Your Google Drive data is currently being processed. Please wait a moment before starting another sync.';
+          setLockNotice(msg);
+          toast.warning(msg, 'Sync In Progress');
         } else {
-          console.error('Gmail resync error:', err);
+          console.error('[Frontend] GDrive manual sync error:', err);
+          toast.error(err?.message || 'Failed to start Google Drive sync.', 'Sync Failed');
         }
       } finally {
         setActiveSyncingId(null);
@@ -448,9 +828,11 @@ export const ExternalConnector: React.FC = () => {
 
     try {
       await connectorApi.reconcileSource(id, 'tenant_default');
-      alert(`Resync complete for ${id}! Existing vector memories verified and preserved.`);
+      await fetchAllConnectorsStatus();
+      toast.info(`Reconciliation sync started for ${id}.`, 'Sync Initiated');
     } catch (err: any) {
-      console.error(`[Frontend] Resync failed for ${id}:`, err);
+      console.error(`[Frontend] Manual sync failed for ${id}:`, err);
+      toast.error(`Sync failed for ${id}.`, 'Sync Failed');
     } finally {
       setActiveSyncingId(null);
     }
@@ -467,17 +849,81 @@ export const ExternalConnector: React.FC = () => {
         item.id === connId
           ? {
               ...item,
-              status: 'Connected',
+              status: 'Syncing',
               syncFrequency: syncFreq.toUpperCase(),
             }
           : item
       )
     );
+    setActiveSyncingId(connId);
 
     if (connId === 'gmail') {
-      await connectorApi.saveGmailConfig(activeUserId, maxItems, categories);
-      await fetchGmailStatus();
+      try {
+        await connectorApi.saveGmailConfig(activeUserId, maxItems, categories);
+        await fetchAllConnectorsStatus();
+        toast.info('Initial synchronization initiated. Processing email batch in background...', 'Syncing Started');
+      } catch (err: any) {
+        console.error('[Frontend] Save Gmail config error:', err);
+        toast.error('Failed to start sync. Please try again.', 'Sync Error');
+        setActiveSyncingId(null);
+        await fetchAllConnectorsStatus();
+      }
+    } else if (connId === 'gdrive') {
+      try {
+        await connectorApi.saveGDriveConfig(activeUserId, maxItems, categories);
+        await fetchAllConnectorsStatus();
+        toast.info('Initial synchronization initiated. Processing Google Drive documents in background...', 'Syncing Started');
+      } catch (err: any) {
+        console.error('[Frontend] Save GDrive config error:', err);
+        toast.error('Failed to start sync. Please try again.', 'Sync Error');
+        setActiveSyncingId(null);
+        await fetchAllConnectorsStatus();
+      }
     }
+  };
+
+
+  // Dedicated Save Auto-Sync Schedule & Webhooks Trigger
+  const handleSaveAutoSyncSchedule = async (
+    freq: string,
+    intervalMinutes: number,
+    autoSyncEnabled: boolean,
+    webhookEnabled: boolean
+  ) => {
+    if (!activeAutoSyncConnector) return;
+    const connId = activeAutoSyncConnector.id;
+
+    await connectorApi.updateAutoSyncSchedule(
+      connId,
+      activeUserId,
+      freq,
+      intervalMinutes,
+      autoSyncEnabled,
+      webhookEnabled
+    );
+
+    let displayFreq = 'OFF';
+    if (autoSyncEnabled && freq !== 'off') {
+      if (freq === '24h') displayFreq = '24H (2 AM)';
+      else if (freq === '6h') displayFreq = '6H AUTO';
+      else if (freq === '1h') displayFreq = '1H AUTO';
+      else if (freq === '2m') displayFreq = '2M AUTO';
+      else displayFreq = '30M AUTO';
+    }
+
+    setIntegrations((prev) =>
+      prev.map((item) =>
+        item.id === connId
+          ? {
+              ...item,
+              syncFrequency: displayFreq,
+              autoSyncEnabled,
+              webhookEnabled,
+            }
+          : item
+      )
+    );
+    await fetchAllConnectorsStatus();
   };
 
   // Send Enterprise Integration Request
@@ -498,7 +944,7 @@ export const ExternalConnector: React.FC = () => {
   const renderStatusBadge = (item: Integration) => {
     const isConnected = isConnectedState(item.status);
     const isConnecting = connectingId === item.id;
-    const isSyncing = activeSyncingId === item.id || item.status === 'Syncing';
+    const isSyncing = item.status === 'Syncing';
 
     if (isConnecting) {
       return (
@@ -509,11 +955,16 @@ export const ExternalConnector: React.FC = () => {
       );
     }
 
-    if (isSyncing || item.status === 'Syncing') {
+    if (isSyncing) {
+      const isProgressRatio = Boolean(
+        item.currentProgress &&
+        /\d+\s*(of|\/)\s*\d+/i.test(item.currentProgress)
+      );
+
       return (
         <span className="flex items-center gap-1.5 text-[10px] font-mono font-bold tracking-wider uppercase border px-2.5 py-1 rounded-full bg-primary/10 border-primary/30 text-primary animate-pulse">
           <Loader2 className="w-2.5 h-2.5 animate-spin text-primary" />
-          <span>{item.currentProgress ? `Syncing (${item.currentProgress})` : 'Syncing...'}</span>
+          <span>{isProgressRatio ? `Syncing (${item.currentProgress})` : 'Syncing...'}</span>
         </span>
       );
     }
@@ -654,7 +1105,7 @@ export const ExternalConnector: React.FC = () => {
           const Icon = item.icon;
           const isConnected = isConnectedState(item.status);
           const isConnecting = connectingId === item.id;
-          const isSyncing = activeSyncingId === item.id || item.status === 'Syncing';
+          const isSyncing = item.status === 'Syncing';
 
           return (
             <div
@@ -696,61 +1147,79 @@ export const ExternalConnector: React.FC = () => {
                 </p>
               </div>
 
-              {/* Bottom Triggers: SYNC FREQUENCY, SYNC CAPTURED & Action Buttons */}
+              {/* Bottom Triggers: FREQUENCY, CAPTURED & Action Buttons */}
               <div className="pt-4 border-t border-border/40 flex items-center justify-between gap-2 mt-auto">
                 {isConnected ? (
                   <>
                     <div className="flex items-center gap-4">
-                      {/* Metric 1: SYNC FREQUENCY */}
-                      <div className="flex flex-col">
-                        <span className="text-[8px] font-mono font-bold text-muted-foreground uppercase tracking-widest">
-                          SYNC FREQUENCY
+                      {/* Metric 1: FREQUENCY (Clickable to open dedicated Auto-Sync modal) */}
+                      <button
+                        type="button"
+                        disabled={isSyncing}
+                        onClick={() => !isSyncing && setActiveAutoSyncConnector(item)}
+                        className={`flex flex-col text-left group/freq ${
+                          isSyncing ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
+                        }`}
+                        title={
+                          isSyncing
+                            ? 'Auto-sync schedule can be adjusted after synchronization completes'
+                            : 'Click to configure Auto-Sync Schedule (2m, 30m, 1h, 6h, 24h at 2am)'
+                        }
+                      >
+                        <span className="text-[8px] font-mono font-bold text-muted-foreground uppercase tracking-widest flex items-center gap-1 group-hover/freq:text-primary transition-colors">
+                          <span>FREQUENCY</span>
+                          <Clock className="w-2.5 h-2.5 opacity-60 group-hover/freq:opacity-100" />
+                          {item.webhookEnabled && (
+                            <span className="text-[8px] px-1 py-0.2 rounded bg-amber-500/20 text-amber-500 font-bold" title="Real-Time Webhook Active">
+                              HOOK
+                            </span>
+                          )}
                         </span>
-                        <span className="text-[11px] font-mono font-bold text-amber-500 dark:text-amber-400 uppercase mt-0.5">
+                        <span className={`text-[11px] font-mono font-bold uppercase mt-0.5 group-hover/freq:underline ${
+                          item.syncFrequency === 'OFF' ? 'text-muted-foreground' : 'text-amber-500 dark:text-amber-400'
+                        }`}>
                           {item.syncFrequency}
                         </span>
-                      </div>
+                      </button>
 
-                      {/* Metric 2: SYNC CAPTURED (Total Synced Data) */}
+                      {/* Metric 2: CAPTURED (Total Real Synced Data) */}
                       <div className="flex flex-col pl-3 border-l border-border/60">
                         <span className="text-[8px] font-mono font-bold text-muted-foreground uppercase tracking-widest">
-                          SYNC CAPTURED
+                          CAPTURED
                         </span>
                         <span
                           className="text-[11px] font-mono font-bold text-emerald-600 dark:text-emerald-400 mt-0.5 cursor-pointer hover:underline"
                           title={`${item.syncSuccess} Success · ${item.syncSkipped} Skipped · ${item.syncFailed} Failed`}
-                          onClick={() => setShowActivityModal(true)}
+                          onClick={() => {
+                            setSelectedActivityConnector(item);
+                            setShowActivityModal(true);
+                          }}
                         >
                           {item.syncCaptured} Items
                         </span>
                       </div>
                     </div>
 
-                    {/* Action Buttons (4 rounded buttons for all 5 connectors) */}
+                    {/* Action Buttons: 1. Sync Now, 2. Auto-Sync Schedule, 3. Sync Activity Logs, 4. Configure, 5. Disconnect */}
                     <div className="flex items-center gap-1.5">
                       {/* 1. Sync Now Button */}
                       <button
                         onClick={() => triggerManualSync(item.id)}
                         disabled={isSyncing}
+                        aria-label={`Sync Now for ${item.name}`}
                         className="w-8 h-8 rounded-full border border-border bg-background/80 hover:bg-muted flex items-center justify-center text-muted-foreground hover:text-foreground transition-all cursor-pointer shadow-3xs disabled:opacity-50"
                         title="Sync Now (Process Next Batch)"
                       >
                         <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin text-primary' : ''}`} />
                       </button>
 
-                      {/* 2. Resync Button */}
-                      <button
-                        onClick={() => triggerResyncAction(item.id)}
-                        disabled={isSyncing}
-                        className="w-8 h-8 rounded-full border border-border bg-background/80 hover:bg-muted flex items-center justify-center text-muted-foreground hover:text-foreground transition-all cursor-pointer shadow-3xs disabled:opacity-50"
-                        title="Resync (Verify & Catch Up Unsynced Data)"
-                      >
-                        <RotateCcw className="w-3.5 h-3.5" />
-                      </button>
-
                       {/* 3. Sync Activity / Captured Audit Logs */}
                       <button
-                        onClick={() => setShowActivityModal(true)}
+                        onClick={() => {
+                          setSelectedActivityConnector(item);
+                          setShowActivityModal(true);
+                        }}
+                        aria-label={`View Sync Activity and Audit Logs for ${item.name}`}
                         className="w-8 h-8 rounded-full border border-border bg-background/80 hover:bg-muted flex items-center justify-center text-muted-foreground hover:text-foreground transition-all cursor-pointer shadow-3xs"
                         title="View Sync Activity & Audit Logs"
                       >
@@ -761,12 +1230,36 @@ export const ExternalConnector: React.FC = () => {
                       <button
                         onClick={() => setActiveConfigConnector(item)}
                         disabled={isSyncing}
+                        aria-label={`Configure ${item.name} Settings and Limits`}
                         className="w-8 h-8 rounded-full border border-border bg-background/80 hover:bg-muted flex items-center justify-center text-muted-foreground hover:text-foreground transition-all cursor-pointer shadow-3xs disabled:opacity-50"
                         title={`Configure ${item.name} Limits & Scopes`}
                       >
                         <Settings className="w-3.5 h-3.5" />
                       </button>
+
+                      {/* 5. Disconnect Button */}
+                      <button
+                        onClick={() => setDisconnectingId(item.id)}
+                        disabled={isSyncing}
+                        aria-label={`Disconnect ${item.name}`}
+                        className="w-8 h-8 rounded-full border border-border bg-background/80 hover:bg-destructive/10 hover:border-destructive/30 hover:text-destructive flex items-center justify-center text-muted-foreground transition-all cursor-pointer shadow-3xs disabled:opacity-50"
+                        title={`Disconnect ${item.name}`}
+                      >
+                        <Power className="w-3.5 h-3.5" />
+                      </button>
                     </div>
+                  </>
+                ) : isConnecting ? (
+                  <>
+                    <span className="text-[10px] text-muted-foreground/80 font-mono flex items-center gap-1.5">
+                      <Loader2 className="w-2.5 h-2.5 animate-spin text-primary" /> Authorizing in popup...
+                    </span>
+                    <button
+                      disabled
+                      className="text-xs font-semibold text-muted-foreground/60 cursor-not-allowed flex items-center gap-0.5"
+                    >
+                      <span>Waiting for Auth</span>
+                    </button>
                   </>
                 ) : item.status === 'Configuration Required' ? (
                   <>
@@ -808,81 +1301,164 @@ export const ExternalConnector: React.FC = () => {
         )}
       </div>
 
+      {/* DEDICATED AUTO-SYNC SCHEDULE MODAL */}
+      {activeAutoSyncConnector && (
+        <AutoSyncModal
+          isOpen={Boolean(activeAutoSyncConnector)}
+          onClose={() => setActiveAutoSyncConnector(null)}
+          connectorId={activeAutoSyncConnector.id}
+          connectorName={activeAutoSyncConnector.name}
+          logoUrl={activeAutoSyncConnector.logoUrl}
+          currentFrequency={activeAutoSyncConnector.syncFrequency}
+          initialAutoSyncEnabled={
+            activeAutoSyncConnector.autoSyncEnabled ??
+            allConnections[activeAutoSyncConnector.id]?.config?.auto_sync_enabled ??
+            (activeAutoSyncConnector.id === 'gmail' ? gmailDetails?.config?.auto_sync_enabled : false) ??
+            false
+          }
+          initialWebhookEnabled={
+            activeAutoSyncConnector.webhookEnabled ??
+            allConnections[activeAutoSyncConnector.id]?.config?.webhook_enabled ??
+            (activeAutoSyncConnector.id === 'gmail' ? gmailDetails?.config?.webhook_enabled : false) ??
+            false
+          }
+          isLocked={
+            Boolean(allConnections[activeAutoSyncConnector.id]?.lock?.is_locked) ||
+            (activeAutoSyncConnector.id === 'gmail' ? gmailDetails?.lock?.is_locked || false : false)
+          }
+          isConnected={isConnectedState(activeAutoSyncConnector.status)}
+          onSaveSchedule={handleSaveAutoSyncSchedule}
+        />
+      )}
+
       {/* DYNAMIC UNIVERSAL CONNECTOR CONFIGURATION MODAL (FOR ALL 5 SOURCES) */}
       {activeConfigConnector && (
         <ConnectorConfigModal
           isOpen={Boolean(activeConfigConnector)}
           onClose={() => setActiveConfigConnector(null)}
+          onOpenAutoSyncModal={() => {
+            const target = activeConfigConnector;
+            setActiveConfigConnector(null);
+            setActiveAutoSyncConnector(target);
+          }}
           onSave={handleSaveConnectorConfig}
           connectorId={activeConfigConnector.id}
           connectorName={activeConfigConnector.name}
           logoUrl={activeConfigConnector.logoUrl}
           initialMaxItems={
-            activeConfigConnector.id === 'gmail'
-              ? gmailDetails?.config?.max_emails_per_sync || 10
-              : 10
+            allConnections[activeConfigConnector.id]?.config?.max_emails_per_sync ||
+            allConnections[activeConfigConnector.id]?.config?.max_files_per_sync ||
+            (activeConfigConnector.id === 'gmail' ? gmailDetails?.config?.max_emails_per_sync : undefined) ||
+            10
           }
           initialCategories={
-            activeConfigConnector.id === 'gmail'
+            allConnections[activeConfigConnector.id]?.config?.categories ||
+            (activeConfigConnector.id === 'gmail'
               ? gmailDetails?.config?.categories || ['INBOX']
-              : []
+              : activeConfigConnector.id === 'gdrive'
+              ? ['MY_DRIVE']
+              : [])
           }
           initialSyncFreq={activeConfigConnector.syncFrequency}
           isLocked={
-            activeConfigConnector.id === 'gmail'
-              ? gmailDetails?.lock?.is_locked || false
-              : false
+            Boolean(allConnections[activeConfigConnector.id]?.lock?.is_locked) ||
+            (activeConfigConnector.id === 'gmail' ? gmailDetails?.lock?.is_locked || false : false)
+          }
+
+          isInitialSync={
+            !activeConfigConnector.syncCaptured ||
+            activeConfigConnector.syncCaptured === 0 ||
+            activeConfigConnector.status === 'Configuration Required'
           }
         />
       )}
 
       {/* UNIVERSAL SYNC ACTIVITY & AUDIT LOG MODAL */}
-      <GmailSyncActivityModal
-        isOpen={showActivityModal}
-        onClose={() => setShowActivityModal(false)}
-        userId={activeUserId}
-      />
+      {showActivityModal && selectedActivityConnector && (
+        <GmailSyncActivityModal
+          key={`${selectedActivityConnector.id}-${activeUserId}`}
+          isOpen={showActivityModal}
+          onClose={() => {
+            setShowActivityModal(false);
+            setSelectedActivityConnector(null);
+          }}
+          userId={activeUserId}
+          source={selectedActivityConnector.id}
+          sourceName={selectedActivityConnector.name}
+          logoUrl={selectedActivityConnector.logoUrl}
+          onDataPurged={fetchAllConnectorsStatus}
+        />
+      )}
 
       {/* CONFIRM DISCONNECT DIALOG MODAL */}
       {disconnectingId && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           {/* Backdrop */}
           <div
-            className="absolute inset-0 bg-black/40 backdrop-blur-xs transition-opacity duration-300 animate-in fade-in"
-            onClick={() => setDisconnectingId(null)}
+            className={`absolute inset-0 bg-black/60 backdrop-blur-xs transition-opacity duration-300 animate-in fade-in ${
+              isDisconnecting ? 'cursor-not-allowed' : 'cursor-pointer'
+            }`}
+            onClick={() => !isDisconnecting && setDisconnectingId(null)}
           />
 
           {/* Modal Content */}
-          <div className="relative w-full max-w-sm bg-card border border-border rounded-2xl p-6 shadow-2xl z-10 animate-in zoom-in-95 duration-200 text-left space-y-4">
+          <div className="relative w-full max-w-sm bg-card border border-red-500/30 dark:border-red-500/20 rounded-2xl p-6 shadow-2xl z-10 animate-in zoom-in-95 duration-200 text-left space-y-4 overflow-hidden">
+            {/* Close Button */}
+            <button
+              type="button"
+              disabled={isDisconnecting}
+              onClick={() => setDisconnectingId(null)}
+              className="absolute top-4 right-4 p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+              title="Close"
+            >
+              <X className="w-4 h-4" />
+            </button>
+
             <div className="flex gap-3">
-              <div className="w-10 h-10 bg-destructive/10 text-destructive rounded-xl flex items-center justify-center shrink-0 border border-destructive/20 shadow-3xs">
-                <Power className="w-5 h-5" />
+              <div className="w-10 h-10 bg-red-500/10 text-red-500 dark:text-red-400 rounded-xl flex items-center justify-center shrink-0 border border-red-500/20 shadow-3xs">
+                {isDisconnecting ? (
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                ) : (
+                  <Power className="w-5 h-5" />
+                )}
               </div>
-              <div className="space-y-1">
+              <div className="space-y-1 pr-4">
                 <h4 className="font-serif text-base font-bold text-foreground">
                   Disconnect {integrations.find((i) => i.id === disconnectingId)?.name || 'Connector'}?
                 </h4>
                 <p className="text-xs text-muted-foreground leading-relaxed">
-                  Disconnecting will pause future auto-sync and webhook events. All previously synced memories and transcripts in your vector workspace will be safely preserved.
+                  Disconnecting will revoke active OAuth tokens and pause future auto-sync. All previously synced memories and transcripts in your vector workspace will remain safely preserved.
                 </p>
               </div>
             </div>
 
-            <div className="flex justify-end gap-2 pt-2">
+            <div className="flex justify-end gap-2.5 pt-2">
               <Button
                 variant="outline"
-                className="text-xs py-2 px-4"
+                className="text-xs py-2 px-4 border-border hover:bg-muted/50 transition-all"
+                disabled={isDisconnecting}
                 onClick={() => setDisconnectingId(null)}
               >
                 Keep Active
               </Button>
-              <Button
-                variant="primary"
-                className="bg-destructive hover:bg-destructive/90 text-white text-xs py-2 px-4 border-transparent"
+              <button
+                type="button"
+                disabled={isDisconnecting}
                 onClick={confirmDisconnection}
+                className="px-4 py-2 rounded-xl text-xs font-bold bg-red-600 hover:bg-red-700 active:bg-red-800 text-white shadow-md transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed border border-red-600"
               >
-                Confirm Disconnect
-              </Button>
+                {isDisconnecting ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-white" />
+                    <span>Disconnecting...</span>
+                  </>
+                ) : (
+                  <>
+                    <Power className="w-3.5 h-3.5 text-white" />
+                    <span>Confirm Disconnect</span>
+                  </>
+                )}
+              </button>
             </div>
           </div>
         </div>

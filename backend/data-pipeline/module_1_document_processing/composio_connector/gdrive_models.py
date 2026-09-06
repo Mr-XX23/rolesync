@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-class GmailSyncStatus(str, Enum):
+class GDriveSyncStatus(str, Enum):
     AVAILABLE = "Available"
     CONFIGURATION_REQUIRED = "Configuration Required"
     CONNECTED = "Connected"
@@ -15,7 +15,7 @@ class GmailSyncStatus(str, Enum):
     PAUSED = "Paused"
     DISCONNECTED = "Disconnected"
 
-class GmailTriggerType(str, Enum):
+class GDriveTriggerType(str, Enum):
     INITIAL_SYNC = "INITIAL_SYNC"
     AUTO_SYNC = "AUTO_SYNC"
     MANUAL_SYNC = "MANUAL_SYNC"
@@ -28,45 +28,45 @@ class HistoricalSyncStatus(str, Enum):
     COMPLETED = "COMPLETED"
 
 @dataclass
-class GmailSyncConfig:
-    max_emails_per_sync: int = 10           # 1 to 30 (default: 10)
-    categories: list[str] = field(default_factory=lambda: ["INBOX"]) # INBOX, SENT, PROMOTIONS, SOCIAL, ALL
+class GDriveSyncConfig:
+    max_files_per_sync: int = 10           # 1 to 30 (default: 10)
+    categories: list[str] = field(default_factory=lambda: ["MY_DRIVE"]) # MY_DRIVE, SHARED, CONTRACTS, REPORTS, ALL
     sync_window_days: int = 180            # default: 180 days
     auto_sync_interval_minutes: int = 0    # default: 0 (OFF by default)
     sync_frequency: str = "off"            # "off", 2m, 30m, 1h, 6h, 24h
-    max_attachment_size_mb: int = 25       # default: 25 MB
+    max_file_size_mb: int = 25             # default: 25 MB
     auto_sync_enabled: bool = False        # default: False (OFF)
     webhook_enabled: bool = False          # default: False (OFF)
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "max_emails_per_sync": self.max_emails_per_sync,
+            "max_files_per_sync": self.max_files_per_sync,
             "categories": self.categories,
             "sync_window_days": self.sync_window_days,
             "auto_sync_interval_minutes": self.auto_sync_interval_minutes,
             "sync_frequency": self.sync_frequency,
-            "max_attachment_size_mb": self.max_attachment_size_mb,
+            "max_file_size_mb": self.max_file_size_mb,
             "auto_sync_enabled": self.auto_sync_enabled,
             "webhook_enabled": self.webhook_enabled,
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "GmailSyncConfig":
+    def from_dict(cls, data: dict[str, Any]) -> "GDriveSyncConfig":
         freq = str(data.get("sync_frequency", "off"))
         auto_enabled = bool(data.get("auto_sync_enabled", False if freq == "off" else True))
         return cls(
-            max_emails_per_sync=int(data.get("max_emails_per_sync", 10)),
-            categories=list(data.get("categories", ["INBOX"])),
+            max_files_per_sync=int(data.get("max_files_per_sync", data.get("max_emails_per_sync", 10))),
+            categories=list(data.get("categories", ["MY_DRIVE"])),
             sync_window_days=int(data.get("sync_window_days", 180)),
             auto_sync_interval_minutes=int(data.get("auto_sync_interval_minutes", 0)),
             sync_frequency=freq,
-            max_attachment_size_mb=int(data.get("max_attachment_size_mb", 25)),
+            max_file_size_mb=int(data.get("max_file_size_mb", 25)),
             auto_sync_enabled=auto_enabled,
             webhook_enabled=bool(data.get("webhook_enabled", False)),
         )
 
 @dataclass
-class GmailBackfillState:
+class GDriveBackfillState:
     historical_sync_status: HistoricalSyncStatus = HistoricalSyncStatus.NOT_STARTED
     historical_sync_cursor: str | None = None
     historical_sync_boundary: str | None = None
@@ -91,7 +91,7 @@ class GmailBackfillState:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "GmailBackfillState":
+    def from_dict(cls, data: dict[str, Any]) -> "GDriveBackfillState":
         raw_status = data.get("historical_sync_status")
         if raw_status:
             try:
@@ -115,7 +115,7 @@ class GmailBackfillState:
         )
 
 @dataclass
-class GmailLockState:
+class GDriveLockState:
     is_locked: bool = False
     locked_by_job_id: str | None = None
     locked_at: datetime | None = None
@@ -130,7 +130,7 @@ class GmailLockState:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "GmailLockState":
+    def from_dict(cls, data: dict[str, Any]) -> "GDriveLockState":
         locked_at = None
         expires_at = None
         if data.get("locked_at"):
@@ -151,15 +151,15 @@ class GmailLockState:
         )
 
 @dataclass
-class GmailConnection:
+class GDriveConnection:
     connection_id: str
     tenant_id: str
     user_id: str
     account_email: str = ""
-    status: GmailSyncStatus = GmailSyncStatus.AVAILABLE
-    config: GmailSyncConfig = field(default_factory=GmailSyncConfig)
-    backfill_state: GmailBackfillState = field(default_factory=GmailBackfillState)
-    lock: GmailLockState = field(default_factory=GmailLockState)
+    status: GDriveSyncStatus = GDriveSyncStatus.AVAILABLE
+    config: GDriveSyncConfig = field(default_factory=GDriveSyncConfig)
+    backfill_state: GDriveBackfillState = field(default_factory=GDriveBackfillState)
+    lock: GDriveLockState = field(default_factory=GDriveLockState)
     current_progress: str = ""  # e.g. "3 of 10"
     webhook_trigger_id: str | None = None
     last_successful_sync_at: datetime | None = None
@@ -172,11 +172,15 @@ class GmailConnection:
             "tenant_id": self.tenant_id,
             "user_id": self.user_id,
             "account_email": self.account_email,
-            "status": self.status.value if isinstance(self.status, GmailSyncStatus) else str(self.status),
+            "status": self.status.value if isinstance(self.status, GDriveSyncStatus) else str(self.status),
             "config": self.config.to_dict(),
             "backfill_state": self.backfill_state.to_dict(),
             "lock": self.lock.to_dict(),
             "current_progress": self.current_progress,
+            "sync_captured": self.backfill_state.total_synced_so_far,
+            "sync_success": self.backfill_state.total_synced_so_far,
+            "sync_skipped": 0,
+            "sync_failed": 0,
             "webhook_trigger_id": self.webhook_trigger_id,
             "last_successful_sync_at": self.last_successful_sync_at.isoformat() if self.last_successful_sync_at else None,
             "created_at": self.created_at.isoformat(),
@@ -184,89 +188,47 @@ class GmailConnection:
         }
 
 @dataclass
-class AttachmentAuditItem:
-    filename: str
-    mime_type: str
-    size_bytes: int
-    parse_status: str  # SUCCESS, SKIPPED, FAILED
-    parser: str | None = None
-    skip_reason: str | None = None  # e.g. "ATTACHMENT_SIZE_EXCEEDED (>25MB)", "UNSUPPORTED_FORMAT"
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "filename": self.filename,
-            "mime_type": self.mime_type,
-            "size_bytes": self.size_bytes,
-            "parse_status": self.parse_status,
-            "parser": self.parser,
-            "skip_reason": self.skip_reason,
-        }
-
-@dataclass
-class SyncedMessageRecord:
+class SyncedFileRecord:
     doc_id: str
     tenant_id: str
     connection_id: str
-    message_id: str
-    thread_id: str
+    file_id: str
+    filename: str
+    mime_type: str
+    size_bytes: int
     categories: list[str]
-    subject: str
-    sender: str
-    received_at: datetime
+    modified_at: datetime
     sync_status: str  # SUCCESS, PARTIAL_SUCCESS, FAILED, SKIPPED
-    attachments: list[dict[str, Any]] = field(default_factory=list)
-    attachment_count: int = 0
     vector_chunk_count: int = 0
     synced_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_dict(self) -> dict[str, Any]:
-        received_str = None
-        if self.received_at:
-            received_str = self.received_at.isoformat() if hasattr(self.received_at, 'isoformat') else str(self.received_at)
+        mod_str = None
+        if self.modified_at:
+            mod_str = self.modified_at.isoformat() if hasattr(self.modified_at, 'isoformat') else str(self.modified_at)
         synced_str = self.synced_at.isoformat() if hasattr(self.synced_at, 'isoformat') else str(self.synced_at)
         return {
             "doc_id": self.doc_id,
             "tenant_id": self.tenant_id,
             "connection_id": self.connection_id,
-            "message_id": self.message_id,
-            "thread_id": self.thread_id,
+            "file_id": self.file_id,
+            "filename": self.filename,
+            "mime_type": self.mime_type,
+            "size_bytes": self.size_bytes,
             "categories": self.categories,
-            "subject": self.subject,
-            "sender": self.sender,
-            "received_at": received_str,
+            "modified_at": mod_str,
             "sync_status": self.sync_status,
-            "attachments": self.attachments,
-            "attachment_count": self.attachment_count,
             "vector_chunk_count": self.vector_chunk_count,
             "synced_at": synced_str,
         }
 
 @dataclass
-class SyncActivityItem:
-    message_id: str
-    subject: str
-    sender: str
-    status: str  # SUCCESS, PARTIAL_SUCCESS, SKIPPED, FAILED
-    attachment_summary: str
-    error_message: str | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "message_id": self.message_id,
-            "subject": self.subject,
-            "sender": self.sender,
-            "status": self.status,
-            "attachment_summary": self.attachment_summary,
-            "error_message": self.error_message,
-        }
-
-@dataclass
-class GmailSyncActivity:
+class GDriveSyncActivity:
     activity_id: str
     job_id: str
     connection_id: str
     tenant_id: str
-    trigger_type: GmailTriggerType
+    trigger_type: GDriveTriggerType
     status: str  # RUNNING, COMPLETED, PARTIAL_SUCCESS, FAILED
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: datetime | None = None
@@ -285,7 +247,7 @@ class GmailSyncActivity:
             "job_id": self.job_id,
             "connection_id": self.connection_id,
             "tenant_id": self.tenant_id,
-            "trigger_type": self.trigger_type.value if isinstance(self.trigger_type, GmailTriggerType) else str(self.trigger_type),
+            "trigger_type": self.trigger_type.value if isinstance(self.trigger_type, GDriveTriggerType) else str(self.trigger_type),
             "status": self.status,
             "started_at": self.started_at.isoformat(),
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,

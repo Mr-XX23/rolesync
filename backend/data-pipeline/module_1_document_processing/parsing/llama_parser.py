@@ -95,10 +95,13 @@ class LlamaParserService:
 
         # Local fallback parser
         fallback_text = (
-            event.metadata.get("text")
+            event.metadata.get("text_content")
+            or event.metadata.get("body")
+            or event.metadata.get("text")
             or event.metadata.get("name")
             or f"Parsed document content for {filename}"
         )
+
         return ParsedDocument(
             doc_id=doc_id,
             tenant_id=event.tenant_id,

@@ -21,12 +21,12 @@ const App = () => {
   }, []);
 
   useEffect(() => {
-    if (isAuthenticated) {
+    if (!isCheckingSession && isAuthenticated) {
       dispatch(fetchProfile());
       dispatch(fetchPreferences());
       dispatch(fetchOnboarding());
     }
-  }, [isAuthenticated, dispatch]);
+  }, [isCheckingSession, isAuthenticated, dispatch]);
 
   if (isCheckingSession) {
     return (

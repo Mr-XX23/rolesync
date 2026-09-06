@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from module_1_document_processing.composio_connector.events.canonical_event import CanonicalEvent, EventType
+from module_1_document_processing.composio_connector.date_utils import normalize_to_utc
 
 def normalize_calendar(payload: dict, tenant_id: str) -> CanonicalEvent:
     meta = payload.get("metadata", {})
@@ -49,9 +50,4 @@ def normalize_calendar(payload: dict, tenant_id: str) -> CanonicalEvent:
     )
 
 def _parse_ts(raw) -> datetime:
-    if not raw:
-        return datetime.now(timezone.utc)
-    try:
-        return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-    except ValueError:
-        return datetime.now(timezone.utc)
+    return normalize_to_utc(raw)

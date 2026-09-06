@@ -26,7 +26,10 @@ export interface GmailConfig {
   categories: string[];
   sync_window_days: number;
   auto_sync_interval_minutes: number;
+  sync_frequency?: string;
   max_attachment_size_mb: number;
+  auto_sync_enabled?: boolean;
+  webhook_enabled?: boolean;
 }
 
 export interface GmailConnectionDetails {
@@ -62,13 +65,20 @@ export interface GmailStatusResponse {
 }
 
 export interface GmailActivityItem {
-  message_id: string;
-  subject: string;
-  sender: string;
+  message_id?: string;
+  subject?: string;
+  sender?: string;
   status: 'SUCCESS' | 'PARTIAL_SUCCESS' | 'SKIPPED' | 'FAILED';
-  attachment_summary: string;
+  attachment_summary?: string;
   error_message?: string | null;
+  file_id?: string;
+  filename?: string;
+  name?: string;
+  mime_type?: string;
+  file_size?: number;
+  synced_at?: string;
 }
+
 
 export interface GmailActivity {
   activity_id: string;
@@ -96,10 +106,14 @@ export interface GmailActivitiesResponse {
 }
 
 export const connectorApi = {
-  connectSource: async (source: string, userId: string): Promise<ConnectResponse> => {
-    const response = await api.post<ConnectResponse>(`/connectors/${source}/connect`, {
+  connectSource: async (source: string, userId: string, callbackUrl?: string): Promise<ConnectResponse> => {
+    const payload: { user_id: string; callback_url?: string } = {
       user_id: userId,
-    });
+    };
+    if (callbackUrl) {
+      payload.callback_url = callbackUrl;
+    }
+    const response = await api.post<ConnectResponse>(`/connectors/${source}/connect`, payload);
     return response.data;
   },
 
@@ -108,6 +122,12 @@ export const connectorApi = {
       tenant_id: tenantId,
       live_docs: liveDocs,
     });
+    return response.data;
+  },
+
+  // Unified Status API for All 5 Connectors
+  getAllConnectorsStatus: async (userId: string = 'usr_active'): Promise<{ status: string; connections: Record<string, any> }> => {
+    const response = await api.get<{ status: string; connections: Record<string, any> }>(`/connectors/status?user_id=${userId}`);
     return response.data;
   },
 
@@ -121,13 +141,35 @@ export const connectorApi = {
     userId: string,
     maxEmailsPerSync: number,
     categories: string[],
-    syncWindowDays: number = 90
+    syncWindowDays: number = 180,
+    autoSyncIntervalMinutes: number = 30,
+    syncFrequency: string = '30m'
   ): Promise<any> => {
     const response = await api.post(`/connectors/gmail/config`, {
       user_id: userId,
       max_emails_per_sync: maxEmailsPerSync,
       categories: categories,
       sync_window_days: syncWindowDays,
+      auto_sync_interval_minutes: autoSyncIntervalMinutes,
+      sync_frequency: syncFrequency,
+    });
+    return response.data;
+  },
+
+  updateAutoSyncSchedule: async (
+    source: string,
+    userId: string,
+    syncFrequency: string,
+    intervalMinutes?: number,
+    autoSyncEnabled?: boolean,
+    webhookEnabled?: boolean
+  ): Promise<any> => {
+    const response = await api.post(`/connectors/${source.toLowerCase()}/auto-sync`, {
+      user_id: userId,
+      sync_frequency: syncFrequency,
+      interval_minutes: intervalMinutes,
+      auto_sync_enabled: autoSyncEnabled,
+      webhook_enabled: webhookEnabled,
     });
     return response.data;
   },
@@ -151,12 +193,77 @@ export const connectorApi = {
     return response.data;
   },
 
+  // Google Drive Specific APIs
+  getGDriveStatus: async (userId: string = 'usr_active'): Promise<any> => {
+    const response = await api.get<any>(`/connectors/gdrive/status?user_id=${userId}`);
+    return response.data;
+  },
+
+  saveGDriveConfig: async (
+    userId: string,
+    maxFilesPerSync: number,
+    categories: string[],
+    autoSyncIntervalMinutes: number = 30,
+    syncFrequency: string = '30m'
+  ): Promise<any> => {
+    const response = await api.post(`/connectors/gdrive/config`, {
+      user_id: userId,
+      max_files_per_sync: maxFilesPerSync,
+      categories: categories,
+      auto_sync_interval_minutes: autoSyncIntervalMinutes,
+      sync_frequency: syncFrequency,
+    });
+    return response.data;
+  },
+
+  triggerGDriveSyncNow: async (userId: string = 'usr_active'): Promise<any> => {
+    const response = await api.post(`/connectors/gdrive/sync-now`, {
+      user_id: userId,
+    });
+    return response.data;
+  },
+
+  triggerGDriveResync: async (userId: string = 'usr_active'): Promise<any> => {
+    const response = await api.post(`/connectors/gdrive/resync`, {
+      user_id: userId,
+    });
+    return response.data;
+  },
+
+  getGDriveActivities: async (userId: string = 'usr_active', limit: number = 20): Promise<any> => {
+    const response = await api.get<any>(`/connectors/gdrive/activities?user_id=${userId}&limit=${limit}`);
+    return response.data;
+  },
+
+  getSourceActivities: async (source: string, userId: string = 'usr_active', limit: number = 20): Promise<GmailActivitiesResponse> => {
+    const response = await api.get<GmailActivitiesResponse>(`/connectors/${source}/activities?user_id=${userId}&limit=${limit}`);
+    return response.data;
+  },
+
   disconnectGmail: async (userId: string = 'usr_active'): Promise<any> => {
     const response = await api.post(`/connectors/gmail/disconnect`, {
       user_id: userId,
     });
     return response.data;
   },
+
+  disconnectSource: async (source: string, userId: string = 'usr_active'): Promise<any> => {
+    const response = await api.post(`/connectors/${source}/disconnect`, {
+      user_id: userId,
+    });
+    return response.data;
+  },
+
+  getSourceDataSummary: async (source: string, userId: string = 'usr_active'): Promise<any> => {
+    const response = await api.get(`/connectors/${source}/data-summary?user_id=${userId}`);
+    return response.data;
+  },
+
+  purgeSourceData: async (source: string, userId: string = 'usr_active'): Promise<any> => {
+    const response = await api.delete(`/connectors/${source}/data?user_id=${userId}`);
+    return response.data;
+  },
+
 };
 
 export default connectorApi;

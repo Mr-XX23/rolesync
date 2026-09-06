@@ -16,6 +16,8 @@ class ParserService:
         self.direct_parser = DirectTextParser()
         self.llama_parser = LlamaParserService()
         self.failure_store = ParseFailureStore()
+        self.max_doc_size_mb = int(os.environ.get("MAX_DOC_ATTACHMENT_SIZE_MB", "20"))
+        self.max_image_size_mb = int(os.environ.get("MAX_IMAGE_ATTACHMENT_SIZE_MB", "4"))
         self.max_attachment_size_mb = int(os.environ.get("MAX_EMAIL_ATTACHMENT_SIZE_MB", "25"))
 
     def parse_event(self, event: CanonicalEvent, raw_bytes: bytes | None = None) -> ParsedDocument:
@@ -25,8 +27,12 @@ class ParserService:
         if event.source.lower() == "gmail":
             return self._parse_gmail_event(event, raw_bytes)
 
+        if raw_bytes is None and "raw_bytes" in event.metadata and event.metadata["raw_bytes"]:
+            raw_bytes = event.metadata["raw_bytes"]
+
         mime_type = event.metadata.get("mime_type") or event.metadata.get("mime")
         filename = event.metadata.get("name") or event.metadata.get("title") or ""
+
 
         # 1. MIME Category Routing for other data sources
         category = self.router.route(mime_type=mime_type, file_path=filename)
@@ -115,12 +121,19 @@ class ParserService:
                 except Exception:
                     att_raw = att_raw.encode("utf-8")
 
-            max_bytes = self.max_attachment_size_mb * 1024 * 1024
+            # Determine size limit based on file type: Images <= 4MB, Documents <= 20MB
+            is_image = (
+                mime.startswith("image/")
+                or fname.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".svg", ".tiff"))
+            )
+            type_limit_mb = self.max_image_size_mb if is_image else self.max_doc_size_mb
+            max_bytes = type_limit_mb * 1024 * 1024
 
-            # Rule 1: Size Check (>25MB)
+            # Rule 1: Size Check (4MB for images, 20MB for documents)
             if size_bytes > max_bytes:
                 has_skipped_attachment = True
-                skip_reason = f"ATTACHMENT_SIZE_EXCEEDED ({size_bytes / (1024*1024):.1f}MB > {self.max_attachment_size_mb}MB limit)"
+                type_label = "image" if is_image else "document"
+                skip_reason = f"{type_label.upper()}_SIZE_EXCEEDED ({size_bytes / (1024*1024):.1f}MB > {type_limit_mb}MB {type_label} limit)"
                 attachment_audits.append({
                     "filename": fname,
                     "mime_type": mime,
@@ -129,7 +142,7 @@ class ParserService:
                     "parser": None,
                     "skip_reason": skip_reason,
                 })
-                sections.append(f"---\n## Skipped Attachment: {fname}\n*Reason: Attachment exceeded {self.max_attachment_size_mb}MB file limit ({size_bytes / (1024*1024):.1f}MB). The parent email content was safely indexed.*")
+                sections.append(f"---\n## Skipped Attachment: {fname}\n*Reason: Attachment exceeded {type_limit_mb}MB {type_label} limit ({size_bytes / (1024*1024):.1f}MB). The parent email content was safely indexed.*")
                 print(f"[ParserService] Skipped attachment '{fname}' for doc_id={doc_id}: {skip_reason}")
                 continue
 

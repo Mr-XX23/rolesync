@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from module_1_document_processing.composio_connector.events.canonical_event import CanonicalEvent, EventType
+from module_1_document_processing.composio_connector.date_utils import normalize_to_utc
 
 def normalize_slack(payload: dict, tenant_id: str) -> CanonicalEvent:
     meta = payload.get("metadata", {})
@@ -47,11 +48,4 @@ def normalize_slack(payload: dict, tenant_id: str) -> CanonicalEvent:
     )
 
 def _parse_ts(raw) -> datetime:
-    if not raw:
-        return datetime.now(timezone.utc)
-    try:
-        # Slack timestamps are unix timestamps as string float "1724400000.000100"
-        float_ts = float(raw)
-        return datetime.fromtimestamp(float_ts, tz=timezone.utc)
-    except (ValueError, TypeError):
-        return datetime.now(timezone.utc)
+    return normalize_to_utc(raw)

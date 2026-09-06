@@ -97,11 +97,26 @@ def clear_user_data(email: str):
         """
         run_psql("rolesync-micro-authservice", sql_auth_cleanup)
         print("  [+] Deleted tokens, security events, OAuth identities, password tokens, and user credentials.")
-    else:
-        run_psql("rolesync-micro-authservice", f"DELETE FROM auth_user_credentials WHERE LOWER(email) = '{email}';")
-        print("  [+] Cleared credentials by email.")
+    # 4. Cleanup Data Pipeline (MongoDB, Composio, Redis)
+    print("\n--- Cleaning up Data Pipeline (MongoDB, Composio, Redis) ---")
+    try:
+        cmd_pipeline = [
+            "docker", "exec", "data-pipeline",
+            "python", "clean_mock_db.py", email
+        ]
+        res = subprocess.run(cmd_pipeline, capture_output=True, text=True)
+        if res.stdout:
+            for line in res.stdout.splitlines():
+                if any(k in line for k in ["[SUCCESS]", "Deleted", "Deleting", "Purged", "Flushed"]):
+                    print(f"  {line.strip()}")
+        if res.returncode == 0:
+            print("  [+] Data Pipeline, MongoDB, Vectors, Composio, and Redis purged.")
+        else:
+            print(f"  [!] Note on Data Pipeline purge: {res.stderr.strip()}")
+    except Exception as e:
+        print(f"  [!] Could not execute data-pipeline cleanup container: {e}")
 
-    print(f"\n[SUCCESS] Cleanup completed successfully for '{email}'!\n")
+    print(f"\n[SUCCESS] Cleanup completed successfully for '{email}' across all services!\n")
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:

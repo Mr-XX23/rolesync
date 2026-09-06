@@ -83,13 +83,17 @@ public class CookiesService {
     }
 
     private ResponseCookie createCookie(String name, String value, int maxAge) {
-        return ResponseCookie.from(name, value)
+        ResponseCookie.ResponseCookieBuilder builder = ResponseCookie.from(name, value)
                 .httpOnly(true) // Prevent XSS attacks
                 .secure(secure) // HTTPS only (enforced in production)
                 .path("/")
                 .maxAge(Duration.ofSeconds(maxAge))
-                .domain(cookieDomain)
-                .sameSite(sameSite) // Configurable CSRF protection (Lax/Strict)
-                .build();
+                .sameSite(sameSite); // Configurable CSRF protection (Lax/Strict)
+
+        if (cookieDomain != null && !cookieDomain.isBlank() && !cookieDomain.equalsIgnoreCase("localhost")) {
+            builder.domain(cookieDomain.trim());
+        }
+
+        return builder.build();
     }
 }

@@ -2,7 +2,7 @@ import React from 'react';
 import { Loader2 } from 'lucide-react';
 
 interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
-  variant?: 'primary' | 'outline';
+  variant?: 'primary' | 'outline' | 'destructive';
   isLoading?: boolean;
   icon?: React.ReactNode;
   loadingText?: string;
@@ -28,6 +28,7 @@ export const Button: React.FC<ButtonProps> = ({
   const variants = {
     primary: `bg-primary hover:opacity-90 text-primary-foreground ${hasPadding ? '' : 'py-3 px-4'} ${hasWidth ? '' : 'w-full'}`,
     outline: `border border-border hover:bg-background text-foreground ${hasPadding ? '' : 'py-3 px-4'}`,
+    destructive: `bg-red-600 hover:bg-red-700 active:bg-red-800 text-white border border-transparent shadow-sm ${hasPadding ? '' : 'py-3 px-4'}`,
   };
 
   return (

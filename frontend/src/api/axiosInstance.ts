@@ -32,14 +32,17 @@ api.interceptors.request.use(
 );
 
 let isRefreshing = false;
-let failedQueue: any[] = [];
+let failedQueue: Array<{
+  resolve: (value?: any) => void;
+  reject: (reason?: any) => void;
+}> = [];
 
-const processQueue = (error: any, token: string | null = null) => {
+const processQueue = (error: any) => {
   failedQueue.forEach((prom) => {
     if (error) {
       prom.reject(error);
     } else {
-      prom.resolve(token);
+      prom.resolve();
     }
   });
   failedQueue = [];
@@ -50,21 +53,29 @@ api.interceptors.response.use(
   async (error) => {
     const originalRequest = error.config;
 
-    // Check if error is 401 and request has not been retried yet
-    if (error.response?.status === 401 && !originalRequest._retry) {
-      // Avoid infinite loop if refresh itself fails with 401
-      if (originalRequest.url === '/auth/refresh') {
-        if (logoutCallback) {
-          logoutCallback();
-        }
-        return Promise.reject(error);
-      }
+    if (!originalRequest) {
+      return Promise.reject(error);
+    }
 
+    const requestUrl = originalRequest.url || '';
+    const isRefreshEndpoint = requestUrl.includes('/auth/refresh');
+
+    // If 401 occurs on /auth/refresh itself, refresh token is invalid/expired -> logout
+    if (isRefreshEndpoint && error.response?.status === 401) {
+      if (logoutCallback) {
+        logoutCallback();
+      }
+      return Promise.reject(error);
+    }
+
+    // Check if error is 401 and request has not been retried yet
+    if (error.response?.status === 401 && !originalRequest._retry && !isRefreshEndpoint) {
       if (isRefreshing) {
         return new Promise((resolve, reject) => {
           failedQueue.push({ resolve, reject });
         })
           .then(() => {
+            originalRequest._retry = true;
             return api(originalRequest);
           })
           .catch((err) => {
@@ -76,21 +87,26 @@ api.interceptors.response.use(
       isRefreshing = true;
 
       try {
-        // Request a new access token
-        const response = await api.post('/auth/refresh');
-        const newAccessToken = response.data;
+        // Request a new access token via refresh token cookie
+        await api.post('/auth/refresh');
         
-        processQueue(null, newAccessToken);
         isRefreshing = false;
+        processQueue(null);
         
         return api(originalRequest);
-      } catch (refreshError) {
-        processQueue(refreshError, null);
+      } catch (refreshError: any) {
         isRefreshing = false;
+        processQueue(refreshError);
         
-        // Refresh failed (e.g. refresh token expired/revoked) -> Logout user
-        if (logoutCallback) {
-          logoutCallback();
+        // Refresh failed: ONLY logout user if the server explicitly rejected the refresh token (401 or 403)
+        // Temporary network or 5xx server errors must NOT log the user out
+        if (
+          refreshError.response?.status === 401 ||
+          refreshError.response?.status === 403
+        ) {
+          if (logoutCallback) {
+            logoutCallback();
+          }
         }
         return Promise.reject(refreshError);
       }

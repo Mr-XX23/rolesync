@@ -124,6 +124,25 @@ export const checkSession = createAsyncThunk(
         status: data.user.status,
       };
     } catch (err: any) {
+      // If verify-token failed with 401, attempt explicit token refresh fallback
+      if (err.response?.status === 401) {
+        try {
+          await api.post('/auth/refresh');
+          const retryRes = await api.get('/auth/verify-token');
+          const retryData = retryRes.data;
+          return {
+            userId: retryData.user.userId,
+            username: retryData.user.username,
+            email: retryData.user.email,
+            role: retryData.user.role,
+            status: retryData.user.status,
+          };
+        } catch (refreshErr: any) {
+          return rejectWithValue(
+            refreshErr.response?.data?.message || refreshErr.message || 'Session expired'
+          );
+        }
+      }
       return rejectWithValue(err.response?.data?.message || err.message || 'Session invalid');
     }
   }

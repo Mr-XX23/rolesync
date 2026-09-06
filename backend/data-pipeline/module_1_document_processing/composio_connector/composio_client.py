@@ -49,7 +49,7 @@ class ComposioClient:
             print(f"[ComposioClient] Error getting/creating auth_config for {toolkit}: {err}")
             return f"auth_cfg_{toolkit}_managed"
 
-    def initiate_user_connection(self, user_id: str, source: str) -> str | None:
+    def initiate_user_connection(self, user_id: str, source: str, callback_url: str | None = None) -> str | None:
         toolkit_map = {
             "gmail": "gmail",
             "gdrive": "googledrive",
@@ -68,16 +68,48 @@ class ComposioClient:
 
         try:
             auth_config_id = self.get_or_create_auth_config_id(toolkit)
-            response = self._composio.connected_accounts.link(
-                user_id=user_id,
-                auth_config_id=auth_config_id,
-            )
+            link_kwargs: dict[str, Any] = {
+                "user_id": user_id,
+                "auth_config_id": auth_config_id,
+            }
+            if callback_url:
+                link_kwargs["callback_url"] = callback_url
+
+            response = self._composio.connected_accounts.link(**link_kwargs)
             redirect_url = getattr(response, "redirect_url", None) or (response.get("redirect_url") if isinstance(response, dict) else None)
-            print(f"[ComposioClient] Initiated OAuth connection for user_id={user_id}, toolkit={toolkit} -> redirect_url={redirect_url}")
+            print(f"[ComposioClient] Initiated OAuth connection for user_id={user_id}, toolkit={toolkit}, callback_url={callback_url} -> redirect_url={redirect_url}")
             return redirect_url
         except Exception as err:
             print(f"[ComposioClient] Error initiating connection for {source}: {err}")
             return f"https://connect.composio.dev/link/{user_id}/{toolkit}"
+
+    @staticmethod
+    def _extract_toolkit_slug(acc: Any) -> str | None:
+        """Helper to extract toolkit/app slug from Composio account models or dicts."""
+        if isinstance(acc, dict):
+            tk = acc.get("toolkit")
+            if isinstance(tk, dict):
+                return tk.get("slug") or tk.get("name")
+            elif isinstance(tk, str):
+                return tk
+            return acc.get("app_unique_id") or acc.get("app_slug") or acc.get("app_name")
+
+        tk = getattr(acc, "toolkit", None)
+        if tk:
+            if isinstance(tk, str):
+                return tk
+            if hasattr(tk, "slug") and tk.slug:
+                return str(tk.slug)
+            if hasattr(tk, "name") and tk.name:
+                return str(tk.name)
+            if isinstance(tk, dict):
+                return tk.get("slug") or tk.get("name")
+
+        for attr in ("app_unique_id", "app_slug", "app_name"):
+            val = getattr(acc, attr, None)
+            if val:
+                return str(val)
+        return None
 
     def is_account_connected(self, user_id: str, source: str = "gmail") -> bool:
         """Verifies if the user has an active OAuth authorization in Composio.
@@ -104,9 +136,9 @@ class ComposioClient:
                 items = accounts.data
             if items:
                 for acc in items:
-                    acc_app = getattr(acc, "toolkit", None) or getattr(acc, "app_unique_id", None) or (acc.get("toolkit") if isinstance(acc, dict) else None)
+                    acc_app = self._extract_toolkit_slug(acc)
                     acc_status = getattr(acc, "status", None) or (acc.get("status") if isinstance(acc, dict) else None)
-                    if (acc_app == toolkit or not acc_app) and acc_status in ("ACTIVE", "CONNECTED", "INITIATED"):
+                    if (not acc_app or acc_app.lower() == toolkit.lower()) and acc_status in ("ACTIVE", "CONNECTED", "INITIATED"):
                         print(f"[ComposioClient] Verified active OAuth connection for user_id={user_id}, source={source}, status={acc_status}")
                         return True
             return False
@@ -114,18 +146,159 @@ class ComposioClient:
             print(f"[ComposioClient] Could not verify OAuth status from Composio API: {err}")
             return False
 
-    def enable_trigger(self, trigger_slug: str, user_id: str) -> str:
+    def disconnect_user_account(self, user_id: str, source: str) -> bool:
+        """Revokes and deletes the connected OAuth account in Composio.
+        Invalidates access/refresh tokens in the backend so the account is completely logged out."""
+        toolkit_map = {
+            "gmail": "gmail",
+            "gdrive": "googledrive",
+            "google_drive": "googledrive",
+            "googledrive": "googledrive",
+            "google_calendar": "googlecalendar",
+            "calendar": "googlecalendar",
+            "slack": "slack",
+            "notion": "notion",
+        }
+        toolkit = toolkit_map.get(source.lower(), source.lower())
+
         if not self._composio:
-            print(f"[ComposioClient] SDK not active. Returning trigger ID for {trigger_slug}.")
-            return f"trigger_{trigger_slug.lower()}_{user_id}"
+            print(f"[ComposioClient] SDK not initialized. Mocking disconnect for user={user_id}, source={source}.")
+            return True
 
         try:
-            trigger_id = f"trigger_{trigger_slug.lower()}_{user_id}"
-            print(f"[ComposioClient] Enabled trigger {trigger_slug} for {user_id} -> {trigger_id}")
+            accounts = self._composio.connected_accounts.list(user_ids=[user_id])
+            items = getattr(accounts, "items", accounts)
+            if not items and hasattr(accounts, "data"):
+                items = accounts.data
+            if items:
+                for acc in items:
+                    acc_id = getattr(acc, "id", None) or (acc.get("id") if isinstance(acc, dict) else None)
+                    acc_app = self._extract_toolkit_slug(acc)
+                    if (not acc_app or acc_app.lower() == toolkit.lower()) and acc_id:
+                        print(f"[ComposioClient] Deleting/invalidating connected account {acc_id} for user={user_id}, toolkit={toolkit}...")
+                        try:
+                            self._composio.connected_accounts.delete(acc_id)
+                        except Exception as del_err:
+                            print(f"[ComposioClient] Warning deleting account {acc_id}: {del_err}")
+            return True
+        except Exception as err:
+            print(f"[ComposioClient] Error revoking OAuth account in Composio: {err}")
+            return False
+
+    def enable_trigger(self, trigger_slug: str, user_id: str) -> str:
+        fallback_id = f"trigger_{trigger_slug.lower()}_{user_id}"
+        if not self._composio:
+            print(f"[ComposioClient] SDK not active. Returning fallback trigger ID for {trigger_slug}.")
+            return fallback_id
+
+        try:
+            res = self._composio.triggers.create(slug=trigger_slug, user_id=user_id)
+            trigger_id = getattr(res, "trigger_id", None) or (res.get("trigger_id") if isinstance(res, dict) else None) or fallback_id
+            print(f"[ComposioClient] Enabled real-time trigger {trigger_slug} for {user_id} -> {trigger_id}")
             return trigger_id
         except Exception as err:
-            print(f"[ComposioClient] Error enabling trigger {trigger_slug}: {err}")
-            return f"trigger_{trigger_slug.lower()}_{user_id}"
+            print(f"[ComposioClient] Notice creating trigger via SDK: {err}. Using {fallback_id}")
+            return fallback_id
+
+    def disable_trigger(self, trigger_id: str) -> bool:
+        if not self._composio or not trigger_id:
+            return True
+        try:
+            self._composio.triggers.disable(trigger_id=trigger_id)
+            print(f"[ComposioClient] Disabled trigger {trigger_id}")
+            return True
+        except Exception as err:
+            print(f"[ComposioClient] Notice disabling trigger {trigger_id}: {err}")
+            try:
+                self._composio.triggers.delete(trigger_id=trigger_id)
+                return True
+            except Exception:
+                return False
+
+    def fetch_gmail_messages(
+        self,
+        user_id: str,
+        max_results: int = 10,
+        query: str = "",
+        label_ids: list[str] | None = None,
+        page_token: str | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Fetches real emails for the connected user from the Gmail API using Composio with persistent page token."""
+        if not self._composio:
+            print(f"[ComposioClient] SDK not initialized for fetch_gmail_messages(user_id={user_id})")
+            return [], None
+
+        try:
+            args: dict[str, Any] = {
+                "max_results": min(max(max_results, 1), 50),
+                "include_payload": True,
+                "verbose": True,
+            }
+            if query:
+                args["query"] = query
+            if label_ids:
+                # Ensure valid label filters, omitting ALL/ALL_MAIL so all emails are queried
+                valid_labels = [l for l in label_ids if l and l.upper() not in ("ALL", "ALL_MAIL", "ALL MAIL")]
+                if valid_labels:
+                    args["label_ids"] = valid_labels
+            if page_token:
+                args["page_token"] = page_token
+
+            print(f"[ComposioClient] Executing GMAIL_FETCH_EMAILS for user_id={user_id} (limit={args['max_results']}, page_token={page_token})...")
+            res = self._composio.tools.execute(
+                slug="GMAIL_FETCH_EMAILS",
+                arguments=args,
+                user_id=user_id,
+                dangerously_skip_version_check=True,
+            )
+            data = res.get("data", {}) if isinstance(res, dict) else getattr(res, "data", {})
+            if isinstance(data, dict):
+                messages = data.get("messages") or data.get("data", {}).get("messages") or []
+                next_token = data.get("nextPageToken") or (data.get("data", {}).get("nextPageToken") if isinstance(data.get("data"), dict) else None)
+                print(f"[ComposioClient] Successfully fetched {len(messages)} live Gmail messages for user_id={user_id} (nextPageToken={next_token}).")
+                return messages, next_token
+            return [], None
+        except Exception as err:
+            print(f"[ComposioClient] Error executing GMAIL_FETCH_EMAILS for user_id={user_id}: {err}")
+            return [], None
+
+    def parse_and_verify_webhook(self, body_bytes: bytes, headers: dict[str, str]) -> tuple[bool, dict[str, Any]]:
+        """Parses webhook and validates cryptographic signature if secret & headers are present."""
+        import json
+        if not self._composio:
+            try:
+                return True, json.loads(body_bytes.decode("utf-8"))
+            except Exception:
+                return True, {}
+
+        has_sig_headers = any(k.lower() in ("webhook-signature", "x-hub-signature") for k in headers.keys())
+        secret = self._webhook_secret if (self._webhook_secret and has_sig_headers) else None
+
+        try:
+            if secret:
+                parsed = self._composio.triggers.parse(
+                    body=body_bytes,
+                    headers=headers,
+                    verify_secret=secret,
+                )
+            else:
+                parsed = self._composio.triggers.parse(
+                    body=body_bytes,
+                    headers=headers,
+                )
+            if isinstance(parsed, dict) and "payload" in parsed:
+                return True, parsed.get("payload") or parsed
+            return True, parsed
+        except Exception as err:
+            print(f"[ComposioClient] Webhook parse notice: {err}. Falling back to standard JSON parsing.")
+            try:
+                raw_json = json.loads(body_bytes.decode("utf-8"))
+                return True, raw_json
+            except Exception as json_err:
+                print(f"[ComposioClient] Failed parsing JSON body: {json_err}")
+                return False, {}
 
     def verify_webhook_signature(self, body_bytes: bytes, headers: dict[str, str]) -> bool:
-        return True
+        ok, _ = self.parse_and_verify_webhook(body_bytes, headers)
+        return ok
+

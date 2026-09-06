@@ -56,3 +56,13 @@ class CanonicalStore:
             print(f"[CanonicalStore] Updated ACL snapshot for doc_id={doc_id}: {new_acl}")
             return True
         return False
+
+    def purge_by_tenant_source_user(self, tenant_id: str, source: str, user_id: str = "") -> int:
+        to_delete = [
+            doc_id for doc_id, doc in self._store.items()
+            if doc.tenant_id == tenant_id and doc.source.lower() == source.lower() and (not user_id or doc.user_id == user_id)
+        ]
+        for doc_id in to_delete:
+            self._store.pop(doc_id, None)
+        print(f"[CanonicalStore] Purged {len(to_delete)} staged docs for tenant={tenant_id}, source={source}, user={user_id}.")
+        return len(to_delete)
