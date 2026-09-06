@@ -63,7 +63,13 @@ class GDriveSyncManager:
         is_authenticated = self.composio.is_account_connected(user_id=user_id, source="gdrive")
 
         synced_count = self.store.count_synced_files(conn.tenant_id, conn.connection_id)
-        conn.backfill_state.total_synced_so_far = synced_count
+        changed = False
+        if conn.backfill_state.total_synced_so_far != synced_count:
+            conn.backfill_state.total_synced_so_far = synced_count
+            changed = True
+
+        old_status = conn.status
+        old_progress = conn.current_progress
 
         if is_authenticated:
             if conn.status in (GDriveSyncStatus.AVAILABLE, GDriveSyncStatus.DISCONNECTED, GDriveSyncStatus.CONFIGURATION_REQUIRED):
@@ -82,7 +88,6 @@ class GDriveSyncManager:
                             conn.current_progress = "Sync completed"
                 else:
                     conn.status = GDriveSyncStatus.CONFIGURATION_REQUIRED
-            self.store.update_connection(conn)
         else:
             if conn.status in (
                 GDriveSyncStatus.CONFIGURATION_REQUIRED,
@@ -93,7 +98,12 @@ class GDriveSyncManager:
                 GDriveSyncStatus.PARTIAL_SUCCESS,
             ):
                 conn.status = GDriveSyncStatus.AVAILABLE
-                self.store.update_connection(conn)
+
+        if conn.status != old_status or conn.current_progress != old_progress:
+            changed = True
+
+        if changed:
+            self.store.update_connection(conn)
 
         return conn
 
@@ -772,14 +782,6 @@ class GDriveSyncManager:
                     ) or self.store.is_locked(conn.connection_id):
                         continue
 
-                    # Strictly verify active OAuth connectivity with Composio
-                    try:
-                        if not self.composio.is_account_connected(user_id=conn.user_id, source="gdrive"):
-                            continue
-                    except Exception as oauth_err:
-                        print(f"[GDriveSyncManager] OAuth connectivity check notice: {oauth_err}")
-                        continue
-
                     if not getattr(conn.config, "auto_sync_enabled", False) or conn.config.sync_frequency in ("off", "manual"):
                         continue
 
@@ -804,10 +806,20 @@ class GDriveSyncManager:
                         if elapsed_seconds >= (interval_mins * 60):
                             should_run = True
 
-                    if should_run and not self.store.is_locked(conn.connection_id):
-                        self._last_auto_sync_times[conn.connection_id] = now
-                        print(f"[GDriveSyncManager] Auto-sync triggered for {conn.connection_id} after {elapsed_seconds:.1f}s.")
-                        asyncio.create_task(self.start_sync_job(conn.connection_id, trigger_type=GDriveTriggerType.AUTO_SYNC))
+                    if not should_run or self.store.is_locked(conn.connection_id):
+                        continue
+
+                    # Strictly verify active OAuth connectivity with Composio ONLY when sync is ready to run
+                    try:
+                        if not self.composio.is_account_connected(user_id=conn.user_id, source="gdrive"):
+                            continue
+                    except Exception as oauth_err:
+                        print(f"[GDriveSyncManager] OAuth connectivity check notice: {oauth_err}")
+                        continue
+
+                    self._last_auto_sync_times[conn.connection_id] = now
+                    print(f"[GDriveSyncManager] Auto-sync triggered for {conn.connection_id} after {elapsed_seconds:.1f}s.")
+                    asyncio.create_task(self.start_sync_job(conn.connection_id, trigger_type=GDriveTriggerType.AUTO_SYNC))
             except asyncio.CancelledError:
                 break
             except Exception as err:

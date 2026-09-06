@@ -62,7 +62,13 @@ class GmailSyncManager:
         is_connected = self.composio.is_account_connected(user_id, "gmail")
 
         synced_count = self.store.count_synced_messages(conn.tenant_id, conn.connection_id)
-        conn.backfill_state.total_synced_so_far = synced_count
+        changed = False
+        if conn.backfill_state.total_synced_so_far != synced_count:
+            conn.backfill_state.total_synced_so_far = synced_count
+            changed = True
+
+        old_status = conn.status
+        old_progress = conn.current_progress
 
         if is_connected:
             if conn.status in (GmailSyncStatus.AVAILABLE, GmailSyncStatus.DISCONNECTED, GmailSyncStatus.CONFIGURATION_REQUIRED):
@@ -82,12 +88,16 @@ class GmailSyncManager:
                             conn.current_progress = "Sync completed"
                 elif conn.status in (GmailSyncStatus.AVAILABLE, GmailSyncStatus.DISCONNECTED):
                     conn.status = GmailSyncStatus.CONFIGURATION_REQUIRED
-                self.store.update_connection(conn)
         else:
             # If not authenticated in Composio, revert to AVAILABLE
             if conn.status in (GmailSyncStatus.CONFIGURATION_REQUIRED, GmailSyncStatus.CONNECTED, GmailSyncStatus.SYNCING, GmailSyncStatus.WAITING_FOR_NEXT_AUTO_SYNC, GmailSyncStatus.UP_TO_DATE, GmailSyncStatus.PARTIAL_SUCCESS):
                 conn.status = GmailSyncStatus.AVAILABLE
-                self.store.update_connection(conn)
+
+        if conn.status != old_status or conn.current_progress != old_progress:
+            changed = True
+
+        if changed:
+            self.store.update_connection(conn)
         
         return conn
 
@@ -957,14 +967,6 @@ class GmailSyncManager:
                     ) or conn.lock.is_locked:
                         continue
 
-                    # Strictly verify active OAuth connectivity with Composio
-                    try:
-                        if not self.composio.is_account_connected(user_id=conn.user_id, source="gmail"):
-                            continue
-                    except Exception as oauth_err:
-                        print(f"[GmailSyncManager] OAuth connectivity check notice: {oauth_err}")
-                        continue
-
                     if not getattr(conn.config, "auto_sync_enabled", False) or conn.config.sync_frequency in ("off", "manual"):
                         continue
 
@@ -990,14 +992,24 @@ class GmailSyncManager:
                         if elapsed_seconds >= (interval_mins * 60):
                             should_run = True
 
-                    if should_run and not self.store.is_locked(conn.connection_id):
-                        self._last_auto_sync_times[conn.connection_id] = now
-                        if conn.backfill_state.historical_sync_status == HistoricalSyncStatus.IN_PROGRESS:
-                            print(f"[GmailSyncManager] Auto-sync ({interval_mins}m) continuing historical backfill for {conn.connection_id}...")
-                            asyncio.create_task(self.execute_sync_job(conn.connection_id, trigger_type=GmailTriggerType.AUTO_SYNC))
-                        elif conn.backfill_state.historical_sync_status == HistoricalSyncStatus.COMPLETED:
-                            print(f"[GmailSyncManager] Auto-sync ({interval_mins}m) running forward incremental sync for {conn.connection_id}...")
-                            asyncio.create_task(self.execute_sync_job(conn.connection_id, trigger_type=GmailTriggerType.AUTO_SYNC))
+                    if not should_run or self.store.is_locked(conn.connection_id):
+                        continue
+
+                    # Strictly verify active OAuth connectivity with Composio ONLY when sync is ready to run
+                    try:
+                        if not self.composio.is_account_connected(user_id=conn.user_id, source="gmail"):
+                            continue
+                    except Exception as oauth_err:
+                        print(f"[GmailSyncManager] OAuth connectivity check notice: {oauth_err}")
+                        continue
+
+                    self._last_auto_sync_times[conn.connection_id] = now
+                    if conn.backfill_state.historical_sync_status == HistoricalSyncStatus.IN_PROGRESS:
+                        print(f"[GmailSyncManager] Auto-sync ({interval_mins}m) continuing historical backfill for {conn.connection_id}...")
+                        asyncio.create_task(self.execute_sync_job(conn.connection_id, trigger_type=GmailTriggerType.AUTO_SYNC))
+                    elif conn.backfill_state.historical_sync_status == HistoricalSyncStatus.COMPLETED:
+                        print(f"[GmailSyncManager] Auto-sync ({interval_mins}m) running forward incremental sync for {conn.connection_id}...")
+                        asyncio.create_task(self.execute_sync_job(conn.connection_id, trigger_type=GmailTriggerType.AUTO_SYNC))
             except asyncio.CancelledError:
                 break
             except Exception as err:

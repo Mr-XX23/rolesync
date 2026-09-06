@@ -1,4 +1,6 @@
 import os
+import time
+import threading
 from typing import Any
 
 try:
@@ -14,6 +16,11 @@ class ComposioClient:
     CALENDAR_EVENT_UPDATED = "GOOGLE_CALENDAR_EVENT_UPDATED"
     SLACK_NEW_MESSAGE = "SLACK_NEW_MESSAGE"
     NOTION_PAGE_UPDATED = "NOTION_PAGE_UPDATED"
+
+    # Class-level shared in-memory TTL cache across all ComposioClient instances
+    _accounts_cache: dict[str, tuple[float, list[Any]]] = {}
+    _cache_ttl_seconds: float = float(os.environ.get("COMPOSIO_CACHE_TTL_SECONDS", "45"))
+    _cache_lock = threading.Lock()
 
     def __init__(self) -> None:
         self.api_key = os.environ.get("COMPOSIO_API_KEY", "") or "ak_kQyQGGO6ax5A8_HD23gM"
@@ -49,7 +56,45 @@ class ComposioClient:
             print(f"[ComposioClient] Error getting/creating auth_config for {toolkit}: {err}")
             return f"auth_cfg_{toolkit}_managed"
 
+    def clear_cache(self, user_id: str | None = None) -> None:
+        """Invalidates in-memory OAuth accounts cache for a specific user or entirely."""
+        with self._cache_lock:
+            if user_id:
+                self._accounts_cache.pop(user_id, None)
+            else:
+                self._accounts_cache.clear()
+
+    def get_user_connected_accounts(self, user_id: str, force_refresh: bool = False) -> list[Any]:
+        """Fetches connected accounts for a user from Composio API with in-memory TTL caching."""
+        if not self._composio:
+            return []
+
+        now = time.time()
+        with self._cache_lock:
+            if not force_refresh and user_id in self._accounts_cache:
+                cached_time, cached_accounts = self._accounts_cache[user_id]
+                if (now - cached_time) < self._cache_ttl_seconds:
+                    return cached_accounts
+
+        try:
+            accounts = self._composio.connected_accounts.list(user_ids=[user_id])
+            items = getattr(accounts, "items", accounts)
+            if not items and hasattr(accounts, "data"):
+                items = accounts.data
+            result_list = list(items) if items else []
+
+            with self._cache_lock:
+                self._accounts_cache[user_id] = (now, result_list)
+            return result_list
+        except Exception as err:
+            print(f"[ComposioClient] Could not verify OAuth status from Composio API for user_id={user_id}: {err}")
+            with self._cache_lock:
+                if user_id in self._accounts_cache:
+                    return self._accounts_cache[user_id][1]
+            return []
+
     def initiate_user_connection(self, user_id: str, source: str, callback_url: str | None = None) -> str | None:
+        self.clear_cache(user_id)
         toolkit_map = {
             "gmail": "gmail",
             "gdrive": "googledrive",
@@ -111,9 +156,8 @@ class ComposioClient:
                 return str(val)
         return None
 
-    def is_account_connected(self, user_id: str, source: str = "gmail") -> bool:
-        """Verifies if the user has an active OAuth authorization in Composio.
-        Composio manages token refreshes, access tokens, and expirations automatically."""
+    def is_account_connected(self, user_id: str, source: str = "gmail", force_refresh: bool = False) -> bool:
+        """Verifies if the user has an active OAuth authorization in Composio using cached accounts."""
         toolkit_map = {
             "gmail": "gmail",
             "gdrive": "googledrive",
@@ -129,22 +173,14 @@ class ComposioClient:
         if not self._composio:
             return False
 
-        try:
-            accounts = self._composio.connected_accounts.list(user_ids=[user_id])
-            items = getattr(accounts, "items", accounts)
-            if not items and hasattr(accounts, "data"):
-                items = accounts.data
-            if items:
-                for acc in items:
-                    acc_app = self._extract_toolkit_slug(acc)
-                    acc_status = getattr(acc, "status", None) or (acc.get("status") if isinstance(acc, dict) else None)
-                    if (not acc_app or acc_app.lower() == toolkit.lower()) and acc_status in ("ACTIVE", "CONNECTED", "INITIATED"):
-                        print(f"[ComposioClient] Verified active OAuth connection for user_id={user_id}, source={source}, status={acc_status}")
-                        return True
-            return False
-        except Exception as err:
-            print(f"[ComposioClient] Could not verify OAuth status from Composio API: {err}")
-            return False
+        items = self.get_user_connected_accounts(user_id=user_id, force_refresh=force_refresh)
+        if items:
+            for acc in items:
+                acc_app = self._extract_toolkit_slug(acc)
+                acc_status = getattr(acc, "status", None) or (acc.get("status") if isinstance(acc, dict) else None)
+                if (not acc_app or acc_app.lower() == toolkit.lower()) and acc_status in ("ACTIVE", "CONNECTED", "INITIATED"):
+                    return True
+        return False
 
     def disconnect_user_account(self, user_id: str, source: str) -> bool:
         """Revokes and deletes the connected OAuth account in Composio.
@@ -161,17 +197,14 @@ class ComposioClient:
         }
         toolkit = toolkit_map.get(source.lower(), source.lower())
 
-        if not self._composio:
-            print(f"[ComposioClient] SDK not initialized. Mocking disconnect for user={user_id}, source={source}.")
-            return True
-
         try:
-            accounts = self._composio.connected_accounts.list(user_ids=[user_id])
-            items = getattr(accounts, "items", accounts)
-            if not items and hasattr(accounts, "data"):
-                items = accounts.data
-            if items:
-                for acc in items:
+            if not self._composio:
+                print(f"[ComposioClient] SDK not initialized. Mocking disconnect for user={user_id}, source={source}.")
+                return True
+
+            accounts = self.get_user_connected_accounts(user_id=user_id, force_refresh=True)
+            if accounts:
+                for acc in accounts:
                     acc_id = getattr(acc, "id", None) or (acc.get("id") if isinstance(acc, dict) else None)
                     acc_app = self._extract_toolkit_slug(acc)
                     if (not acc_app or acc_app.lower() == toolkit.lower()) and acc_id:
@@ -184,6 +217,8 @@ class ComposioClient:
         except Exception as err:
             print(f"[ComposioClient] Error revoking OAuth account in Composio: {err}")
             return False
+        finally:
+            self.clear_cache(user_id)
 
     def enable_trigger(self, trigger_slug: str, user_id: str) -> str:
         fallback_id = f"trigger_{trigger_slug.lower()}_{user_id}"

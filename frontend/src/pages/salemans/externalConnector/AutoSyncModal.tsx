@@ -199,7 +199,7 @@ export const AutoSyncModal: React.FC<AutoSyncModalProps> = ({
       />
 
       {/* Modal Card */}
-      <div className="relative w-full max-w-xl bg-card border border-border rounded-2xl shadow-2xl z-10 animate-in zoom-in-95 duration-200 overflow-hidden text-left flex flex-col max-h-[92vh]">
+      <div className="relative w-full max-w-2xl bg-card border border-border rounded-2xl shadow-2xl z-10 animate-in zoom-in-95 duration-200 overflow-hidden text-left flex flex-col max-h-[92vh]">
         {/* Header */}
         <div className="p-6 border-b border-border/80 flex justify-between items-start bg-muted/20">
           <div className="flex items-center gap-3.5">
@@ -256,7 +256,7 @@ export const AutoSyncModal: React.FC<AutoSyncModalProps> = ({
                 </div>
                 <div>
                   <h4 className="text-xs font-bold text-foreground flex items-center gap-2">
-                    Option 1: Automated Background Sync
+                    Automated Background Sync
                     <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded ${autoSyncEnabled ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 font-bold' : 'bg-muted text-muted-foreground'}`}>
                       {autoSyncEnabled ? 'ON' : 'OFF (Default)'}
                     </span>
@@ -368,7 +368,7 @@ export const AutoSyncModal: React.FC<AutoSyncModalProps> = ({
                 </div>
                 <div>
                   <h4 className="text-xs font-bold text-foreground flex items-center gap-2">
-                    Option 2: Real-Time Webhooks Trigger
+                    Real-Time Webhooks Trigger
                     <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded ${webhookEnabled ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 font-bold' : 'bg-muted text-muted-foreground'}`}>
                       {webhookEnabled ? 'ON' : 'OFF (Default)'}
                     </span>

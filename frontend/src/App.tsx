@@ -12,15 +12,37 @@ const App = () => {
   const { isCheckingSession, isAuthenticated } = useAppSelector((state) => state.auth);
 
   useEffect(() => {
+    const isConnectorPopup = typeof window !== 'undefined' && (
+      window.location.pathname.startsWith('/connectors/callback') ||
+      (Boolean(window.opener) && window.name === 'RoleSyncConnectorOAuth')
+    );
+
+    if (isConnectorPopup) {
+      console.log('[App] OAuth connector popup detected at', window.location.pathname, '- skipping session verification in popup.');
+      dispatch(skipSessionCheck());
+      return;
+    }
+
     if (isAuthenticated) {
+      console.log('[App] Session check initiated (persisted isAuthenticated=true)');
       dispatch(checkSession());
     } else {
+      console.log('[App] Skipping session check (not authenticated)');
       dispatch(skipSessionCheck());
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
+    const isConnectorPopup = typeof window !== 'undefined' && (
+      window.location.pathname.startsWith('/connectors/callback') ||
+      (Boolean(window.opener) && window.name === 'RoleSyncConnectorOAuth')
+    );
+
+    if (isConnectorPopup) {
+      return;
+    }
+
     if (!isCheckingSession && isAuthenticated) {
       dispatch(fetchProfile());
       dispatch(fetchPreferences());

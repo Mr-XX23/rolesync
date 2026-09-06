@@ -114,8 +114,10 @@ export const checkSession = createAsyncThunk(
   'auth/checkSession',
   async (_, { rejectWithValue }) => {
     try {
+      console.log('[authSlice] checkSession: verifying session token...');
       const response = await api.get('/auth/verify-token');
       const data = response.data;
+      console.log('[authSlice] checkSession: token verified for user', data?.user?.userId || data?.user?.email);
       return {
         userId: data.user.userId,
         username: data.user.username,
@@ -124,12 +126,24 @@ export const checkSession = createAsyncThunk(
         status: data.user.status,
       };
     } catch (err: any) {
+      console.warn('[authSlice] checkSession error:', err.message, 'status:', err.response?.status, 'code:', err.code);
+
+      // If request was canceled/aborted or network failed (no response from server)
+      if (err.code === 'ERR_CANCELED' || !err.response) {
+        return rejectWithValue({
+          message: err.message || 'Network connectivity error',
+          isUnauthorized: false,
+        });
+      }
+
       // If verify-token failed with 401, attempt explicit token refresh fallback
       if (err.response?.status === 401) {
         try {
+          console.log('[authSlice] checkSession: attempting token refresh...');
           await api.post('/auth/refresh');
           const retryRes = await api.get('/auth/verify-token');
           const retryData = retryRes.data;
+          console.log('[authSlice] checkSession: refresh succeeded for user', retryData?.user?.userId);
           return {
             userId: retryData.user.userId,
             username: retryData.user.username,
@@ -138,12 +152,19 @@ export const checkSession = createAsyncThunk(
             status: retryData.user.status,
           };
         } catch (refreshErr: any) {
-          return rejectWithValue(
-            refreshErr.response?.data?.message || refreshErr.message || 'Session expired'
-          );
+          console.warn('[authSlice] checkSession: refresh failed:', refreshErr.message);
+          return rejectWithValue({
+            message: refreshErr.response?.data?.message || refreshErr.message || 'Session expired',
+            isUnauthorized: refreshErr.response?.status === 401 || refreshErr.response?.status === 403,
+          });
         }
       }
-      return rejectWithValue(err.response?.data?.message || err.message || 'Session invalid');
+
+      const isUnauth = err.response?.status === 401 || err.response?.status === 403;
+      return rejectWithValue({
+        message: err.response?.data?.message || err.message || 'Session invalid',
+        isUnauthorized: isUnauth,
+      });
     }
   }
 );
@@ -353,10 +374,19 @@ const authSlice = createSlice({
         state.user = action.payload;
         state.error = null;
       })
-      .addCase(checkSession.rejected, (state) => {
+      .addCase(checkSession.rejected, (state, action) => {
         state.isCheckingSession = false;
-        state.isAuthenticated = false;
-        state.user = null;
+        const payload = action.payload as { message?: string; isUnauthorized?: boolean } | undefined;
+        const isExplicitUnauthorized = payload?.isUnauthorized ?? false;
+
+        if (isExplicitUnauthorized) {
+          console.warn('[authSlice] checkSession: explicit 401/403 rejection from backend. Clearing auth session.');
+          state.isAuthenticated = false;
+          state.user = null;
+          state.error = payload?.message || 'Session expired';
+        } else {
+          console.log('[authSlice] checkSession: non-auth error (e.g. network/popup cancelled). Keeping persisted session for user:', state.user?.userId);
+        }
       })
       // Logout flow
       .addCase(logoutUser.pending, (state) => {

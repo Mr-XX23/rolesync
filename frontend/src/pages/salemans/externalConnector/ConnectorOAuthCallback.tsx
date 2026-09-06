@@ -31,7 +31,10 @@ export const ConnectorOAuthCallback: React.FC = () => {
     const connectedAccountId = searchParams.get('connectedAccountId');
     const errorParam = searchParams.get('error');
 
+    console.log(`[ConnectorOAuthCallback] Processing callback in popup: source=${appName}, connectedAccountId=${connectedAccountId}, status=${status}, error=${errorParam}`);
+
     if (errorParam || (status && status.toLowerCase() === 'failed')) {
+      console.warn('[ConnectorOAuthCallback] OAuth failed or cancelled:', errorParam || status);
       setIsError(true);
       setStatusMessage(errorParam || 'Authorization was cancelled or failed.');
       setIsClosing(false);
@@ -43,6 +46,7 @@ export const ConnectorOAuthCallback: React.FC = () => {
     // 1. Notify Parent/Opener Window
     try {
       if (window.opener && !window.opener.closed) {
+        console.log(`[ConnectorOAuthCallback] Posting ROLESYNC_CONNECTOR_AUTH_SUCCESS to opener for ${appName}`);
         window.opener.postMessage(
           {
             type: 'ROLESYNC_CONNECTOR_AUTH_SUCCESS',
@@ -52,9 +56,11 @@ export const ConnectorOAuthCallback: React.FC = () => {
           },
           window.location.origin
         );
+      } else {
+        console.warn('[ConnectorOAuthCallback] window.opener is not available or closed');
       }
     } catch (err) {
-      console.warn('[OAuthCallback] Could not postMessage to opener:', err);
+      console.warn('[ConnectorOAuthCallback] Could not postMessage to opener:', err);
     }
 
 

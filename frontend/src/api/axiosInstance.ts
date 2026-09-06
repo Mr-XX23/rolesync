@@ -104,8 +104,15 @@ api.interceptors.response.use(
           refreshError.response?.status === 401 ||
           refreshError.response?.status === 403
         ) {
-          if (logoutCallback) {
+          const isPopup = typeof window !== 'undefined' && (
+            window.location.pathname.startsWith('/connectors/callback') ||
+            Boolean(window.opener)
+          );
+          if (!isPopup && logoutCallback) {
+            console.warn('[axiosInstance] Refresh token explicitly rejected. Logging out user in main window.');
             logoutCallback();
+          } else if (isPopup) {
+            console.warn('[axiosInstance] 401 occurred inside popup window. Suppressing logoutCallback to protect parent session.');
           }
         }
         return Promise.reject(refreshError);

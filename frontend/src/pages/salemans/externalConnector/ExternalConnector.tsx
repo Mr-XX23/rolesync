@@ -266,7 +266,7 @@ export const ExternalConnector: React.FC = () => {
   const [isSubmittingEnterprise, setIsSubmittingEnterprise] = useState<boolean>(false);
 
   // Helper to open a centered OAuth popup window
-  const openOAuthPopup = (url: string, title: string = 'RoleSync Connector Authorization') => {
+  const openOAuthPopup = (url: string, title: string = 'RoleSyncConnectorOAuth') => {
     const width = 600;
     const height = 700;
     const left = window.screenX + (window.outerWidth - width) / 2;
@@ -279,7 +279,7 @@ export const ExternalConnector: React.FC = () => {
 
     const popup = window.open(
       url,
-      title,
+      'RoleSyncConnectorOAuth',
       `width=${width},height=${height},left=${left},top=${top},scrollbars=yes,status=yes,resizable=yes`
     );
     oauthPopupRef.current = popup;
@@ -318,17 +318,21 @@ export const ExternalConnector: React.FC = () => {
         }
 
 
+        // Clear local syncing lock if backend has completed sync
+        if (activeSyncingId) {
+          const activeConn = conns[activeSyncingId];
+          if (activeConn && activeConn.status !== 'Syncing' && !activeConn.lock?.is_locked && !activeConn.is_locked) {
+            setActiveSyncingId(null);
+          }
+        }
+
         setIntegrations((prev) =>
           prev.map((item) => {
             const liveConn = conns[item.id];
             if (liveConn) {
               const isConn = isConnectedState(liveConn.status);
               const captured = liveConn.backfill_state?.total_synced_so_far ?? liveConn.sync_captured ?? 0;
-              
-              // Clear local syncing lock if backend has completed sync
-              if (activeSyncingId === item.id && liveConn.status !== 'Syncing' && !liveConn.lock?.is_locked) {
-                setActiveSyncingId(null);
-              }
+              const isItemSyncing = liveConn.status === 'Syncing' || activeSyncingId === item.id;
 
               // Determine formatted sync frequency label
               let freqDisplay = 'OFF';
@@ -359,7 +363,7 @@ export const ExternalConnector: React.FC = () => {
 
               return {
                 ...item,
-                status: liveConn.status as any,
+                status: (isItemSyncing ? 'Syncing' : liveConn.status) as any,
                 currentProgress: liveConn.current_progress || '',
                 isLocked: liveConn.lock?.is_locked || liveConn.is_locked || false,
                 syncCaptured: captured,
@@ -400,7 +404,7 @@ export const ExternalConnector: React.FC = () => {
         }
 
         const sourceId = rawSource || 'gdrive';
-        console.log(`[Frontend] Received OAuth authorization success for ${sourceId}`);
+        console.log(`[Frontend] Received OAuth authorization success for ${sourceId}, activeUserId=${activeUserId}`);
 
         sessionStorage.removeItem('rolesync_oauth_connecting_source');
         localStorage.removeItem('rolesync_oauth_connecting_source');
@@ -447,14 +451,60 @@ export const ExternalConnector: React.FC = () => {
     };
   }, [connectingId, integrations]);
 
-  // Poll status periodically for all connectors
+  // Determine if any connector is actively syncing or in OAuth popup flow
+  const isAnySyncingOrConnecting = useMemo(() => {
+    return (
+      Boolean(connectingId) ||
+      Boolean(activeSyncingId) ||
+      integrations.some((item) => item.status === 'Syncing')
+    );
+  }, [connectingId, activeSyncingId, integrations]);
+
+  // Adaptive status polling: fast (3s) during sync/connect, relaxed (45s) when idle, paused when tab is hidden
   useEffect(() => {
     fetchAllConnectorsStatus();
-    const interval = setInterval(() => {
-      fetchAllConnectorsStatus();
-    }, 4000);
-    return () => clearInterval(interval);
-  }, [activeUserId]);
+
+    let intervalId: ReturnType<typeof setInterval> | null = null;
+
+    const startAdaptivePolling = () => {
+      if (intervalId) {
+        clearInterval(intervalId);
+        intervalId = null;
+      }
+      if (typeof document !== 'undefined' && document.hidden) {
+        return;
+      }
+      const pollDelay = isAnySyncingOrConnecting ? 3000 : 45000;
+      intervalId = setInterval(() => {
+        if (typeof document !== 'undefined' && document.hidden) return;
+        fetchAllConnectorsStatus();
+      }, pollDelay);
+    };
+
+    const handleVisibilityChange = () => {
+      if (typeof document !== 'undefined' && !document.hidden) {
+        fetchAllConnectorsStatus();
+        startAdaptivePolling();
+      } else {
+        if (intervalId) {
+          clearInterval(intervalId);
+          intervalId = null;
+        }
+      }
+    };
+
+    startAdaptivePolling();
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+    }
+
+    return () => {
+      if (intervalId) clearInterval(intervalId);
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+      }
+    };
+  }, [activeUserId, isAnySyncingOrConnecting]);
 
   // Dynamic stats calculated from active integrations
   const connectedCount = useMemo(() => {
@@ -488,6 +538,11 @@ export const ExternalConnector: React.FC = () => {
   // Connect Source via API Gateway & Composio OAuth with Popup
   const handleToggleConnection = async (item: Integration) => {
     const { id, status: currentStatus } = item;
+
+    if (currentStatus === 'Syncing' || activeSyncingId === id) {
+      toast.warning('A sync is currently in progress. Please wait for synchronization to finish.', 'Sync In Progress');
+      return;
+    }
 
     if (id === 'gmail') {
       if (currentStatus === 'Available' || currentStatus === 'Disconnected') {
@@ -739,6 +794,12 @@ export const ExternalConnector: React.FC = () => {
   const confirmDisconnection = async () => {
     if (!disconnectingId || isDisconnecting) return;
     const targetId = disconnectingId;
+    const targetItem = integrations.find((i) => i.id === targetId);
+    if (targetItem?.status === 'Syncing' || activeSyncingId === targetId) {
+      toast.warning('Cannot disconnect while a sync is in progress. Please wait for synchronization to finish.', 'Sync In Progress');
+      setDisconnectingId(null);
+      return;
+    }
     setIsDisconnecting(true);
 
     try {
@@ -786,12 +847,26 @@ export const ExternalConnector: React.FC = () => {
     setActiveSyncingId(id);
     setLockNotice(null);
 
+    // Optimistically reflect 'Syncing' status immediately on the connector card
+    setIntegrations((prev) =>
+      prev.map((c) =>
+        c.id === id
+          ? {
+              ...c,
+              status: 'Syncing',
+              currentProgress: c.currentProgress || 'Syncing...',
+            }
+          : c
+      )
+    );
+
     if (id === 'gmail') {
       try {
         await connectorApi.triggerGmailSyncNow(activeUserId);
-        await fetchAllConnectorsStatus();
         toast.info('Manual sync batch started for Gmail.', 'Sync Initiated');
+        await fetchAllConnectorsStatus();
       } catch (err: any) {
+        setActiveSyncingId(null);
         if (err?.response?.status === 409) {
           const msg = 'Your Gmail data is currently being processed. Please wait a moment before starting another sync.';
           setLockNotice(msg);
@@ -800,8 +875,7 @@ export const ExternalConnector: React.FC = () => {
           console.error('[Frontend] Gmail manual sync error:', err);
           toast.error(err?.message || 'Failed to start Gmail sync.', 'Sync Failed');
         }
-      } finally {
-        setActiveSyncingId(null);
+        await fetchAllConnectorsStatus();
       }
       return;
     }
@@ -809,9 +883,10 @@ export const ExternalConnector: React.FC = () => {
     if (id === 'gdrive') {
       try {
         await connectorApi.triggerGDriveSyncNow(activeUserId);
-        await fetchAllConnectorsStatus();
         toast.info('Manual sync batch started for Google Drive.', 'Sync Initiated');
+        await fetchAllConnectorsStatus();
       } catch (err: any) {
+        setActiveSyncingId(null);
         if (err?.response?.status === 409) {
           const msg = 'Your Google Drive data is currently being processed. Please wait a moment before starting another sync.';
           setLockNotice(msg);
@@ -820,21 +895,20 @@ export const ExternalConnector: React.FC = () => {
           console.error('[Frontend] GDrive manual sync error:', err);
           toast.error(err?.message || 'Failed to start Google Drive sync.', 'Sync Failed');
         }
-      } finally {
-        setActiveSyncingId(null);
+        await fetchAllConnectorsStatus();
       }
       return;
     }
 
     try {
       await connectorApi.reconcileSource(id, 'tenant_default');
-      await fetchAllConnectorsStatus();
       toast.info(`Reconciliation sync started for ${id}.`, 'Sync Initiated');
+      await fetchAllConnectorsStatus();
     } catch (err: any) {
+      setActiveSyncingId(null);
       console.error(`[Frontend] Manual sync failed for ${id}:`, err);
       toast.error(`Sync failed for ${id}.`, 'Sync Failed');
-    } finally {
-      setActiveSyncingId(null);
+      await fetchAllConnectorsStatus();
     }
   };
 
@@ -944,7 +1018,7 @@ export const ExternalConnector: React.FC = () => {
   const renderStatusBadge = (item: Integration) => {
     const isConnected = isConnectedState(item.status);
     const isConnecting = connectingId === item.id;
-    const isSyncing = item.status === 'Syncing';
+    const isSyncing = item.status === 'Syncing' || activeSyncingId === item.id;
 
     if (isConnecting) {
       return (
@@ -1105,7 +1179,7 @@ export const ExternalConnector: React.FC = () => {
           const Icon = item.icon;
           const isConnected = isConnectedState(item.status);
           const isConnecting = connectingId === item.id;
-          const isSyncing = item.status === 'Syncing';
+          const isSyncing = item.status === 'Syncing' || activeSyncingId === item.id;
 
           return (
             <div
@@ -1207,8 +1281,12 @@ export const ExternalConnector: React.FC = () => {
                         onClick={() => triggerManualSync(item.id)}
                         disabled={isSyncing}
                         aria-label={`Sync Now for ${item.name}`}
-                        className="w-8 h-8 rounded-full border border-border bg-background/80 hover:bg-muted flex items-center justify-center text-muted-foreground hover:text-foreground transition-all cursor-pointer shadow-3xs disabled:opacity-50"
-                        title="Sync Now (Process Next Batch)"
+                        className={`w-8 h-8 rounded-full border border-border bg-background/80 flex items-center justify-center transition-all shadow-3xs ${
+                          isSyncing
+                            ? 'text-primary border-primary/40 bg-primary/5 cursor-not-allowed'
+                            : 'text-muted-foreground hover:text-foreground hover:bg-muted cursor-pointer'
+                        }`}
+                        title={isSyncing ? `Syncing in progress for ${item.name}...` : "Sync Now (Process Next Batch)"}
                       >
                         <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin text-primary' : ''}`} />
                       </button>
@@ -1228,22 +1306,30 @@ export const ExternalConnector: React.FC = () => {
 
                       {/* 4. Configure & Settings Button */}
                       <button
-                        onClick={() => setActiveConfigConnector(item)}
+                        onClick={() => !isSyncing && setActiveConfigConnector(item)}
                         disabled={isSyncing}
                         aria-label={`Configure ${item.name} Settings and Limits`}
-                        className="w-8 h-8 rounded-full border border-border bg-background/80 hover:bg-muted flex items-center justify-center text-muted-foreground hover:text-foreground transition-all cursor-pointer shadow-3xs disabled:opacity-50"
-                        title={`Configure ${item.name} Limits & Scopes`}
+                        className={`w-8 h-8 rounded-full border border-border bg-background/80 flex items-center justify-center text-muted-foreground transition-all shadow-3xs ${
+                          isSyncing
+                            ? 'opacity-40 cursor-not-allowed pointer-events-none'
+                            : 'hover:bg-muted hover:text-foreground cursor-pointer'
+                        }`}
+                        title={isSyncing ? 'Settings disabled while syncing' : `Configure ${item.name} Limits & Scopes`}
                       >
                         <Settings className="w-3.5 h-3.5" />
                       </button>
 
                       {/* 5. Disconnect Button */}
                       <button
-                        onClick={() => setDisconnectingId(item.id)}
+                        onClick={() => !isSyncing && setDisconnectingId(item.id)}
                         disabled={isSyncing}
                         aria-label={`Disconnect ${item.name}`}
-                        className="w-8 h-8 rounded-full border border-border bg-background/80 hover:bg-destructive/10 hover:border-destructive/30 hover:text-destructive flex items-center justify-center text-muted-foreground transition-all cursor-pointer shadow-3xs disabled:opacity-50"
-                        title={`Disconnect ${item.name}`}
+                        className={`w-8 h-8 rounded-full border border-border bg-background/80 flex items-center justify-center text-muted-foreground transition-all shadow-3xs ${
+                          isSyncing
+                            ? 'opacity-40 cursor-not-allowed pointer-events-none'
+                            : 'hover:bg-destructive/10 hover:border-destructive/30 hover:text-destructive cursor-pointer'
+                        }`}
+                        title={isSyncing ? 'Disconnect disabled while syncing' : `Disconnect ${item.name}`}
                       >
                         <Power className="w-3.5 h-3.5" />
                       </button>

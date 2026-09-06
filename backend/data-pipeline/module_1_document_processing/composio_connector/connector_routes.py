@@ -125,21 +125,24 @@ def connect_connector(source: str, req: ConnectRequest, x_tenant_id: str = Heade
 
 @router.post("/connectors/{source}/disconnect")
 def disconnect_connector(source: str, req: ConnectRequest, x_tenant_id: str = Header(default="tenant_default")):
-    if source.lower() == "gmail":
-        return gmail_sync_manager.disconnect_connection(user_id=req.user_id, tenant_id=x_tenant_id)
-    elif source.lower() in ("gdrive", "googledrive", "google_drive"):
-        return gdrive_sync_manager.disconnect_connection(user_id=req.user_id, tenant_id=x_tenant_id)
-
-    # Invalidate and revoke OAuth token in Composio backend
     try:
-        connector_service.composio.disconnect_user_account(user_id=req.user_id, source=source)
-    except Exception as err:
-        print(f"[ConnectorRoutes] Error disconnecting {source}: {err}")
+        if source.lower() == "gmail":
+            return gmail_sync_manager.disconnect_connection(user_id=req.user_id, tenant_id=x_tenant_id)
+        elif source.lower() in ("gdrive", "googledrive", "google_drive"):
+            return gdrive_sync_manager.disconnect_connection(user_id=req.user_id, tenant_id=x_tenant_id)
 
-    return {
-        "status": "success",
-        "message": f"{source} disconnected. OAuth tokens invalidated. Synced memories preserved.",
-    }
+        # Invalidate and revoke OAuth token in Composio backend
+        try:
+            connector_service.composio.disconnect_user_account(user_id=req.user_id, source=source)
+        except Exception as err:
+            print(f"[ConnectorRoutes] Error disconnecting {source}: {err}")
+
+        return {
+            "status": "success",
+            "message": f"{source} disconnected. OAuth tokens invalidated. Synced memories preserved.",
+        }
+    finally:
+        connector_service.composio.clear_cache(req.user_id)
 
 @router.post("/connectors/gmail/config")
 async def save_gmail_config(req: GmailConfigRequest, x_tenant_id: str = Header(default="tenant_default")):
