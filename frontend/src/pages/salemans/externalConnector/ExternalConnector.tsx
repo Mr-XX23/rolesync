@@ -279,9 +279,10 @@ export const ExternalConnector: React.FC = () => {
 
     const popup = window.open(
       url,
-      'RoleSyncConnectorOAuth',
+      title,
       `width=${width},height=${height},left=${left},top=${top},scrollbars=yes,status=yes,resizable=yes`
     );
+
     oauthPopupRef.current = popup;
     return popup;
   };
@@ -752,6 +753,108 @@ export const ExternalConnector: React.FC = () => {
       return;
     }
 
+    if (id === 'calendar') {
+      if (currentStatus === 'Available' || currentStatus === 'Disconnected') {
+        hasHandledAuthSuccessRef.current = false;
+        setConnectingId('calendar');
+        sessionStorage.setItem('rolesync_oauth_connecting_source', 'calendar');
+        localStorage.setItem('rolesync_oauth_connecting_source', 'calendar');
+        try {
+          const callbackUrl = `${window.location.origin}/connectors/callback?source=calendar`;
+          const res = await connectorApi.connectSource('calendar', activeUserId, callbackUrl);
+
+          if (res.redirect_url) {
+            const popup = openOAuthPopup(res.redirect_url);
+
+            if (popupWatcherRef.current) clearInterval(popupWatcherRef.current);
+            let pollCount = 0;
+            popupWatcherRef.current = setInterval(async () => {
+              pollCount += 1;
+              if (!popup || popup.closed) {
+                if (popupWatcherRef.current) clearInterval(popupWatcherRef.current);
+                popupWatcherRef.current = null;
+                oauthPopupRef.current = null;
+                setConnectingId(null);
+
+                if (hasHandledAuthSuccessRef.current) {
+                  return;
+                }
+
+                try {
+                  const statusRes = await connectorApi.getCalendarStatus(activeUserId);
+                  if (statusRes?.connection && isAuthorizedState(statusRes.connection.status)) {
+                    hasHandledAuthSuccessRef.current = true;
+                    await fetchAllConnectorsStatus();
+                    if (statusRes.connection.status === 'Configuration Required') {
+                      setActiveConfigConnector({
+                        ...item,
+                        status: 'Configuration Required',
+                      });
+                    }
+                    toast.success(
+                      'Google Calendar authorized successfully! Please configure your sync preferences.',
+                      'Authorization Complete'
+                    );
+                  } else {
+                    setIntegrations((prev) =>
+                      prev.map((c) => (c.id === 'calendar' ? { ...c, status: 'Available' } : c))
+                    );
+                    await fetchAllConnectorsStatus();
+                  }
+                } catch {
+                  setIntegrations((prev) =>
+                    prev.map((c) => (c.id === 'calendar' ? { ...c, status: 'Available' } : c))
+                  );
+                }
+                return;
+              }
+
+              if (pollCount % 2 === 0) {
+                if (hasHandledAuthSuccessRef.current) {
+                  if (popupWatcherRef.current) clearInterval(popupWatcherRef.current);
+                  popupWatcherRef.current = null;
+                  return;
+                }
+
+                try {
+                  const statusRes = await connectorApi.getCalendarStatus(activeUserId);
+                  if (statusRes?.connection && isAuthorizedState(statusRes.connection.status)) {
+                    hasHandledAuthSuccessRef.current = true;
+                    if (popupWatcherRef.current) clearInterval(popupWatcherRef.current);
+                    popupWatcherRef.current = null;
+                    if (popup && !popup.closed) popup.close();
+                    oauthPopupRef.current = null;
+                    setConnectingId(null);
+                    await fetchAllConnectorsStatus();
+                    if (statusRes.connection.status === 'Configuration Required') {
+                      setActiveConfigConnector({
+                        ...item,
+                        status: 'Configuration Required',
+                      });
+                    }
+                    toast.success(
+                      'Google Calendar authorized successfully! Please configure your sync preferences.',
+                      'Authorization Complete'
+                    );
+                  }
+                } catch {}
+              }
+            }, 1500);
+          }
+        } catch (err: any) {
+          console.error('[Frontend] Google Calendar connect error:', err);
+          toast.error('Failed to initiate Google Calendar connection. Please try again.', 'Connection Error');
+          setConnectingId(null);
+        }
+      } else if (currentStatus === 'Configuration Required') {
+        setActiveConfigConnector(item);
+      } else {
+        setDisconnectingId('calendar');
+      }
+      return;
+    }
+
+
 
     if (currentStatus === 'Available' || currentStatus === 'Disconnected') {
       setConnectingId(id);
@@ -900,6 +1003,27 @@ export const ExternalConnector: React.FC = () => {
       return;
     }
 
+    if (id === 'calendar') {
+      try {
+        await connectorApi.triggerCalendarSyncNow(activeUserId);
+        toast.info('Manual sync batch started for Google Calendar.', 'Sync Initiated');
+        await fetchAllConnectorsStatus();
+      } catch (err: any) {
+        setActiveSyncingId(null);
+        if (err?.response?.status === 409) {
+          const msg = 'Your Google Calendar data is currently being processed. Please wait a moment before starting another sync.';
+          setLockNotice(msg);
+          toast.warning(msg, 'Sync In Progress');
+        } else {
+          console.error('[Frontend] Calendar manual sync error:', err);
+          toast.error(err?.message || 'Failed to start Google Calendar sync.', 'Sync Failed');
+        }
+        await fetchAllConnectorsStatus();
+      }
+      return;
+    }
+
+
     try {
       await connectorApi.reconcileSource(id, 'tenant_default');
       toast.info(`Reconciliation sync started for ${id}.`, 'Sync Initiated');
@@ -953,8 +1077,20 @@ export const ExternalConnector: React.FC = () => {
         setActiveSyncingId(null);
         await fetchAllConnectorsStatus();
       }
+    } else if (connId === 'calendar') {
+      try {
+        await connectorApi.saveCalendarConfig(activeUserId, maxItems, categories.length > 0 ? categories : ['PRIMARY']);
+        await fetchAllConnectorsStatus();
+        toast.info('Initial synchronization initiated. Processing Google Calendar events (Phase 1: Future 1-Year, Phase 2: Historical 180 Days)...', 'Syncing Started');
+      } catch (err: any) {
+        console.error('[Frontend] Save Calendar config error:', err);
+        toast.error('Failed to start Calendar sync. Please try again.', 'Sync Error');
+        setActiveSyncingId(null);
+        await fetchAllConnectorsStatus();
+      }
     }
   };
+
 
 
   // Dedicated Save Auto-Sync Schedule & Webhooks Trigger
@@ -1207,7 +1343,7 @@ export const ExternalConnector: React.FC = () => {
                 {/* Typography */}
                 <h3 className="font-serif text-base font-bold text-foreground mb-1 group-hover:text-primary transition-colors flex items-center justify-between">
                   <span>{item.name}</span>
-                  {item.id === 'gmail' && gmailDetails?.backfill_state?.is_backfill_complete && (
+                  {isConnected && Boolean(item.webhookEnabled || allConnections[item.id]?.config?.webhook_enabled || (item.id === 'gmail' && gmailDetails?.config?.webhook_enabled)) && (
                     <span className="text-[9px] font-mono font-semibold px-2 py-0.5 bg-emerald-500/10 text-emerald-600 rounded-full border border-emerald-500/20">
                       Webhook Live
                     </span>
@@ -1243,11 +1379,6 @@ export const ExternalConnector: React.FC = () => {
                         <span className="text-[8px] font-mono font-bold text-muted-foreground uppercase tracking-widest flex items-center gap-1 group-hover/freq:text-primary transition-colors">
                           <span>FREQUENCY</span>
                           <Clock className="w-2.5 h-2.5 opacity-60 group-hover/freq:opacity-100" />
-                          {item.webhookEnabled && (
-                            <span className="text-[8px] px-1 py-0.2 rounded bg-amber-500/20 text-amber-500 font-bold" title="Real-Time Webhook Active">
-                              HOOK
-                            </span>
-                          )}
                         </span>
                         <span className={`text-[11px] font-mono font-bold uppercase mt-0.5 group-hover/freq:underline ${
                           item.syncFrequency === 'OFF' ? 'text-muted-foreground' : 'text-amber-500 dark:text-amber-400'
@@ -1432,6 +1563,7 @@ export const ExternalConnector: React.FC = () => {
           connectorName={activeConfigConnector.name}
           logoUrl={activeConfigConnector.logoUrl}
           initialMaxItems={
+            allConnections[activeConfigConnector.id]?.config?.max_events_per_sync ||
             allConnections[activeConfigConnector.id]?.config?.max_emails_per_sync ||
             allConnections[activeConfigConnector.id]?.config?.max_files_per_sync ||
             (activeConfigConnector.id === 'gmail' ? gmailDetails?.config?.max_emails_per_sync : undefined) ||
@@ -1443,8 +1575,11 @@ export const ExternalConnector: React.FC = () => {
               ? gmailDetails?.config?.categories || ['INBOX']
               : activeConfigConnector.id === 'gdrive'
               ? ['MY_DRIVE']
+              : activeConfigConnector.id === 'calendar'
+              ? ['PRIMARY']
               : [])
           }
+
           initialSyncFreq={activeConfigConnector.syncFrequency}
           isLocked={
             Boolean(allConnections[activeConfigConnector.id]?.lock?.is_locked) ||

@@ -40,13 +40,19 @@ def normalize_calendar(payload: dict, tenant_id: str) -> CanonicalEvent:
         timestamp=_parse_ts(data.get("updated") or start_time),
         metadata={
             "summary": data.get("summary") or data.get("title"),
+            "subject": data.get("summary") or data.get("title"),
+            "title": data.get("summary") or data.get("title"),
+            "name": data.get("summary") or data.get("title"),
             "description": data.get("description"),
             "location": data.get("location"),
             "start_time": start_time,
             "end_time": end_time,
             "organizer": data.get("organizer", {}).get("email") if isinstance(data.get("organizer"), dict) else None,
             "hangout_link": data.get("hangoutLink") or data.get("htmlLink"),
+            "mime_type": "text/markdown",
         },
+
+
     )
 
 def _parse_ts(raw) -> datetime:

@@ -148,7 +148,7 @@ class GDriveStore:
             if not conn and self._db is not None:
                 doc = self._db.gdrive_connections.find_one({"connection_id": connection_id})
                 if doc:
-                    conn = GDriveConnection.from_dict(doc)
+                    conn = self._doc_to_connection(doc)
                     self._connections[connection_id] = conn
             if not conn:
                 return False

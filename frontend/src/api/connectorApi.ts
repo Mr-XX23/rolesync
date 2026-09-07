@@ -235,10 +235,64 @@ export const connectorApi = {
     return response.data;
   },
 
+  // Google Calendar Specific APIs
+  getCalendarStatus: async (userId: string = 'usr_active'): Promise<any> => {
+    const response = await api.get<any>(`/connectors/calendar/status?user_id=${userId}`);
+    return response.data;
+  },
+
+  saveCalendarConfig: async (
+    userId: string,
+    maxEventsPerSync: number,
+    categories: string[] = ['PRIMARY'],
+    syncWindowDays: number = 180,
+    futureWindowDays: number = 365,
+    autoSyncIntervalMinutes: number = 30,
+    syncFrequency: string = '30m'
+  ): Promise<any> => {
+    const response = await api.post(`/connectors/calendar/config`, {
+      user_id: userId,
+      max_events_per_sync: maxEventsPerSync,
+      categories: categories.length > 0 ? categories : ['PRIMARY'],
+      sync_window_days: syncWindowDays,
+      future_window_days: futureWindowDays,
+      auto_sync_interval_minutes: autoSyncIntervalMinutes,
+      sync_frequency: syncFrequency,
+    });
+    return response.data;
+  },
+
+  triggerCalendarSyncNow: async (userId: string = 'usr_active'): Promise<any> => {
+    const response = await api.post(`/connectors/calendar/sync-now`, {
+      user_id: userId,
+    });
+    return response.data;
+  },
+
+  triggerCalendarResync: async (userId: string = 'usr_active'): Promise<any> => {
+    const response = await api.post(`/connectors/calendar/resync`, {
+      user_id: userId,
+    });
+    return response.data;
+  },
+
+  getCalendarActivities: async (userId: string = 'usr_active', limit: number = 20): Promise<any> => {
+    const response = await api.get<any>(`/connectors/calendar/activities?user_id=${userId}&limit=${limit}`);
+    return response.data;
+  },
+
+  disconnectCalendar: async (userId: string = 'usr_active'): Promise<any> => {
+    const response = await api.post(`/connectors/calendar/disconnect`, {
+      user_id: userId,
+    });
+    return response.data;
+  },
+
   getSourceActivities: async (source: string, userId: string = 'usr_active', limit: number = 20): Promise<GmailActivitiesResponse> => {
     const response = await api.get<GmailActivitiesResponse>(`/connectors/${source}/activities?user_id=${userId}&limit=${limit}`);
     return response.data;
   },
+
 
   disconnectGmail: async (userId: string = 'usr_active'): Promise<any> => {
     const response = await api.post(`/connectors/gmail/disconnect`, {

@@ -4,12 +4,16 @@ from typing import Any
 from module_1_document_processing.composio_connector.connector_service import ConnectorService
 from module_1_document_processing.composio_connector.gmail_sync_manager import GmailSyncManager
 from module_1_document_processing.composio_connector.gdrive_sync_manager import GDriveSyncManager
+from module_1_document_processing.composio_connector.calendar_sync_manager import CalendarSyncManager
 from module_1_document_processing.composio_connector.gdrive_models import GDriveSyncConfig, GDriveTriggerType
+from module_1_document_processing.composio_connector.calendar_models import CalendarSyncConfig, CalendarTriggerType
 
 router = APIRouter(tags=["Connectors"])
 connector_service = ConnectorService()
 gmail_sync_manager = GmailSyncManager()
 gdrive_sync_manager = GDriveSyncManager()
+calendar_sync_manager = CalendarSyncManager()
+
 
 class ConnectRequest(BaseModel):
     user_id: str = "usr_active"
@@ -34,6 +38,18 @@ class GDriveConfigRequest(BaseModel):
     sync_frequency: str = "off"
     auto_sync_enabled: bool = False
     webhook_enabled: bool = False
+
+class CalendarConfigRequest(BaseModel):
+    user_id: str = "usr_active"
+    max_events_per_sync: int = Field(default=10, ge=1, le=50)
+    categories: list[str] = Field(default_factory=lambda: ["PRIMARY"])
+    sync_window_days: int = 180
+    future_window_days: int = 365
+    auto_sync_interval_minutes: int = 0
+    sync_frequency: str = "off"
+    auto_sync_enabled: bool = False
+    webhook_enabled: bool = False
+
 
 class AutoSyncScheduleRequest(BaseModel):
     user_id: str = "usr_active"
@@ -69,8 +85,9 @@ def get_all_connectors_status(user_id: str = "usr_active", x_tenant_id: str = He
     """Production endpoint returning live OAuth connectivity, sync metrics, and parameters for all 5 connectors."""
     gmail_conn = gmail_sync_manager.get_connection_status(user_id=user_id, tenant_id=x_tenant_id)
     gdrive_conn = gdrive_sync_manager.get_connection_status(user_id=user_id, tenant_id=x_tenant_id)
+    cal_conn = calendar_sync_manager.get_connection_status(user_id=user_id, tenant_id=x_tenant_id)
 
-    sources = ["calendar", "slack", "notion"]
+    sources = ["slack", "notion"]
     other_connections = {}
     for src in sources:
         is_conn = connector_service.composio.is_account_connected(user_id=user_id, source=src)
@@ -95,6 +112,7 @@ def get_all_connectors_status(user_id: str = "usr_active", x_tenant_id: str = He
         "connections": {
             "gmail": gmail_conn.to_dict() if hasattr(gmail_conn, "to_dict") else gmail_conn,
             "gdrive": gdrive_conn.to_dict() if hasattr(gdrive_conn, "to_dict") else gdrive_conn,
+            "calendar": cal_conn.to_dict() if hasattr(cal_conn, "to_dict") else cal_conn,
             **other_connections,
         },
     }
@@ -109,6 +127,12 @@ def connect_connector(source: str, req: ConnectRequest, x_tenant_id: str = Heade
         )
     elif source.lower() in ("gdrive", "googledrive", "google_drive"):
         return gdrive_sync_manager.initiate_oauth_flow(
+            user_id=req.user_id,
+            tenant_id=x_tenant_id,
+            callback_url=req.callback_url,
+        )
+    elif source.lower() in ("calendar", "googlecalendar", "google_calendar"):
+        return calendar_sync_manager.initiate_oauth_flow(
             user_id=req.user_id,
             tenant_id=x_tenant_id,
             callback_url=req.callback_url,
@@ -130,6 +154,8 @@ def disconnect_connector(source: str, req: ConnectRequest, x_tenant_id: str = He
             return gmail_sync_manager.disconnect_connection(user_id=req.user_id, tenant_id=x_tenant_id)
         elif source.lower() in ("gdrive", "googledrive", "google_drive"):
             return gdrive_sync_manager.disconnect_connection(user_id=req.user_id, tenant_id=x_tenant_id)
+        elif source.lower() in ("calendar", "googlecalendar", "google_calendar"):
+            return calendar_sync_manager.disconnect_connection(user_id=req.user_id, tenant_id=x_tenant_id)
 
         # Invalidate and revoke OAuth token in Composio backend
         try:
@@ -143,6 +169,7 @@ def disconnect_connector(source: str, req: ConnectRequest, x_tenant_id: str = He
         }
     finally:
         connector_service.composio.clear_cache(req.user_id)
+
 
 @router.post("/connectors/gmail/config")
 async def save_gmail_config(req: GmailConfigRequest, x_tenant_id: str = Header(default="tenant_default")):
@@ -184,6 +211,16 @@ async def update_source_auto_sync(source: str, req: AutoSyncScheduleRequest, x_t
             auto_sync_enabled=req.auto_sync_enabled,
             webhook_enabled=req.webhook_enabled,
         )
+    elif source.lower() in ("calendar", "googlecalendar", "google_calendar"):
+        return calendar_sync_manager.update_auto_sync_schedule(
+            user_id=req.user_id,
+            tenant_id=x_tenant_id,
+            sync_frequency=req.sync_frequency,
+            interval_minutes=req.interval_minutes,
+            auto_sync_enabled=req.auto_sync_enabled,
+            webhook_enabled=req.webhook_enabled,
+        )
+
     return {
         "status": "success",
         "message": f"{source} auto-sync set to {req.sync_frequency}.",
@@ -293,6 +330,84 @@ def get_gdrive_activities(
         "activities": [act.to_dict() for act in activities],
     }
 
+# =========================================================================
+# Google Calendar Specific Endpoints
+# =========================================================================
+
+@router.post("/connectors/calendar/config")
+async def save_calendar_config(req: CalendarConfigRequest, x_tenant_id: str = Header(default="tenant_default")):
+    cfg = CalendarSyncConfig(
+        max_events_per_sync=req.max_events_per_sync,
+        categories=req.categories if req.categories else ["PRIMARY"],
+        sync_window_days=req.sync_window_days,
+        future_window_days=req.future_window_days,
+        auto_sync_interval_minutes=req.auto_sync_interval_minutes,
+        sync_frequency=req.sync_frequency,
+        auto_sync_enabled=req.auto_sync_enabled,
+        webhook_enabled=req.webhook_enabled,
+    )
+    return await calendar_sync_manager.save_configuration_and_start_sync(
+        user_id=req.user_id,
+        tenant_id=x_tenant_id,
+        config=cfg,
+    )
+
+@router.post("/connectors/calendar/auto-sync")
+async def update_calendar_auto_sync(req: AutoSyncScheduleRequest, x_tenant_id: str = Header(default="tenant_default")):
+    return calendar_sync_manager.update_auto_sync_schedule(
+        user_id=req.user_id,
+        tenant_id=x_tenant_id,
+        sync_frequency=req.sync_frequency,
+        interval_minutes=req.interval_minutes,
+        auto_sync_enabled=req.auto_sync_enabled,
+        webhook_enabled=req.webhook_enabled,
+    )
+
+@router.get("/connectors/calendar/status")
+def get_calendar_status(user_id: str = "usr_active", x_tenant_id: str = Header(default="tenant_default")):
+    conn = calendar_sync_manager.get_connection_status(user_id=user_id, tenant_id=x_tenant_id)
+    return {
+        "status": "success",
+        "connection": conn.to_dict(),
+    }
+
+@router.post("/connectors/calendar/sync-now")
+async def trigger_calendar_sync_now(req: GmailActionRequest, x_tenant_id: str = Header(default="tenant_default")):
+    conn = calendar_sync_manager.store.get_or_create_connection(tenant_id=x_tenant_id, user_id=req.user_id)
+    if calendar_sync_manager.store.is_locked(conn.connection_id):
+        raise HTTPException(status_code=409, detail="A sync job is currently running for Google Calendar. Please wait.")
+    import asyncio
+    asyncio.create_task(calendar_sync_manager.start_sync_job(conn.connection_id, trigger_type=CalendarTriggerType.MANUAL_SYNC))
+    return {"status": "started", "connection_id": conn.connection_id}
+
+@router.post("/connectors/calendar/resync")
+async def trigger_calendar_resync(req: GmailActionRequest, x_tenant_id: str = Header(default="tenant_default")):
+    conn = calendar_sync_manager.store.get_or_create_connection(tenant_id=x_tenant_id, user_id=req.user_id)
+    if calendar_sync_manager.store.is_locked(conn.connection_id):
+        raise HTTPException(status_code=409, detail="A sync job is currently running for Google Calendar. Please wait.")
+    import asyncio
+    asyncio.create_task(calendar_sync_manager.start_sync_job(conn.connection_id, trigger_type=CalendarTriggerType.RESYNC, is_resync=True))
+    return {"status": "resync_started", "connection_id": conn.connection_id}
+
+@router.get("/connectors/calendar/activities")
+def get_calendar_activities(
+    user_id: str = "usr_active",
+    limit: int = Query(default=20, ge=1, le=100),
+    x_tenant_id: str = Header(default="tenant_default"),
+):
+    conn = calendar_sync_manager.store.get_or_create_connection(tenant_id=x_tenant_id, user_id=user_id)
+    activities = calendar_sync_manager.store.get_activities(connection_id=conn.connection_id, limit=limit)
+    return {
+        "status": "success",
+        "source": "calendar",
+        "connection_id": conn.connection_id,
+        "activities": [act.to_dict() for act in activities],
+    }
+
+@router.post("/connectors/calendar/disconnect")
+def disconnect_calendar(req: GmailActionRequest, x_tenant_id: str = Header(default="tenant_default")):
+    return calendar_sync_manager.disconnect_connection(user_id=req.user_id, tenant_id=x_tenant_id)
+
 @router.get("/connectors/gmail/activities")
 def get_gmail_activities(
     user_id: str = "usr_active",
@@ -319,11 +434,13 @@ def get_source_activities(
     limit: int = Query(default=20, ge=1, le=100),
     x_tenant_id: str = Header(default="tenant_default"),
 ):
-    src = source.lower().strip()
+    src = source.lower()
     if src == "gmail":
         return get_gmail_activities(user_id=user_id, limit=limit, x_tenant_id=x_tenant_id)
     elif src in ("gdrive", "googledrive", "google_drive"):
         return get_gdrive_activities(user_id=user_id, limit=limit, x_tenant_id=x_tenant_id)
+    elif src in ("calendar", "googlecalendar", "google_calendar"):
+        return get_calendar_activities(user_id=user_id, limit=limit, x_tenant_id=x_tenant_id)
     
     return {
         "status": "success",
@@ -386,6 +503,10 @@ async def purge_connector_all_data(
     elif source.lower() in ("gdrive", "googledrive", "google_drive"):
         res = await gdrive_sync_manager.purge_all_connector_data(user_id=user_id, tenant_id=x_tenant_id)
         return res
+    elif source.lower() in ("calendar", "googlecalendar", "google_calendar"):
+        res = await calendar_sync_manager.purge_all_connector_data(user_id=user_id, tenant_id=x_tenant_id)
+        return res
+
 
     # Generic source fallback
     return {

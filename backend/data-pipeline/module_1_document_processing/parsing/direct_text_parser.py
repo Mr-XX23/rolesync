@@ -30,9 +30,10 @@ class DirectTextParser:
                 or ""
             )
             # Format subject/title header if available
-            title = meta.get("subject") or meta.get("title") or meta.get("name")
+            title = meta.get("subject") or meta.get("title") or meta.get("name") or meta.get("summary")
             if title and title not in text_content:
                 text_content = f"# {title}\n\n{text_content}"
+
 
         return ParsedDocument(
             doc_id=doc_id,

@@ -4,7 +4,7 @@ from module_1_document_processing.composio_connector.event_router import EventRo
 from module_1_document_processing.pipeline.queue_worker import QueueWorker
 from module_1_document_processing.composio_connector.gmail_store import GmailStore
 from module_1_document_processing.composio_connector.composio_client import ComposioClient
-from module_1_document_processing.composio_connector.connector_routes import gmail_sync_manager, gdrive_sync_manager
+from module_1_document_processing.composio_connector.connector_routes import gmail_sync_manager, gdrive_sync_manager, calendar_sync_manager
 
 router = APIRouter(tags=["Webhooks"])
 event_router = EventRouter()
@@ -39,8 +39,14 @@ async def composio_webhook_handler(request: Request):
         result = await gdrive_sync_manager.process_webhook_event(canonical_event, raw_payload=payload)
         return result
 
-    # 5. For other sources (calendar, slack, notion), enqueue to QueueWorker
+    # 5. For Calendar, process directly via CalendarSyncManager to format meeting notes, deduplicate & update watermarks
+    if canonical_event.source.lower() in ("google_calendar", "calendar", "googlecalendar"):
+        result = await calendar_sync_manager.process_webhook_event(canonical_event, raw_payload=payload)
+        return result
+
+    # 6. For other sources (slack, notion), enqueue to QueueWorker
     await queue_worker.enqueue(canonical_event)
     return {"status": "enqueued", "event_id": canonical_event.event_id, "source": canonical_event.source}
+
 
 

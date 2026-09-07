@@ -4,7 +4,7 @@ from fastapi import FastAPI
 # pyrefly: ignore [missing-import]
 import py_eureka_client.eureka_client as eureka_client
 from module_1_document_processing.composio_connector.webhook_handler import router as webhook_router, queue_worker
-from module_1_document_processing.composio_connector.connector_routes import router as connector_router, gmail_sync_manager, gdrive_sync_manager
+from module_1_document_processing.composio_connector.connector_routes import router as connector_router, gmail_sync_manager, gdrive_sync_manager, calendar_sync_manager
 
 raw_eureka = os.environ.get("EUREKA_SERVER", "http://eureka-service:8761/eureka/")
 if "localhost" in raw_eureka or "127.0.0.1" in raw_eureka:
@@ -21,9 +21,11 @@ async def lifespan(app: FastAPI):
     # Start Staging Queue Worker
     await queue_worker.start()
 
-    # Start Background Gmail & GDrive Auto-Sync Schedulers
+    # Start Background Gmail, GDrive & Calendar Auto-Sync Schedulers
     await gmail_sync_manager.start_scheduler()
     await gdrive_sync_manager.start_scheduler()
+    await calendar_sync_manager.start_scheduler()
+
 
     # Register with Eureka
     print(f"Registering {APP_NAME} with Eureka server at {EUREKA_SERVER}...")
@@ -49,9 +51,11 @@ async def lifespan(app: FastAPI):
     yield
 
     # Stop Schedulers & Queue Worker & Deregister from Eureka
+    await calendar_sync_manager.stop_scheduler()
     await gdrive_sync_manager.stop_scheduler()
     await gmail_sync_manager.stop_scheduler()
     await queue_worker.stop()
+
 
     try:
         if hasattr(eureka_client, "stop_async"):

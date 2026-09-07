@@ -27,6 +27,11 @@ class ParserService:
         if event.source.lower() == "gmail":
             return self._parse_gmail_event(event, raw_bytes)
 
+        # Special Universal Handling for Google Calendar: Meeting Notes & Transcripts
+        if event.source.lower() in ("google_calendar", "calendar", "googlecalendar"):
+            return self._parse_calendar_event(event, raw_bytes)
+
+
         if raw_bytes is None and "raw_bytes" in event.metadata and event.metadata["raw_bytes"]:
             raw_bytes = event.metadata["raw_bytes"]
 
@@ -195,3 +200,44 @@ class ParserService:
             parser_used="gmail_combined_llamaparse",
             metadata=updated_metadata,
         )
+
+    def _parse_calendar_event(self, event: CanonicalEvent, raw_bytes: bytes | None = None) -> ParsedDocument:
+        doc_id = f"{event.tenant_id}:{event.source}:{event.external_id}"
+        meta = event.metadata or {}
+
+        text_content = meta.get("text_content") or meta.get("body")
+        if not text_content:
+            summary = meta.get("summary") or meta.get("title") or "(Untitled Meeting)"
+            desc = meta.get("description") or "*(No meeting description or agenda provided)*"
+            start_t = meta.get("start_time") or (event.timestamp.isoformat() if event.timestamp else "")
+            end_t = meta.get("end_time") or start_t
+            organizer = meta.get("organizer") or "Unknown"
+            hangout = meta.get("hangout_link") or ""
+            location = meta.get("location") or ""
+            cal_id = (event.raw_ref or {}).get("calendar_id", "primary")
+
+            text_content = (
+                f"# Meeting: {summary}\n\n"
+                f"**Calendar:** `{cal_id}`  \n"
+                f"**Start Time:** {start_t}  \n"
+                f"**End Time:** {end_t}  \n"
+                f"**Organizer:** {organizer}  \n"
+                f"**Location / Link:** {location or hangout or 'None'}  \n\n"
+                f"## Meeting Details & Agenda\n"
+                f"{desc}\n"
+            )
+
+        return ParsedDocument(
+            doc_id=doc_id,
+            tenant_id=event.tenant_id,
+            user_id=event.user_id,
+            source=event.source,
+            external_id=event.external_id,
+            acl=list(event.acl),
+            mime_type="text/markdown",
+            text_content=text_content,
+            parse_status="SUCCESS",
+            parser_used="calendar_meeting_parser",
+            metadata=meta,
+        )
+
