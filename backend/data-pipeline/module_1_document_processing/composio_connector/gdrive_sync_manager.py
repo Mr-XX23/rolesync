@@ -207,9 +207,14 @@ class GDriveSyncManager:
         try:
             if conn.config.webhook_enabled:
                 if not conn.webhook_trigger_id:
-                    conn.webhook_trigger_id = self.composio.enable_trigger(
-                        trigger_slug=ComposioClient.GDRIVE_FILE_CREATED, user_id=user_id
+                    trigger_id = self.composio.enable_trigger(
+                        trigger_slug=ComposioClient.GDRIVE_CHANGES, user_id=user_id
                     )
+                    if not trigger_id or "fallback" in trigger_id:
+                        trigger_id = self.composio.enable_trigger(
+                            trigger_slug=ComposioClient.GDRIVE_FILE_CREATED, user_id=user_id
+                        )
+                    conn.webhook_trigger_id = trigger_id
             else:
                 if conn.webhook_trigger_id:
                     self.composio.disable_trigger(conn.webhook_trigger_id)
@@ -406,7 +411,13 @@ class GDriveSyncManager:
         finally:
             self.store.release_lock(connection_id, job_id)
 
-    async def _process_single_file(self, conn: GDriveConnection, raw_file: dict[str, Any], activity: GDriveSyncActivity) -> bool | None:
+    async def _process_single_file(
+        self,
+        conn: GDriveConnection,
+        raw_file: dict[str, Any],
+        activity: GDriveSyncActivity,
+        is_update: bool = False,
+    ) -> bool | None:
         file_id = raw_file.get("id") or raw_file.get("fileId") or ""
         filename = raw_file.get("name") or raw_file.get("title") or "Untitled Document"
         mime_type = raw_file.get("mimeType") or "application/octet-stream"
@@ -415,8 +426,8 @@ class GDriveSyncManager:
         if not file_id:
             return False
 
-        # Deduplication Guard
-        if self.store.is_file_synced(conn.tenant_id, conn.connection_id, file_id):
+        # Deduplication Guard: skip if already synced UNLESS this is an edit/update event
+        if not is_update and self.store.is_file_synced(conn.tenant_id, conn.connection_id, file_id):
             return False
 
         # Skip folders
@@ -668,21 +679,69 @@ class GDriveSyncManager:
 
     async def process_webhook_event(self, event: CanonicalEvent, raw_payload: dict[str, Any] | None = None) -> dict[str, Any]:
         """Processes real-time Google Drive file webhook events."""
-        conn = self.store.get_or_create_connection(tenant_id=event.tenant_id, user_id=event.user_id)
+        user_id = event.user_id
+        conn = None
+        if user_id:
+            conn = self.store.get_or_create_connection(tenant_id=event.tenant_id, user_id=user_id)
 
-        if not getattr(conn.config, "webhook_enabled", False):
-            print(f"[GDriveSyncManager] Webhook: Webhook triggers are disabled for user={conn.user_id}. Skipping event.")
+        # If user_id wasn't in event or webhook is disabled on the retrieved connection,
+        # lookup active connection matching the trigger or single active connection
+        if not conn or not getattr(conn.config, "webhook_enabled", False):
+            active_conns = self.store.list_all_active_connections()
+            wh_conns = [c for c in active_conns if getattr(c.config, "webhook_enabled", False)]
+            if wh_conns:
+                conn = wh_conns[0]
+                user_id = conn.user_id
+                event.user_id = user_id
+            elif active_conns:
+                conn = active_conns[0]
+                user_id = conn.user_id
+                event.user_id = user_id
+
+        if not conn or not getattr(conn.config, "webhook_enabled", False):
+            print(f"[GDriveSyncManager] Webhook: Webhook triggers are disabled for user={conn.user_id if conn else 'unknown'}. Skipping event.")
             return {"status": "ignored", "reason": "Webhook triggers are disabled"}
 
         file_id = event.external_id
         if not file_id or file_id == "unknown_file_id":
-            file_id = event.metadata.get("file_id") or (raw_payload or {}).get("data", {}).get("id", "")
+            file_id = (
+                event.metadata.get("file_id")
+                or (raw_payload or {}).get("data", {}).get("id", "")
+                or (raw_payload or {}).get("payload", {}).get("file_id", "")
+                or (raw_payload or {}).get("payload", {}).get("fileId", "")
+                or (raw_payload or {}).get("file_id", "")
+                or (raw_payload or {}).get("fileId", "")
+            )
 
         if not file_id:
             return {"status": "ignored", "reason": "Missing file ID"}
 
-        # Deduplication Guard
-        if self.store.is_file_synced(conn.tenant_id, conn.connection_id, file_id):
+        # Handle Deletions / Trashing
+        if event.event_type == EventType.DELETE:
+            print(f"[GDriveSyncManager] Webhook: file_id={file_id} was deleted/trashed. Emitting DELETE event.")
+            del_event = CanonicalEvent(
+                event_id=f"gdrive_{conn.tenant_id}_{file_id}",
+                event_type=EventType.DELETE,
+                source="gdrive",
+                tenant_id=conn.tenant_id,
+                user_id=conn.user_id,
+                external_id=file_id,
+                raw_ref={"file_id": file_id},
+                acl=[conn.user_id],
+                timestamp=datetime.now(timezone.utc),
+                metadata={"status": "deleted", "name": event.metadata.get("name", "")},
+            )
+            await self.queue_worker._process_event(del_event)
+            self.store.delete_synced_file(conn.tenant_id, conn.connection_id, file_id)
+            return {
+                "status": "deleted",
+                "file_id": file_id,
+                "connection_id": conn.connection_id,
+            }
+
+        # Deduplication Guard (Only block if unchanged CREATE event)
+        is_already_synced = self.store.is_file_synced(conn.tenant_id, conn.connection_id, file_id)
+        if is_already_synced and event.event_type != EventType.UPDATE:
             print(f"[GDriveSyncManager] Webhook: file_id={file_id} already synced. Skipping duplicate.")
             return {
                 "status": "ignored",
@@ -693,19 +752,64 @@ class GDriveSyncManager:
 
         raw_file = None
         if raw_payload:
-            raw_file = raw_payload.get("data") or raw_payload.get("payload")
-        if not isinstance(raw_file, dict):
-            raw_file = {
-                "id": file_id,
-                "name": event.metadata.get("name", "Untitled Document"),
-                "mimeType": event.metadata.get("mime_type", "application/octet-stream"),
-                "size": event.metadata.get("file_size", 0),
-                "modifiedTime": event.timestamp.isoformat() if event.timestamp else datetime.now(timezone.utc).isoformat(),
-                "webViewLink": event.metadata.get("web_view_link", ""),
-            }
+            inner_p = raw_payload.get("payload") if isinstance(raw_payload.get("payload"), dict) else None
+            data_p = raw_payload.get("data") if isinstance(raw_payload.get("data"), dict) else None
 
-        if "id" not in raw_file:
+            if inner_p and isinstance(inner_p.get("file"), dict):
+                raw_file = inner_p["file"]
+            elif isinstance(raw_payload.get("file"), dict):
+                raw_file = raw_payload["file"]
+            elif data_p and isinstance(data_p.get("file"), dict):
+                raw_file = data_p["file"]
+            elif data_p:
+                raw_file = data_p
+            elif inner_p:
+                raw_file = inner_p
+            else:
+                raw_file = raw_payload
+
+        if not isinstance(raw_file, dict):
+            raw_file = {}
+
+        if "id" not in raw_file and "fileId" not in raw_file:
             raw_file["id"] = file_id
+        if not raw_file.get("name") or raw_file.get("name") == "Untitled Document":
+            raw_file["name"] = event.metadata.get("name") or "Untitled Document"
+        if not raw_file.get("mimeType") or raw_file.get("mimeType") == "application/octet-stream":
+            raw_file["mimeType"] = event.metadata.get("mime_type") or "application/octet-stream"
+        if "size" not in raw_file:
+            raw_file["size"] = event.metadata.get("file_size", 0)
+        if "webViewLink" not in raw_file:
+            raw_file["webViewLink"] = event.metadata.get("web_view_link", "")
+
+        # If name or mimeType are default/missing, enrich metadata via Google Drive API
+        if raw_file.get("name") == "Untitled Document" or raw_file.get("mimeType") == "application/octet-stream":
+            try:
+                if self.composio and self.composio._composio:
+                    res = self.composio._composio.tools.execute(
+                        slug="GOOGLEDRIVE_LIST_FILES",
+                        arguments={"q": f"id = '{file_id}'", "pageSize": 1, "fields": "files(id, name, mimeType, size, webViewLink, modifiedTime, createdTime, owners)"},
+                        user_id=conn.user_id,
+                        dangerously_skip_version_check=True,
+                    )
+                    f_data = res.get("data", {}) if isinstance(res, dict) else getattr(res, "data", {})
+                    flist = f_data.get("files") or []
+                    if flist and isinstance(flist[0], dict):
+                        finfo = flist[0]
+                        if finfo.get("name"):
+                            raw_file["name"] = finfo["name"]
+                            event.metadata["name"] = finfo["name"]
+                        if finfo.get("mimeType"):
+                            raw_file["mimeType"] = finfo["mimeType"]
+                            event.metadata["mime_type"] = finfo["mimeType"]
+                        if finfo.get("size"):
+                            raw_file["size"] = finfo["size"]
+                            event.metadata["file_size"] = finfo["size"]
+                        if finfo.get("webViewLink"):
+                            raw_file["webViewLink"] = finfo["webViewLink"]
+                            event.metadata["web_view_link"] = finfo["webViewLink"]
+            except Exception as meta_err:
+                print(f"[GDriveSyncManager] Webhook metadata enrichment notice for {file_id}: {meta_err}")
 
         activity_id = f"act_gdrive_webhook_{uuid.uuid4().hex[:10]}"
         job_id = f"job_gdrive_webhook_{uuid.uuid4().hex[:8]}"
@@ -723,7 +827,8 @@ class GDriveSyncManager:
         self.store.record_activity(activity)
 
         try:
-            result = await self._process_single_file(conn, raw_file, activity)
+            is_file_edit = (event.event_type == EventType.UPDATE)
+            result = await self._process_single_file(conn, raw_file, activity, is_update=is_file_edit)
             if result is True:
                 activity.metrics["processed"] = 1
                 activity.metrics["succeeded"] = 1

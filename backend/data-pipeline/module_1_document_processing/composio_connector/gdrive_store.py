@@ -172,6 +172,20 @@ class GDriveStore:
                     print(f"[GDriveStore] Mongo deduplication check error: {err}")
             return False
 
+    def delete_synced_file(self, tenant_id: str, connection_id: str, file_id: str) -> None:
+        key = f"{tenant_id}:{connection_id}:{file_id}"
+        with self._lock:
+            self._synced_files.pop(key, None)
+            if self._db is not None:
+                try:
+                    self._db.gdrive_synced_files.delete_one({
+                        "tenant_id": tenant_id,
+                        "connection_id": connection_id,
+                        "file_id": file_id,
+                    })
+                except Exception as err:
+                    print(f"[GDriveStore] Mongo delete file error: {err}")
+
     def record_synced_file(self, record: SyncedFileRecord) -> None:
         key = f"{record.tenant_id}:{record.connection_id}:{record.file_id}"
         with self._lock:

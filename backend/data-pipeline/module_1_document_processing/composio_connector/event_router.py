@@ -10,25 +10,61 @@ class EventRouter:
     """Routes incoming raw webhook payloads to their respective source normalizers."""
 
     def route_payload(self, payload: dict[str, Any], tenant_id: str = "tenant_default") -> CanonicalEvent | None:
+        if not isinstance(payload, dict):
+            return None
+
         metadata = payload.get("metadata", {}) if isinstance(payload.get("metadata"), dict) else {}
-        trigger_slug = (
+        toolkit = payload.get("toolkit", {}) if isinstance(payload.get("toolkit"), dict) else {}
+        toolkit_slug = str(toolkit.get("slug") or payload.get("toolkit_slug") or "").lower()
+
+        trigger_slug = str(
             metadata.get("trigger_slug", "")
             or payload.get("trigger_slug", "")
             or payload.get("trigger_name", "")
             or payload.get("type", "")
-            or payload.get("toolkit_slug", "")
-        )
+            or toolkit_slug
+        ).upper()
 
-        slug_upper = str(trigger_slug).upper()
-        if slug_upper.startswith("GMAIL_") or "GMAIL" in slug_upper:
+        inner_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+        inner_event_type = str(inner_payload.get("event_type", "") or payload.get("event_type", "")).lower()
+
+        # 1. Gmail routing
+        if (
+            "GMAIL" in trigger_slug
+            or toolkit_slug == "gmail"
+            or "messages" in payload
+            or "messages" in inner_payload
+            or inner_event_type in ("new_gmail_message", "new_message")
+        ):
             return normalize_gmail(payload, tenant_id)
-        elif slug_upper.startswith("GOOGLE_DRIVE_") or "DRIVE" in slug_upper:
+
+        # 2. Google Drive routing
+        if (
+            "DRIVE" in trigger_slug
+            or toolkit_slug in ("googledrive", "gdrive")
+            or "file" in payload
+            or "file" in inner_payload
+            or "file_id" in payload
+            or "file_id" in inner_payload
+            or inner_event_type in ("file_created", "file_updated", "file_deleted", "trashed", "removed")
+            or ("kind" in inner_payload and "drive#change" in str(inner_payload.get("kind", "")))
+        ):
             return normalize_gdrive(payload, tenant_id)
-        elif slug_upper.startswith("GOOGLE_CALENDAR_") or "CALENDAR" in slug_upper:
+
+        # 3. Google Calendar routing
+        if (
+            "CALENDAR" in trigger_slug
+            or toolkit_slug in ("googlecalendar", "calendar")
+            or "calendar" in inner_event_type
+        ):
             return normalize_calendar(payload, tenant_id)
-        elif slug_upper.startswith("SLACK_") or "SLACK" in slug_upper:
+
+        # 4. Slack routing
+        if "SLACK" in trigger_slug or toolkit_slug == "slack":
             return normalize_slack(payload, tenant_id)
-        elif slug_upper.startswith("NOTION_") or "NOTION" in slug_upper:
+
+        # 5. Notion routing
+        if "NOTION" in trigger_slug or toolkit_slug == "notion":
             return normalize_notion(payload, tenant_id)
 
         return None
