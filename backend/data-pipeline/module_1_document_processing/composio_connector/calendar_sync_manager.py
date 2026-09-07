@@ -391,6 +391,17 @@ class CalendarSyncManager:
                     print(f"[CalendarSyncManager] Processing {len(eligible_past)} historical calendar events...")
                     await self._process_events_batch(conn, eligible_past, activity, "historical")
 
+            # =========================================================================
+            # PHASE 3: FORWARD INCREMENTAL SYNC (for ongoing auto-sync after backfill)
+            # =========================================================================
+            if conn.backfill_state.is_backfill_complete and not is_resync:
+                print(f"[CalendarSyncManager] Backfill COMPLETED for {connection_id}. Running forward incremental sync...")
+                eligible_forward = self._fetch_forward_incremental_events(conn, max_limit=limit)
+                activity.metrics["total_discovered"] += len(eligible_forward)
+                if eligible_forward:
+                    print(f"[CalendarSyncManager] Processing {len(eligible_forward)} new/updated calendar events...")
+                    await self._process_events_batch(conn, eligible_forward, activity, "incremental")
+
             # Update count and final status
             conn.last_successful_sync_at = datetime.now(timezone.utc)
             self._last_auto_sync_times[conn.connection_id] = conn.last_successful_sync_at
@@ -472,6 +483,7 @@ class CalendarSyncManager:
         conn: CalendarConnection,
         raw_event: dict[str, Any],
         activity: CalendarSyncActivity,
+        is_update: bool = False,
     ) -> bool | None:
         event_id = raw_event.get("id") or raw_event.get("eventId") or ""
         summary = raw_event.get("summary") or raw_event.get("title") or "(Untitled Meeting)"
@@ -506,8 +518,8 @@ class CalendarSyncManager:
             })
             return True
 
-        # Deduplication Guard
-        if self.store.is_event_synced(conn.tenant_id, conn.connection_id, event_id):
+        # Deduplication Guard (skip if already synced, unless this is an explicit update)
+        if not is_update and self.store.is_event_synced(conn.tenant_id, conn.connection_id, event_id):
             return False
 
 
@@ -620,6 +632,26 @@ class CalendarSyncManager:
             })
             return False
 
+    def _fetch_forward_incremental_events(self, conn: CalendarConnection, max_limit: int = 10) -> list[dict[str, Any]]:
+        """Discovers new or modified future calendar events during scheduled auto-sync."""
+        now_dt = datetime.now(timezone.utc)
+        time_min_str = ensure_iso_str(now_dt)
+        time_max_str = ensure_iso_str(now_dt + timedelta(days=conn.config.future_window_days))
+
+        events, _ = self._fetch_calendar_events_api(
+            user_id=conn.user_id,
+            time_min=time_min_str,
+            time_max=time_max_str,
+            max_results=max_limit,
+            categories=conn.config.categories,
+        )
+        eligible = []
+        for e in events:
+            eid = e.get("id") or e.get("eventId")
+            if eid and not self.store.is_event_synced(conn.tenant_id, conn.connection_id, eid):
+                eligible.append(e)
+        return eligible
+
     def _fetch_calendar_events_api(
         self,
         user_id: str,
@@ -647,7 +679,7 @@ class CalendarSyncManager:
             args["pageToken"] = page_token
 
         # Try Composio Google Calendar tools
-        tool_slugs = ["GOOGLECALENDAR_LIST_EVENTS", "GOOGLECALENDAR_FIND_EVENT", "GOOGLE_CALENDAR_LIST_EVENTS"]
+        tool_slugs = ["GOOGLECALENDAR_FIND_EVENT", "GOOGLECALENDAR_LIST_EVENTS", "GOOGLE_CALENDAR_LIST_EVENTS"]
         for slug in tool_slugs:
             try:
                 res = self.composio._composio.tools.execute(
@@ -719,8 +751,9 @@ class CalendarSyncManager:
             self.store.delete_synced_event(conn.tenant_id, conn.connection_id, event_id)
             return {"status": "deleted", "event_id": event_id}
 
-        # Deduplication Guard
-        if self.store.is_event_synced(conn.tenant_id, conn.connection_id, event_id):
+        # Deduplication Guard (Allow updates through)
+        is_update = (event.event_type == EventType.UPDATE)
+        if not is_update and self.store.is_event_synced(conn.tenant_id, conn.connection_id, event_id):
             print(f"[CalendarSyncManager] Webhook: event_id={event_id} already synced. Skipping duplicate.")
             return {"status": "ignored", "reason": "Duplicate event (already indexed)", "event_id": event_id}
 
@@ -747,7 +780,7 @@ class CalendarSyncManager:
             "hangoutLink": event.metadata.get("hangout_link"),
         }
 
-        success = await self._process_single_event(conn, raw_event_data, activity)
+        success = await self._process_single_event(conn, raw_event_data, activity, is_update=is_update)
         activity.status = "COMPLETED" if success else "FAILED"
         activity.completed_at = datetime.now(timezone.utc)
         if success:
@@ -765,7 +798,7 @@ class CalendarSyncManager:
             try:
                 await asyncio.sleep(60)
                 now = datetime.now(timezone.utc)
-                connections = list(self.store._connections.values())
+                connections = self.store.list_all_active_connections()
                 for conn in connections:
                     if conn.status not in (
                         CalendarSyncStatus.CONNECTED,
@@ -791,6 +824,28 @@ class CalendarSyncManager:
                 break
             except Exception as e:
                 print(f"[CalendarSyncManager] Error in auto-sync scheduler loop: {e}")
+
+    def get_data_summary(self, user_id: str, tenant_id: str = "tenant_default") -> dict[str, Any]:
+        """Calculates current count of synced raw events, activity runs, and vector memory for pre-deletion preview."""
+        conn = self.store.get_or_create_connection(tenant_id=tenant_id, user_id=user_id)
+        summary = self.store.get_data_summary(tenant_id=conn.tenant_id, connection_id=conn.connection_id)
+
+        try:
+            vector_count = self.queue_worker.ingestion_pipeline.vector_store.count_vectors(
+                tenant_id=tenant_id, source="google_calendar", user_id=user_id
+            )
+        except Exception:
+            from module_3_batch_ingestion_vector.vector_store import VectorStore
+            vs = VectorStore()
+            vector_count = vs.count_vectors(tenant_id=tenant_id, source="google_calendar", user_id=user_id)
+
+        if vector_count == 0 and summary.get("synced_events_count", 0) > 0:
+            vector_count = summary.get("synced_events_count", 0)
+
+        summary["vector_records_count"] = vector_count
+        summary["source"] = "google_calendar"
+        summary["user_id"] = user_id
+        return summary
 
     async def purge_all_connector_data(self, user_id: str, tenant_id: str = "tenant_default") -> dict[str, Any]:
         conn = self.store.get_or_create_connection(tenant_id=tenant_id, user_id=user_id)

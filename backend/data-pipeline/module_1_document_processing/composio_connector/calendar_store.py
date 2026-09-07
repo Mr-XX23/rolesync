@@ -251,6 +251,40 @@ class CalendarStore:
 
             return self._activities.get(connection_id, [])[:limit]
 
+    def get_data_summary(self, tenant_id: str, connection_id: str) -> dict[str, Any]:
+        with self._lock:
+            if self._db is not None:
+                try:
+                    events_count = self._db.calendar_synced_events.count_documents(
+                        {"tenant_id": tenant_id, "connection_id": connection_id}
+                    )
+                    activities_count = self._db.calendar_sync_activities.count_documents(
+                        {"connection_id": connection_id}
+                    )
+                except Exception as err:
+                    print(f"[CalendarStore] Mongo data summary count error: {err}")
+                    events_count = sum(1 for k in self._synced_events.keys() if k.startswith(f"{tenant_id}:{connection_id}:"))
+                    activities_count = len(self._activities.get(connection_id, []))
+            else:
+                events_count = sum(1 for k in self._synced_events.keys() if k.startswith(f"{tenant_id}:{connection_id}:"))
+                activities_count = len(self._activities.get(connection_id, []))
+
+            conn = self._connections.get(connection_id)
+            if not conn and self._db is not None:
+                doc = self._db.calendar_connections.find_one({"connection_id": connection_id})
+                if doc:
+                    conn = self._doc_to_connection(doc)
+
+            return {
+                "tenant_id": tenant_id,
+                "connection_id": connection_id,
+                "synced_messages_count": events_count,
+                "synced_events_count": events_count,
+                "activities_count": activities_count,
+                "is_backfill_complete": conn.backfill_state.is_backfill_complete if conn else False,
+                "historical_status": conn.backfill_state.historical_sync_status.value if conn else "NOT_STARTED",
+            }
+
     def purge_all_synced_data(self, tenant_id: str, user_id: str) -> dict[str, int]:
         """Cascades purge of all indexed calendar records, activities, and resets watermarks."""
         conn_id = f"conn_calendar_{tenant_id}_{user_id}"
@@ -292,6 +326,20 @@ class CalendarStore:
                 "events_deleted": events_deleted,
                 "activities_deleted": activities_deleted,
             }
+
+    def list_all_active_connections(self) -> list[CalendarConnection]:
+        with self._lock:
+            if self._db is not None:
+                try:
+                    docs = list(self._db.calendar_connections.find({"status": {"$ne": CalendarSyncStatus.DISCONNECTED.value}}))
+                    if docs:
+                        conns = [self._doc_to_connection(d) for d in docs]
+                        for c in conns:
+                            self._connections[c.connection_id] = c
+                        return conns
+                except Exception as err:
+                    print(f"[CalendarStore] Mongo list connections error: {err}")
+            return list(self._connections.values())
 
     def _doc_to_connection(self, doc: dict[str, Any]) -> CalendarConnection:
         conn = CalendarConnection(

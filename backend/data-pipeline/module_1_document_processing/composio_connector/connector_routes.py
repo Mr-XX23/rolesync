@@ -475,6 +475,13 @@ def get_connector_data_summary(
             "source": "gdrive",
             "summary": summary,
         }
+    elif source.lower() in ("calendar", "googlecalendar", "google_calendar"):
+        summary = calendar_sync_manager.get_data_summary(user_id=user_id, tenant_id=x_tenant_id)
+        return {
+            "status": "success",
+            "source": "google_calendar",
+            "summary": summary,
+        }
     return {
         "status": "success",
         "source": source.lower(),
