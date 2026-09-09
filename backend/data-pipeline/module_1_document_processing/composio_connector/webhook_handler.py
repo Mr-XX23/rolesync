@@ -4,7 +4,13 @@ from module_1_document_processing.composio_connector.event_router import EventRo
 from module_1_document_processing.pipeline.queue_worker import QueueWorker
 from module_1_document_processing.composio_connector.gmail_store import GmailStore
 from module_1_document_processing.composio_connector.composio_client import ComposioClient
-from module_1_document_processing.composio_connector.connector_routes import gmail_sync_manager, gdrive_sync_manager, calendar_sync_manager
+from module_1_document_processing.composio_connector.connector_routes import (
+    gmail_sync_manager,
+    gdrive_sync_manager,
+    calendar_sync_manager,
+    slack_sync_manager,
+    notion_sync_manager,
+)
 
 router = APIRouter(tags=["Webhooks"])
 event_router = EventRouter()
@@ -44,7 +50,17 @@ async def composio_webhook_handler(request: Request):
         result = await calendar_sync_manager.process_webhook_event(canonical_event, raw_payload=payload)
         return result
 
-    # 6. For other sources (slack, notion), enqueue to QueueWorker
+    # 6. For Slack, process directly via SlackSyncManager to record activity, DMs, channels & update watermarks
+    if canonical_event.source.lower() == "slack":
+        result = await slack_sync_manager.process_webhook_event(canonical_event, raw_payload=payload)
+        return result
+
+    # 7. For Notion, process directly via NotionSyncManager to record pages, databases, blocks & update watermarks
+    if canonical_event.source.lower() == "notion":
+        result = await notion_sync_manager.process_webhook_event(canonical_event, raw_payload=payload)
+        return result
+
+    # 8. For other fallback sources, enqueue to QueueWorker
     await queue_worker.enqueue(canonical_event)
     return {"status": "enqueued", "event_id": canonical_event.event_id, "source": canonical_event.source}
 

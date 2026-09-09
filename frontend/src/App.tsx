@@ -65,7 +65,7 @@ const App = () => {
               <h3 className="font-serif text-lg font-bold tracking-wide text-foreground">
                 Initializing RoleSync
               </h3>
-              <p className="text-xs text-muted-foreground max-w-[260px]">
+              <p className="text-xs text-muted-foreground max-w-65">
                 Securing AI synchronization pipelines...
               </p>
             </div>

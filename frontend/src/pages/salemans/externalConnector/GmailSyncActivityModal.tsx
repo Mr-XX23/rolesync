@@ -23,6 +23,7 @@ import {
   Database,
   BrainCircuit,
   AlertOctagon,
+  RotateCcw,
 } from 'lucide-react';
 
 import { Button } from '../../../components/common/Button';
@@ -60,6 +61,30 @@ export const ConnectorActivityModal: React.FC<ConnectorActivityModalProps> = ({
   const [dataSummary, setDataSummary] = useState<any>(null);
   const [isLoadingSummary, setIsLoadingSummary] = useState<boolean>(false);
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [isRetryingFailed, setIsRetryingFailed] = useState<boolean>(false);
+
+  const handleRetryFailedItems = async () => {
+    setIsRetryingFailed(true);
+    try {
+      const res = await connectorApi.retryFailedItems(source, userId);
+      const count = res?.retried_count ?? 0;
+      setNotification({
+        type: 'success',
+        message: count > 0 
+          ? `Successfully queued ${count} failed item(s) for immediate retry.`
+          : (res?.message || 'Queued failed items for retry.')
+      });
+      await fetchActivities();
+    } catch (err: any) {
+      console.error(`Failed to retry failed items for ${source}:`, err);
+      setNotification({
+        type: 'error',
+        message: err?.response?.data?.detail || err?.message || 'Failed to retry failed items. Please try again.'
+      });
+    } finally {
+      setIsRetryingFailed(false);
+    }
+  };
 
   const fetchActivities = async () => {
     const fetchId = ++activeFetchIdRef.current;
@@ -366,6 +391,18 @@ export const ConnectorActivityModal: React.FC<ConnectorActivityModalProps> = ({
             </div>
           </div>
           <div className="flex items-center gap-2">
+            {totalFailed > 0 && (
+              <Button
+                variant="outline"
+                onClick={handleRetryFailedItems}
+                disabled={isRetryingFailed || isPurging}
+                className="text-xs py-1.5 px-3 border-destructive/40 bg-destructive/10 text-destructive hover:bg-destructive hover:text-destructive-foreground transition-all flex items-center gap-1.5"
+                title={`Retry ${totalFailed} Failed Item(s)`}
+              >
+                <RotateCcw className={`w-3.5 h-3.5 ${isRetryingFailed ? 'animate-spin' : ''}`} />
+                <span>Retry Failed ({totalFailed})</span>
+              </Button>
+            )}
             <Button
               variant="outline"
               onClick={fetchActivities}
@@ -547,11 +584,24 @@ export const ConnectorActivityModal: React.FC<ConnectorActivityModalProps> = ({
                                   </div>
                                 ) : (
                                   <>
-                                    {item.sender && (
-                                      <p className="text-[10px] text-muted-foreground font-mono">
-                                        From / Origin: {item.sender}
-                                      </p>
-                                    )}
+                                    <div className="flex flex-wrap items-center gap-2 text-[10px] text-muted-foreground font-mono">
+                                      {item.channel_name && (
+                                        <span className="px-1.5 py-0.5 rounded bg-purple-500/10 border border-purple-500/30 text-purple-700 dark:text-purple-300 font-medium">
+                                          #{item.channel_name}
+                                        </span>
+                                      )}
+                                      {item.entity_type && (
+                                        <span className="px-1.5 py-0.5 rounded bg-muted border border-border text-foreground/80 font-medium uppercase">
+                                          {item.entity_type}
+                                        </span>
+                                      )}
+                                      {item.sender && (
+                                        <span>From / Origin: {item.sender}</span>
+                                      )}
+                                      {item.synced_at && (
+                                        <span>• {new Date(item.synced_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                                      )}
+                                    </div>
                                     {item.attachment_summary && (
                                       <p className="text-[10px] text-muted-foreground flex items-center gap-1">
                                         <Paperclip className="w-3 h-3 text-primary/70 shrink-0" />
@@ -638,9 +688,22 @@ export const ConnectorActivityModal: React.FC<ConnectorActivityModalProps> = ({
             <span>Delete All Data</span>
           </button>
 
-          <Button variant="outline" onClick={onClose} disabled={isPurging}>
-            Close
-          </Button>
+          <div className="flex items-center gap-2">
+            {totalFailed > 0 && (
+              <Button
+                variant="outline"
+                onClick={handleRetryFailedItems}
+                disabled={isRetryingFailed || isPurging}
+                className="text-xs border-destructive/40 bg-destructive/10 text-destructive hover:bg-destructive hover:text-destructive-foreground transition-all flex items-center gap-1.5"
+              >
+                <RotateCcw className={`w-3.5 h-3.5 ${isRetryingFailed ? 'animate-spin' : ''}`} />
+                <span>Retry {totalFailed} Failed Items</span>
+              </Button>
+            )}
+            <Button variant="outline" onClick={onClose} disabled={isPurging}>
+              Close
+            </Button>
+          </div>
         </div>
 
         {/* Deletion Blocking Overlay */}

@@ -1,6 +1,14 @@
 import React, { useState } from 'react';
 import { Outlet } from 'react-router-dom';
-import { Database, CheckSquare, Briefcase, HelpCircle, Plus, Share2 } from 'lucide-react';
+import {
+  Library,
+  Cable,
+  Bot,
+  FolderKanban,
+  LifeBuoy,
+  Plus,
+  Settings as SettingsIcon,
+} from 'lucide-react';
 import { Sidebar } from './Sidebar';
 import type { SidebarItem } from './Sidebar';
 import { Header } from './Header';
@@ -27,33 +35,40 @@ export const DashboardLayout: React.FC = () => {
             {
               id: 'knowledge-vault',
               label: 'Knowledge Vault',
-              icon: Database,
+              icon: Library,
               path: '/salesman/knowledge-vault',
+              badge: 'Live',
             },
             {
               id: 'external-connector',
               label: 'Data Connectors',
-              icon: Share2,
+              icon: Cable,
               path: '/salesman/external-connector',
             },
             {
               id: 'ai-tasks',
               label: 'Agent Manager',
-              icon: CheckSquare,
+              icon: Bot,
               path: '/salesman/ai-tasks',
             },
             {
               id: 'workspace',
               label: 'Workspace',
-              icon: Briefcase,
+              icon: FolderKanban,
               path: '/salesman/workspace',
             },
           ] as SidebarItem[],
           bottomItems: [
             {
+              id: 'settings',
+              label: 'Settings',
+              icon: SettingsIcon,
+              path: '/salesman/settings',
+            },
+            {
               id: 'support',
               label: 'Support',
-              icon: HelpCircle,
+              icon: LifeBuoy,
               path: '/salesman/support',
             },
           ] as SidebarItem[],
@@ -92,7 +107,7 @@ export const DashboardLayout: React.FC = () => {
 
         {/* Scrollable Viewport Outlet */}
         <main className="flex-1 overflow-y-auto relative p-4 md:p-8 bg-background/50">
-          <div className="max-w-7xl mx-auto w-full h-full">
+          <div className="max-w-[87rem] mx-auto w-full h-full">
             <Outlet />
           </div>
         </main>

@@ -56,6 +56,31 @@ class LlamaParserService:
             except Exception:
                 pass
 
+        # Fast local PDF extraction via pypdf
+        if mime_type == "application/pdf" or filename.lower().endswith(".pdf"):
+            try:
+                import io
+                import pypdf
+                reader = pypdf.PdfReader(io.BytesIO(raw_bytes))
+                pages_text = [page.extract_text() or "" for page in reader.pages]
+                pdf_text = "\n\n".join([p.strip() for p in pages_text if p.strip()])
+                if pdf_text.strip():
+                    return pdf_text, "pypdf_local", "SUCCESS"
+            except Exception as pdf_err:
+                print(f"[LlamaParserService] Local pypdf error for {filename}: {pdf_err}")
+
+        # Fast local DOCX extraction via python-docx
+        if "wordprocessingml" in mime_type or filename.lower().endswith(".docx"):
+            try:
+                import io
+                import docx
+                doc = docx.Document(io.BytesIO(raw_bytes))
+                docx_text = "\n\n".join([p.text.strip() for p in doc.paragraphs if p.text.strip()])
+                if docx_text.strip():
+                    return docx_text, "docx_local", "SUCCESS"
+            except Exception as docx_err:
+                print(f"[LlamaParserService] Local docx error for {filename}: {docx_err}")
+
         return f"*(Parsed document content placeholder for {filename})*", "fallback_local", "SUCCESS"
 
     def parse(self, event: CanonicalEvent, raw_bytes: bytes | None = None) -> ParsedDocument:

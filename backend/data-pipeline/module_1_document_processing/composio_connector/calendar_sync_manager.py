@@ -21,6 +21,8 @@ from module_1_document_processing.composio_connector.normalizers.calendar_normal
 from module_1_document_processing.composio_connector.events.canonical_event import CanonicalEvent, EventType
 from module_1_document_processing.composio_connector.date_utils import normalize_to_utc, ensure_iso_str
 from module_1_document_processing.pipeline.queue_worker import QueueWorker
+from module_1_document_processing.composio_connector.rate_limiter import global_rate_limiter
+from module_1_document_processing.composio_connector.error_classifier import classify_error, ConnectorAction, ConnectorErrorType
 
 class CalendarSyncManager:
     """Production Sync Manager orchestrating Google Calendar OAuth, 2-phase ingestion (Future 1 Year -> Past 180 Days), auto-sync, and real-time webhooks."""
@@ -118,7 +120,7 @@ class CalendarSyncManager:
         redirect_url = self.composio.initiate_user_connection(user_id=user_id, source="google_calendar", callback_url=callback_url)
         trigger_id = None
         if getattr(conn.config, "webhook_enabled", False):
-            trigger_id = self.composio.enable_trigger(trigger_slug=ComposioClient.CALENDAR_EVENT_UPDATED, user_id=user_id)
+            trigger_id = self.composio.enable_trigger(trigger_slug=ComposioClient.CALENDAR_EVENT_SYNC, user_id=user_id)
 
         conn.webhook_trigger_id = trigger_id
         self.store.update_connection(conn)
@@ -213,7 +215,7 @@ class CalendarSyncManager:
             if conn.config.webhook_enabled:
                 if not conn.webhook_trigger_id:
                     conn.webhook_trigger_id = self.composio.enable_trigger(
-                        trigger_slug=ComposioClient.CALENDAR_EVENT_UPDATED, user_id=user_id
+                        trigger_slug=ComposioClient.CALENDAR_EVENT_SYNC, user_id=user_id
                     )
             else:
                 if conn.webhook_trigger_id:
@@ -269,6 +271,23 @@ class CalendarSyncManager:
             "connection_id": conn.connection_id,
         }
 
+    async def retry_failed_items(self, user_id: str, tenant_id: str = "tenant_default") -> dict[str, Any]:
+        """Collects recently failed calendar events and triggers a targeted recovery sync."""
+        conn = self.store.get_or_create_connection(tenant_id=tenant_id, user_id=user_id)
+        failed_items = self.store.get_failed_items(conn.connection_id)
+        if not failed_items:
+            return {
+                "status": "success",
+                "message": "No failed calendar events found to retry.",
+                "retried_count": 0,
+            }
+        asyncio.create_task(self.start_sync_job(conn.connection_id, trigger_type=CalendarTriggerType.RESYNC, is_resync=True))
+        return {
+            "status": "resync_started",
+            "message": f"Retrying {len(failed_items)} failed calendar events.",
+            "connection_id": conn.connection_id,
+        }
+
     async def start_sync_job(
         self,
         connection_id: str,
@@ -286,8 +305,11 @@ class CalendarSyncManager:
             print(f"[CalendarSyncManager] Job {job_id} could not acquire lock for connection {connection_id}. Aborting.")
             return
 
+        self.store.start_heartbeat(connection_id=connection_id, job_id=job_id, lease_seconds=900)
+
         conn = self.store._connections.get(connection_id)
         if not conn:
+            self.store.stop_heartbeat(connection_id)
             self.store.release_lock(connection_id, job_id)
             return
 
@@ -429,14 +451,20 @@ class CalendarSyncManager:
             print(f"[CalendarSyncManager] Completed sync job {job_id} for {connection_id}. Metrics: {activity.metrics}")
 
         except Exception as err:
-            print(f"[CalendarSyncManager] Fatal error in sync job {job_id}: {err}")
-            conn.status = CalendarSyncStatus.FAILED
-            conn.current_progress = f"Error: {err}"
+            err_type, sanitized_msg, action = classify_error(err)
+            print(f"[CalendarSyncManager] Error in sync job {job_id}: {sanitized_msg} (type={err_type})")
+            if action == ConnectorAction.RECONNECT:
+                conn.status = CalendarSyncStatus.CONFIGURATION_REQUIRED
+                conn.current_progress = "Access token expired. Reconnection required."
+            else:
+                conn.status = CalendarSyncStatus.FAILED
+                conn.current_progress = f"Error: {sanitized_msg[:120]}"
             activity.status = "FAILED"
             activity.completed_at = datetime.now(timezone.utc)
             self.store.update_connection(conn)
             self.store.record_activity(activity)
         finally:
+            self.store.stop_heartbeat(connection_id)
             self.store.release_lock(connection_id, job_id)
 
     async def _process_events_batch(
@@ -522,6 +550,8 @@ class CalendarSyncManager:
         if not is_update and self.store.is_event_synced(conn.tenant_id, conn.connection_id, event_id):
             return False
 
+        await global_rate_limiter.acquire("calendar")
+
 
         # Extract timing (supporting both date and dateTime)
         start_obj = raw_event.get("start") or {}
@@ -556,7 +586,7 @@ class CalendarSyncManager:
             "metadata": {
                 "user_id": conn.user_id,
                 "connected_account_id": conn.connection_id,
-                "trigger_slug": ComposioClient.CALENDAR_EVENT_UPDATED,
+                "trigger_slug": ComposioClient.CALENDAR_EVENT_SYNC,
                 "log_id": f"log_cal_{event_id}",
             },
             "data": {
@@ -621,13 +651,14 @@ class CalendarSyncManager:
             return True
 
         except Exception as err:
-            print(f"[CalendarSyncManager] Failed syncing event {event_id}: {err}")
+            err_type, sanitized_err, _ = classify_error(err)
+            print(f"[CalendarSyncManager] Failed syncing event {event_id}: {sanitized_err} ({err_type})")
             activity.items.append({
                 "event_id": event_id,
                 "summary": summary,
                 "subject": summary,
                 "status": "FAILED",
-                "error_message": str(err),
+                "error_message": sanitized_err,
                 "synced_at": datetime.now(timezone.utc).isoformat(),
             })
             return False
@@ -717,24 +748,83 @@ class CalendarSyncManager:
 
         return [], None
 
+    def _fetch_single_event_details(self, user_id: str, event_id: str) -> dict[str, Any] | None:
+        """Fetches detailed information for a single calendar event using Composio tools."""
+        if not self.composio or not getattr(self.composio, "_composio", None) or not event_id:
+            return None
+
+        tools_to_try = [
+            ("GOOGLECALENDAR_FIND_EVENT", {"calendarId": "primary", "eventId": event_id}),
+            ("GOOGLECALENDAR_FIND_EVENT", {"calendar_id": "primary", "event_id": event_id}),
+            ("GOOGLECALENDAR_GET_EVENT", {"calendarId": "primary", "eventId": event_id}),
+        ]
+        for slug, args in tools_to_try:
+            try:
+                res = self.composio._composio.tools.execute(
+                    slug=slug,
+                    arguments=args,
+                    user_id=user_id,
+                    dangerously_skip_version_check=True,
+                )
+                data = res.get("data", {}) if isinstance(res, dict) else getattr(res, "data", {})
+                if isinstance(data, dict):
+                    ev = data.get("event") or data.get("event_data") or data
+                    if isinstance(ev, dict) and (ev.get("summary") or ev.get("id")):
+                        return ev
+            except Exception as e:
+                print(f"[CalendarSyncManager] Failed to enrich event {event_id} via {slug}: {e}")
+        return None
+
     async def process_webhook_event(self, event: CanonicalEvent, raw_payload: dict[str, Any] | None = None) -> dict[str, Any]:
         """Processes incoming real-time Google Calendar webhook notifications."""
-        conn = self.store.get_or_create_connection(tenant_id=event.tenant_id, user_id=event.user_id)
+        user_id = event.user_id
+        conn = None
+        if user_id:
+            conn = self.store.get_or_create_connection(tenant_id=event.tenant_id, user_id=user_id)
 
-        if not getattr(conn.config, "webhook_enabled", False):
-            print(f"[CalendarSyncManager] Webhook: triggers are disabled for user={conn.user_id}. Skipping event.")
+        # Fallback to active connection if user_id wasn't in event or webhook is disabled on retrieved connection
+        if not conn or not getattr(conn.config, "webhook_enabled", False):
+            active_conns = self.store.list_all_active_connections()
+            wh_conns = [c for c in active_conns if getattr(c.config, "webhook_enabled", False)]
+            if wh_conns:
+                conn = wh_conns[0]
+                user_id = conn.user_id
+                event.user_id = user_id
+            elif active_conns:
+                conn = active_conns[0]
+                user_id = conn.user_id
+                event.user_id = user_id
+
+        if not conn or not getattr(conn.config, "webhook_enabled", False):
+            print(f"[CalendarSyncManager] Webhook: triggers are disabled for user={conn.user_id if conn else 'unknown'}. Skipping event.")
             return {"status": "ignored", "reason": "Webhook triggers are disabled"}
 
+        # Extract event ID robustly
         event_id = event.external_id
         if not event_id or event_id == "unknown_event_id":
-            event_id = event.metadata.get("event_id") or (raw_payload or {}).get("data", {}).get("id", "")
+            inner_p = (raw_payload or {}).get("payload") if isinstance((raw_payload or {}).get("payload"), dict) else {}
+            data_p = (raw_payload or {}).get("data") if isinstance((raw_payload or {}).get("data"), dict) else {}
+            event_id = (
+                event.metadata.get("event_id")
+                or data_p.get("id")
+                or data_p.get("event_id")
+                or inner_p.get("id")
+                or inner_p.get("event_id")
+                or (raw_payload or {}).get("id")
+                or (raw_payload or {}).get("event_id")
+                or ""
+            )
 
         if not event_id:
             return {"status": "ignored", "reason": "Missing event ID"}
 
         # Handle cancellation via webhook
-        status_val = (event.metadata.get("status") or (raw_payload or {}).get("data", {}).get("status", "")).lower()
-        if status_val in ("cancelled", "deleted"):
+        status_val = str(
+            event.metadata.get("status")
+            or (raw_payload or {}).get("data", {}).get("status", "")
+            or (raw_payload or {}).get("payload", {}).get("status", "")
+        ).lower()
+        if status_val in ("cancelled", "deleted") or event.event_type == EventType.DELETE:
             del_event = CanonicalEvent(
                 event_id=f"cal_{conn.tenant_id}_{event_id}",
                 event_type=EventType.DELETE,
@@ -769,16 +859,67 @@ class CalendarSyncManager:
         )
         self.store.record_activity(activity)
 
-        raw_event_data = (raw_payload or {}).get("data") or {
+        # Build raw_event_data from payload, data, or canonical metadata
+        inner = (raw_payload or {}).get("payload") if isinstance((raw_payload or {}).get("payload"), dict) else {}
+        data_p = (raw_payload or {}).get("data") if isinstance((raw_payload or {}).get("data"), dict) else {}
+        ev_cand = None
+        for cand in [inner, data_p, raw_payload or {}]:
+            if isinstance(cand.get("event"), dict):
+                ev_cand = cand["event"]
+                break
+            if isinstance(cand.get("event_data"), dict):
+                ev_cand = cand["event_data"]
+                break
+
+        extracted_data = ev_cand or (inner if inner else data_p)
+
+        start_dt = (
+            extracted_data.get("start_time")
+            or event.metadata.get("start_time")
+            or (event.timestamp.isoformat() if event.timestamp else datetime.now(timezone.utc).isoformat())
+        )
+        end_dt = (
+            extracted_data.get("end_time")
+            or event.metadata.get("end_time")
+            or start_dt
+        )
+
+        raw_event_data = {
+            **extracted_data,
             "id": event_id,
-            "summary": event.metadata.get("summary") or event.metadata.get("subject") or "(Webhook Event)",
-            "start": {"dateTime": event.metadata.get("start_time") or event.timestamp.isoformat()},
-            "end": {"dateTime": event.metadata.get("end_time") or event.timestamp.isoformat()},
-            "organizer": {"email": event.metadata.get("organizer")},
-            "description": event.metadata.get("description"),
-            "location": event.metadata.get("location"),
-            "hangoutLink": event.metadata.get("hangout_link"),
+            "summary": (
+                extracted_data.get("summary")
+                or extracted_data.get("title")
+                or event.metadata.get("summary")
+                or event.metadata.get("subject")
+                or "(Webhook Meeting)"
+            ),
+            "description": extracted_data.get("description") or event.metadata.get("description") or "",
+            "location": extracted_data.get("location") or event.metadata.get("location") or "",
+            "hangoutLink": (
+                extracted_data.get("hangoutLink")
+                or extracted_data.get("hangout_link")
+                or extracted_data.get("htmlLink")
+                or event.metadata.get("hangout_link")
+                or ""
+            ),
+            "organizer": extracted_data.get("organizer") or {"email": event.metadata.get("organizer")},
+            "attendees": extracted_data.get("attendees") or [{"email": a} for a in event.acl if "@" in str(a)],
+            "start": extracted_data.get("start") or {"dateTime": start_dt},
+            "end": extracted_data.get("end") or {"dateTime": end_dt},
+            "status": extracted_data.get("status") or event.metadata.get("status") or status_val,
         }
+
+        # If summary is generic or start date is missing, enrich via Composio API
+        if (
+            not raw_event_data.get("summary")
+            or raw_event_data.get("summary") in ("(Webhook Meeting)", "(Untitled Meeting)", "")
+            or not raw_event_data.get("start", {}).get("dateTime")
+        ):
+            print(f"[CalendarSyncManager] Webhook payload missing details for event {event_id}. Enriching from Google Calendar API...")
+            fetched = self._fetch_single_event_details(conn.user_id, event_id)
+            if fetched:
+                raw_event_data.update(fetched)
 
         success = await self._process_single_event(conn, raw_event_data, activity, is_update=is_update)
         activity.status = "COMPLETED" if success else "FAILED"

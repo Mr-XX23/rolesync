@@ -18,8 +18,16 @@ class ComposioClient:
     GDRIVE_CHANGES = "GOOGLEDRIVE_GOOGLE_DRIVE_CHANGES"
     CALENDAR_EVENT_UPDATED = "GOOGLECALENDAR_GOOGLE_CALENDAR_EVENT_UPDATED_TRIGGER"
     CALENDAR_EVENT_CREATED = "GOOGLECALENDAR_GOOGLE_CALENDAR_EVENT_CREATED_TRIGGER"
-    SLACK_NEW_MESSAGE = "SLACKBOT_CHANNEL_MESSAGE_RECEIVED"
-    NOTION_PAGE_UPDATED = "NOTION_PAGE_UPDATED_TRIGGER"
+    SLACK_NEW_MESSAGE = "SLACK_RECEIVE_MESSAGE"
+    SLACK_CHANNEL_MESSAGE = "SLACK_CHANNEL_MESSAGE_RECEIVED"
+    SLACK_DIRECT_MESSAGE = "SLACK_DIRECT_MESSAGE_RECEIVED"
+    SLACK_GROUP_MESSAGE = "SLACK_RECEIVE_GROUP_MESSAGE"
+    NOTION_PAGE_UPDATED = "NOTION_ALL_PAGE_EVENTS_TRIGGER"
+    NOTION_PAGE_CREATED = "NOTION_PAGE_CREATED"
+    NOTION_PAGE_DELETED = "NOTION_ALL_PAGE_EVENTS_TRIGGER"
+    NOTION_DATABASE_CREATED = "NOTION_DATABASE_CREATED"
+    NOTION_DATABASE_UPDATED = "NOTION_ALL_PAGE_EVENTS_TRIGGER"
+    NOTION_COMMENT_CREATED = "NOTION_COMMENT_CREATED"
 
     # Class-level shared in-memory TTL cache across all ComposioClient instances
     _accounts_cache: dict[str, tuple[float, list[Any]]] = {}
@@ -298,7 +306,8 @@ class ComposioClient:
                 return messages, next_token
             return [], None
         except Exception as err:
-            print(f"[ComposioClient] Error executing GMAIL_FETCH_EMAILS for user_id={user_id}: {err}")
+            from module_1_document_processing.composio_connector.error_classifier import sanitize_error_message
+            print(f"[ComposioClient] Error executing GMAIL_FETCH_EMAILS for user_id={user_id}: {sanitize_error_message(err)}")
             return [], None
 
     def parse_and_verify_webhook(self, body_bytes: bytes, headers: dict[str, str]) -> tuple[bool, dict[str, Any]]:

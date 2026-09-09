@@ -31,6 +31,14 @@ class ParserService:
         if event.source.lower() in ("google_calendar", "calendar", "googlecalendar"):
             return self._parse_calendar_event(event, raw_bytes)
 
+        # Special Universal Handling for Slack: Channel Messages, DMs, Threads & Attachments
+        if event.source.lower() == "slack":
+            return self._parse_slack_event(event, raw_bytes)
+
+        # Special Universal Handling for Notion: Pages, Databases, Blocks & Comments
+        if event.source.lower() == "notion":
+            return self._parse_notion_event(event, raw_bytes)
+
 
         if raw_bytes is None and "raw_bytes" in event.metadata and event.metadata["raw_bytes"]:
             raw_bytes = event.metadata["raw_bytes"]
@@ -238,6 +246,113 @@ class ParserService:
             text_content=text_content,
             parse_status="SUCCESS",
             parser_used="calendar_meeting_parser",
+            metadata=meta,
+        )
+
+    def _parse_slack_event(self, event: CanonicalEvent, raw_bytes: bytes | None = None) -> ParsedDocument:
+        """
+        Parses a Slack CanonicalEvent (DMs, Group Messages, Channels, Threads)
+        and processes any attached files (PDFs, docs, images) into markdown.
+        """
+        doc_id = f"{event.tenant_id}:{event.source}:{event.external_id}"
+        meta = event.metadata or {}
+
+        channel_name = meta.get("channel_name") or meta.get("channel_id") or "slack-chat"
+        sender_name = meta.get("sender_name") or meta.get("sender_id") or "Slack User"
+        msg_type = meta.get("message_type") or ("Direct Message" if str(channel_name).startswith("D") else "Channel")
+        timestamp_str = event.timestamp.isoformat() if event.timestamp else ""
+        text = meta.get("text") or meta.get("body") or ""
+        thread_ts = meta.get("thread_ts")
+
+        type_label = "Direct Message (DM)" if msg_type in ("im", "dm") else ("Group Message" if msg_type == "mpim" else f"#{channel_name}")
+        header = f"# Slack Message: {type_label}\n\n**From:** {sender_name}  \n**Channel / Context:** {channel_name}  \n**Type:** {msg_type}  \n**Time:** {timestamp_str}"
+        if thread_ts:
+            header += f"  \n**Thread ID:** `{thread_ts}`"
+
+        sections: list[str] = [header, "## Message Content", text if text.strip() else "*(Empty message body)*"]
+
+        attachments = meta.get("files", []) or meta.get("attachments", [])
+        attachment_audits: list[dict[str, Any]] = []
+        has_skipped = False
+
+        for att in attachments:
+            fname = att.get("name") or att.get("filename") or "slack_attachment.bin"
+            mime = att.get("mime_type") or att.get("mimetype") or "application/octet-stream"
+            size_bytes = int(att.get("size_bytes") or att.get("size") or 0)
+            att_raw = att.get("raw_bytes")
+
+            # Convert base64 string to bytes if needed
+            if isinstance(att_raw, str):
+                try:
+                    att_raw = base64.b64decode(att_raw)
+                except Exception:
+                    att_raw = att_raw.encode("utf-8")
+
+            if att_raw:
+                parsed_text, parser_used, status = self.llama_parser.parse_attachment_bytes(fname, mime, att_raw)
+                attachment_audits.append({
+                    "filename": fname,
+                    "mime_type": mime,
+                    "size_bytes": len(att_raw),
+                    "parse_status": status,
+                    "parser": parser_used,
+                })
+                sections.append(f"---\n## Attachment: {fname} (Parsed via {parser_used})\n{parsed_text}")
+                print(f"[ParserService] Parsed Slack attachment '{fname}' ({len(att_raw)} bytes) for doc_id={doc_id} using {parser_used}")
+            elif att.get("url") or att.get("url_private"):
+                url = att.get("url") or att.get("url_private")
+                sections.append(f"---\n## Attachment: {fname}\n*Link: {url} ({size_bytes} bytes)*")
+
+        combined_text = "\n\n".join(sections)
+        updated_meta = dict(meta)
+        updated_meta["attachment_audits"] = attachment_audits
+
+        return ParsedDocument(
+            doc_id=doc_id,
+            tenant_id=event.tenant_id,
+            user_id=event.user_id,
+            source=event.source,
+            external_id=event.external_id,
+            acl=list(event.acl),
+            mime_type="text/markdown",
+            text_content=combined_text,
+            parse_status="PARTIAL_SUCCESS" if has_skipped else "SUCCESS",
+            parser_used="slack_message_parser",
+            metadata=updated_meta,
+        )
+
+    def _parse_notion_event(self, event: CanonicalEvent, raw_bytes: bytes | None = None) -> ParsedDocument:
+        """
+        Parses a Notion CanonicalEvent (Pages, Databases, Blocks, Comments).
+        """
+        doc_id = f"{event.tenant_id}:{event.source}:{event.external_id}"
+        meta = event.metadata or {}
+
+        title = meta.get("title") or meta.get("name") or "Untitled Notion Document"
+        obj_type = meta.get("object_type") or "page"
+        url = meta.get("url") or ""
+        text = meta.get("text") or meta.get("body") or meta.get("content") or ""
+
+        content = (
+            f"# Notion [{obj_type.upper()}]: {title}\n\n"
+            f"**Type:** {obj_type.capitalize()}  \n"
+            f"**URL:** {url}  \n"
+            f"**Last Edited:** {event.timestamp.isoformat() if event.timestamp else 'N/A'}\n\n"
+            f"## Content\n"
+            f"{text if text.strip() else '*(No text body provided)*'}"
+        )
+
+        return ParsedDocument(
+            doc_id=doc_id,
+            tenant_id=event.tenant_id,
+            user_id=event.user_id,
+            source=event.source,
+            external_id=event.external_id,
+            acl=list(event.acl),
+            mime_type="text/markdown",
+            text_content=content,
+            parse_status="SUCCESS",
+            parser_used="notion_markdown_parser",
             metadata=meta,
         )
 

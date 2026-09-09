@@ -68,6 +68,9 @@ export interface GmailActivityItem {
   message_id?: string;
   subject?: string;
   sender?: string;
+  channel_name?: string;
+  page_id?: string;
+  entity_type?: string;
   status: 'SUCCESS' | 'PARTIAL_SUCCESS' | 'SKIPPED' | 'FAILED';
   attachment_summary?: string;
   error_message?: string | null;
@@ -308,6 +311,104 @@ export const connectorApi = {
     return response.data;
   },
 
+  // Slack Specific APIs
+  getSlackStatus: async (userId: string = 'usr_active'): Promise<any> => {
+    const response = await api.get<any>(`/connectors/slack/status?user_id=${userId}`);
+    return response.data;
+  },
+
+  saveSlackConfig: async (
+    userId: string,
+    maxMessagesPerSync: number = 15,
+    categories: string[] = ['PUBLIC_CHANNELS', 'DIRECT_MESSAGES', 'GROUP_MESSAGES'],
+    autoSyncIntervalMinutes: number = 30,
+    syncFrequency: string = '30m'
+  ): Promise<any> => {
+    const response = await api.post(`/connectors/slack/config`, {
+      user_id: userId,
+      max_messages_per_sync: maxMessagesPerSync,
+      categories: categories.length > 0 ? categories : ['PUBLIC_CHANNELS', 'DIRECT_MESSAGES', 'GROUP_MESSAGES'],
+      auto_sync_interval_minutes: autoSyncIntervalMinutes,
+      sync_frequency: syncFrequency,
+    });
+    return response.data;
+  },
+
+  triggerSlackSyncNow: async (userId: string = 'usr_active'): Promise<any> => {
+    const response = await api.post(`/connectors/slack/sync-now`, {
+      user_id: userId,
+    });
+    return response.data;
+  },
+
+  triggerSlackResync: async (userId: string = 'usr_active'): Promise<any> => {
+    const response = await api.post(`/connectors/slack/resync`, {
+      user_id: userId,
+    });
+    return response.data;
+  },
+
+  getSlackActivities: async (userId: string = 'usr_active', limit: number = 20): Promise<any> => {
+    const response = await api.get<any>(`/connectors/slack/activities?user_id=${userId}&limit=${limit}`);
+    return response.data;
+  },
+
+  disconnectSlack: async (userId: string = 'usr_active'): Promise<any> => {
+    const response = await api.post(`/connectors/slack/disconnect`, {
+      user_id: userId,
+    });
+    return response.data;
+  },
+
+  // Notion Specific APIs
+  getNotionStatus: async (userId: string = 'usr_active'): Promise<any> => {
+    const response = await api.get<any>(`/connectors/notion/status?user_id=${userId}`);
+    return response.data;
+  },
+
+  saveNotionConfig: async (
+    userId: string,
+    maxItemsPerSync: number = 15,
+    categories: string[] = ['PAGES', 'DATABASES'],
+    autoSyncIntervalMinutes: number = 30,
+    syncFrequency: string = '30m'
+  ): Promise<any> => {
+    const response = await api.post(`/connectors/notion/config`, {
+      user_id: userId,
+      max_items_per_sync: maxItemsPerSync,
+      categories: categories.length > 0 ? categories : ['PAGES', 'DATABASES'],
+      auto_sync_interval_minutes: autoSyncIntervalMinutes,
+      sync_frequency: syncFrequency,
+    });
+    return response.data;
+  },
+
+  triggerNotionSyncNow: async (userId: string = 'usr_active'): Promise<any> => {
+    const response = await api.post(`/connectors/notion/sync-now`, {
+      user_id: userId,
+    });
+    return response.data;
+  },
+
+  triggerNotionResync: async (userId: string = 'usr_active'): Promise<any> => {
+    const response = await api.post(`/connectors/notion/resync`, {
+      user_id: userId,
+    });
+    return response.data;
+  },
+
+  getNotionActivities: async (userId: string = 'usr_active', limit: number = 20): Promise<any> => {
+    const response = await api.get<any>(`/connectors/notion/activities?user_id=${userId}&limit=${limit}`);
+    return response.data;
+  },
+
+  disconnectNotion: async (userId: string = 'usr_active'): Promise<any> => {
+    const response = await api.post(`/connectors/notion/disconnect`, {
+      user_id: userId,
+    });
+    return response.data;
+  },
+
   getSourceDataSummary: async (source: string, userId: string = 'usr_active'): Promise<any> => {
     const response = await api.get(`/connectors/${source}/data-summary?user_id=${userId}`);
     return response.data;
@@ -318,6 +419,66 @@ export const connectorApi = {
     return response.data;
   },
 
+  retryFailedItems: async (source: string, userId: string = 'usr_active'): Promise<any> => {
+    const response = await api.post(`/connectors/${source}/retry-failed`, {
+      user_id: userId,
+    });
+    return response.data;
+  },
+
+  // Enterprise Custom Connector Request APIs
+  requestEnterpriseSync: async (payload: EnterpriseSyncRequestPayload): Promise<{
+    status: string;
+    message: string;
+    request: EnterpriseSyncRequestRecord;
+  }> => {
+    const response = await api.post<{
+      status: string;
+      message: string;
+      request: EnterpriseSyncRequestRecord;
+    }>('/connectors/enterprise-request', payload);
+    return response.data;
+  },
+
+  getEnterpriseSyncRequests: async (
+    userId: string = 'usr_active'
+  ): Promise<{ status: string; requests: EnterpriseSyncRequestRecord[] }> => {
+    const response = await api.get<{ status: string; requests: EnterpriseSyncRequestRecord[] }>(
+      `/connectors/enterprise-requests?user_id=${userId}`
+    );
+    return response.data;
+  },
+
+  cancelEnterpriseSyncRequest: async (
+    requestId: string,
+    userId: string = 'usr_active'
+  ): Promise<{ status: string; message: string; cancelled: boolean }> => {
+    const response = await api.delete<{ status: string; message: string; cancelled: boolean }>(
+      `/connectors/enterprise-requests/${requestId}?user_id=${userId}`
+    );
+    return response.data;
+  },
 };
 
+export interface EnterpriseSyncRequestPayload {
+  database_system: string;
+  requirements: string;
+  user_id?: string;
+  contact_email?: string;
+}
+
+export interface EnterpriseSyncRequestRecord {
+  request_id: string;
+  user_id: string;
+  tenant_id?: string;
+  database_system: string;
+  requirements: string;
+  contact_email?: string;
+  status: 'SUBMITTED' | 'UNDER_REVIEW' | 'APPROVED' | 'IN_PROGRESS' | 'ACTIVE';
+  estimated_sla_hours?: number;
+  created_at: string;
+  updated_at?: string;
+}
+
 export default connectorApi;
+

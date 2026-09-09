@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 import os
 
 try:
@@ -20,6 +20,10 @@ class VectorRecord:
     vector: list[float]
     acl: list[str]
     chunk_index: int
+    doc_ref_id: str = ""
+    prev_chunk_id: Optional[str] = None
+    next_chunk_id: Optional[str] = None
+    total_chunks: int = 0
     metadata: dict[str, Any] = field(default_factory=dict)
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -27,6 +31,7 @@ class VectorRecord:
         return {
             "vector_id": self.vector_id,
             "doc_id": self.doc_id,
+            "doc_ref_id": self.doc_ref_id or self.external_id,
             "tenant_id": self.tenant_id,
             "user_id": self.user_id,
             "source": self.source,
@@ -35,6 +40,9 @@ class VectorRecord:
             "vector": self.vector,
             "acl": self.acl,
             "chunk_index": self.chunk_index,
+            "total_chunks": self.total_chunks,
+            "prev_chunk_id": self.prev_chunk_id,
+            "next_chunk_id": self.next_chunk_id,
             "metadata": self.metadata,
             "updated_at": self.updated_at.isoformat() if isinstance(self.updated_at, datetime) else str(self.updated_at),
         }
@@ -58,6 +66,10 @@ class VectorRecord:
             vector=data.get("vector", []),
             acl=data.get("acl", []),
             chunk_index=data.get("chunk_index", 0),
+            doc_ref_id=data.get("doc_ref_id", data.get("external_id", "")),
+            prev_chunk_id=data.get("prev_chunk_id"),
+            next_chunk_id=data.get("next_chunk_id"),
+            total_chunks=data.get("total_chunks", 0),
             metadata=data.get("metadata", {}),
             updated_at=updated_at,
         )
@@ -80,6 +92,7 @@ class VectorStore:
                 self._collection = self._mongo_client[self.db_name][self.collection_name]
                 self._collection.create_index([("tenant_id", pymongo.ASCENDING), ("source", pymongo.ASCENDING), ("user_id", pymongo.ASCENDING)])
                 self._collection.create_index([("doc_id", pymongo.ASCENDING)])
+                self._collection.create_index([("doc_ref_id", pymongo.ASCENDING)])
                 print(f"[VectorStore] Initialized persistent MongoDB collection '{self.collection_name}' at {self.mongo_uri}/{self.db_name}")
             except Exception as err:
                 print(f"[VectorStore] MongoDB offline / local mode ({err})")
@@ -90,6 +103,11 @@ class VectorStore:
         for item in embedded_chunks:
             node = item.node
             vector = item.vector
+            doc_ref = getattr(node, "doc_ref_id", None) or getattr(node, "external_id", "") or node.doc_id
+            prev_id = getattr(node, "prev_chunk_id", None)
+            next_id = getattr(node, "next_chunk_id", None)
+            tot = getattr(node, "total_chunks", 0)
+
             rec = VectorRecord(
                 vector_id=node.chunk_id,
                 doc_id=node.doc_id,
@@ -101,6 +119,10 @@ class VectorStore:
                 vector=vector,
                 acl=list(node.acl),
                 chunk_index=node.chunk_index,
+                doc_ref_id=doc_ref,
+                prev_chunk_id=prev_id,
+                next_chunk_id=next_id,
+                total_chunks=tot,
                 metadata=node.metadata,
             )
             self._in_memory[node.chunk_id] = rec

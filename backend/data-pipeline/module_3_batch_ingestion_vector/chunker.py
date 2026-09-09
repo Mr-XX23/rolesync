@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 import hashlib
 from module_1_document_processing.parsing.parsed_document import ParsedDocument
 
@@ -17,6 +17,9 @@ class TextNode:
     acl: list[str]
     chunk_index: int
     total_chunks: int
+    doc_ref_id: str = ""
+    prev_chunk_id: Optional[str] = None
+    next_chunk_id: Optional[str] = None
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -54,10 +57,29 @@ class HierarchicalChunker:
 
         nodes: list[TextNode] = []
         total = len(chunks)
+        doc_ref = document.external_id or document.doc_id
+
+        # Precompute chunk IDs to enable bidirectional linked list chaining
+        chunk_ids = [f"{document.doc_id}_chunk_{i}" for i in range(total)]
 
         for idx, chunk_text in enumerate(chunks):
             chunk_hash = hashlib.md5(chunk_text.encode("utf-8")).hexdigest()
-            chunk_id = f"{document.doc_id}_chunk_{idx}"
+            chunk_id = chunk_ids[idx]
+            prev_id = chunk_ids[idx - 1] if idx > 0 else None
+            next_id = chunk_ids[idx + 1] if idx < total - 1 else None
+
+            node_metadata = {
+                **document.metadata,
+                "mime_type": document.mime_type,
+                "parser_used": document.parser_used,
+                "doc_ref_id": doc_ref,
+                "parent_doc_id": doc_ref,
+                "chunk_index": idx,
+                "total_chunks": total,
+                "prev_chunk_id": prev_id,
+                "next_chunk_id": next_id,
+            }
+
             node = TextNode(
                 chunk_id=chunk_id,
                 doc_id=document.doc_id,
@@ -65,14 +87,17 @@ class HierarchicalChunker:
                 user_id=document.user_id,
                 source=document.source,
                 external_id=document.external_id,
+                doc_ref_id=doc_ref,
                 text=chunk_text,
                 chunk_hash=chunk_hash,
                 acl=list(document.acl),
                 chunk_index=idx,
                 total_chunks=total,
-                metadata={**document.metadata, "mime_type": document.mime_type, "parser_used": document.parser_used},
+                prev_chunk_id=prev_id,
+                next_chunk_id=next_id,
+                metadata=node_metadata,
             )
             nodes.append(node)
 
-        print(f"[HierarchicalChunker] Chunked doc_id={document.doc_id} into {len(nodes)} nodes with ACL tags: {document.acl}")
+        print(f"[HierarchicalChunker] Chunked doc_id={document.doc_id} into {len(nodes)} linked nodes (doc_ref_id={doc_ref}) with ACL tags: {document.acl}")
         return nodes

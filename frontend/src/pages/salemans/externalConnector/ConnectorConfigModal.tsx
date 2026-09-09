@@ -58,25 +58,26 @@ const CONNECTOR_CATEGORIES: Record<string, { label: string; itemNoun: string; op
     ],
   },
   slack: {
-    label: 'Slack Channel Scopes',
-    itemNoun: 'Threads',
+    label: 'Slack Message Scopes & Conversation Types',
+    itemNoun: 'Messages',
     options: [
-      { id: 'GENERAL', label: 'Company Announcements', desc: 'Organization-wide updates & townhall threads' },
-      { id: 'SALES', label: 'Sales & Inbound Leads', desc: 'Deal negotiations, lead qualifications & wins' },
-      { id: 'SUPPORT', label: 'Customer Support', desc: 'Bug triage, client escalation & feedback' },
-      { id: 'TEAM', label: 'Team Collaboration', desc: 'Engineering, product and operations channels' },
-      { id: 'ALL', label: 'All Public Channels', desc: 'Exhaustive indexing across all open discussions' },
+      { id: 'PUBLIC_CHANNELS', label: 'Public Channels', desc: 'Open team discussions and company-wide channels (#general, #announcements)' },
+      { id: 'DIRECT_MESSAGES', label: 'Direct Messages (DMs)', desc: 'Confidential 1-on-1 direct user conversations and agent correspondence' },
+      { id: 'GROUP_MESSAGES', label: 'Group Chats (MPIMs)', desc: 'Multi-person private group direct chats and team deal huddles' },
+      { id: 'PRIVATE_CHANNELS', label: 'Private Channels', desc: 'Restricted department and project channels with strict ACL protection' },
+      { id: 'THREADS', label: 'Thread Replies', desc: 'Detailed context and nested discussion threads across all channels' },
+      { id: 'ALL', label: 'All Slack Messages', desc: 'Comprehensive indexing across all conversations and DMs' },
     ],
   },
   notion: {
-    label: 'Notion Database & Wiki Scopes',
-    itemNoun: 'Pages',
+    label: 'Notion Entities & Workspace Scopes',
+    itemNoun: 'Entities',
     options: [
-      { id: 'SPECS', label: 'Product Specs & PRDs', desc: 'Feature documentation, technical architecture' },
-      { id: 'WIKIS', label: 'Internal Wikis & FAQs', desc: 'Company handbook, runbooks & playbooks' },
-      { id: 'ROADMAPS', label: 'Roadmap & Task Boards', desc: 'Sprint boards, milestones & delivery tracking' },
-      { id: 'MEETING_NOTES', label: 'Meeting Minutes', desc: 'Customer call logs, sprint retro summaries' },
-      { id: 'ALL', label: 'All Workspaces', desc: 'Full workspace crawl and page tree indexing' },
+      { id: 'PAGES', label: 'Workspace Pages', desc: 'PRDs, client proposals, documentation guides, and company playbooks' },
+      { id: 'DATABASES', label: 'Structured Databases', desc: 'CRM boards, task tables, sprint roadmaps, and structured records' },
+      { id: 'BLOCKS', label: 'Markdown Content Blocks', desc: 'Deep nested text blocks, code blocks, lists, and embeds' },
+      { id: 'COMMENTS', label: 'Page & Block Comments', desc: 'Discussion threads, collaborative feedback, and resolution notes' },
+      { id: 'ALL', label: 'All Notion Workspace Data', desc: 'Exhaustive indexing across pages, databases, blocks, and comments' },
     ],
   },
 };
@@ -89,16 +90,18 @@ export const ConnectorConfigModal: React.FC<ConnectorConfigModalProps> = ({
   connectorId,
   connectorName,
   logoUrl,
-  initialMaxItems = 10,
+  initialMaxItems,
   initialCategories = [],
   initialSyncFreq = 'off',
   isLocked = false,
   isInitialSync = false,
 }) => {
   const meta = CONNECTOR_CATEGORIES[connectorId.toLowerCase()] || CONNECTOR_CATEGORIES.gmail;
+  const isSlackOrNotion = connectorId.toLowerCase() === 'slack' || connectorId.toLowerCase() === 'notion';
+  const defaultMax = initialMaxItems !== undefined ? initialMaxItems : (isSlackOrNotion ? 15 : 10);
 
   const defaultCategory = meta.options[0]?.id || 'INBOX';
-  const [maxItems, setMaxItems] = useState<number>(initialMaxItems);
+  const [maxItems, setMaxItems] = useState<number>(defaultMax);
   const [selectedCategories, setSelectedCategories] = useState<string[]>(
     initialCategories.length > 0 ? initialCategories : [defaultCategory]
   );
@@ -214,7 +217,7 @@ export const ConnectorConfigModal: React.FC<ConnectorConfigModalProps> = ({
               />
               <div className="flex justify-between text-[11px] font-mono text-muted-foreground">
                 <span>Min: 1</span>
-                <span>Default: 10</span>
+                <span>Default: {isSlackOrNotion ? 15 : 10}</span>
                 <span>Max: 30</span>
               </div>
             </div>

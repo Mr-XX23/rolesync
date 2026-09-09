@@ -1,10 +1,25 @@
 import os
+from dotenv import load_dotenv
+
+# Automatically load backend/.env
+_env_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env"))
+if os.path.exists(_env_path):
+    load_dotenv(_env_path)
+
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 # pyrefly: ignore [missing-import]
 import py_eureka_client.eureka_client as eureka_client
 from module_1_document_processing.composio_connector.webhook_handler import router as webhook_router, queue_worker
-from module_1_document_processing.composio_connector.connector_routes import router as connector_router, gmail_sync_manager, gdrive_sync_manager, calendar_sync_manager
+from module_1_document_processing.composio_connector.connector_routes import (
+    router as connector_router,
+    gmail_sync_manager,
+    gdrive_sync_manager,
+    calendar_sync_manager,
+    slack_sync_manager,
+    notion_sync_manager,
+)
+from module_1_document_processing.knowledge_vault_routes import router as knowledge_vault_router
 
 raw_eureka = os.environ.get("EUREKA_SERVER", "http://eureka-service:8761/eureka/")
 if "localhost" in raw_eureka or "127.0.0.1" in raw_eureka:
@@ -21,10 +36,12 @@ async def lifespan(app: FastAPI):
     # Start Staging Queue Worker
     await queue_worker.start()
 
-    # Start Background Gmail, GDrive & Calendar Auto-Sync Schedulers
+    # Start Background Gmail, GDrive, Calendar, Slack & Notion Auto-Sync Schedulers
     await gmail_sync_manager.start_scheduler()
     await gdrive_sync_manager.start_scheduler()
     await calendar_sync_manager.start_scheduler()
+    await slack_sync_manager.start_scheduler()
+    await notion_sync_manager.start_scheduler()
 
 
     # Register with Eureka
@@ -51,6 +68,8 @@ async def lifespan(app: FastAPI):
     yield
 
     # Stop Schedulers & Queue Worker & Deregister from Eureka
+    await notion_sync_manager.stop_scheduler()
+    await slack_sync_manager.stop_scheduler()
     await calendar_sync_manager.stop_scheduler()
     await gdrive_sync_manager.stop_scheduler()
     await gmail_sync_manager.stop_scheduler()
@@ -70,6 +89,8 @@ app = FastAPI(title="Role-Sync Data Pipeline Service", lifespan=lifespan)
 
 app.include_router(webhook_router, prefix="/api/v1")
 app.include_router(connector_router, prefix="/api/v1")
+app.include_router(knowledge_vault_router, prefix="/api/v1")
+app.include_router(knowledge_vault_router, prefix="/api/v1/data-pipeline")
 
 @app.get("/health")
 def health_check():

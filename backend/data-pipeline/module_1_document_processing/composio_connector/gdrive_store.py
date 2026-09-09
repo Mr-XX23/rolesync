@@ -21,6 +21,8 @@ except ImportError:
     MongoClient = None
     ASCENDING = 1
 
+from module_1_document_processing.composio_connector.distributed_lock import DistributedLockManager
+
 class GDriveStore:
     """MongoDB & In-Memory Store managing Google Drive connections, file deduplication, locks, and sync activity logs."""
 
@@ -36,11 +38,13 @@ class GDriveStore:
 
         self._mongo_client = None
         self._db = None
+        self._lock_manager = DistributedLockManager(db=None)
         if MongoClient and self.mongo_uri:
             try:
                 self._mongo_client = MongoClient(self.mongo_uri, serverSelectionTimeoutMS=500)
                 self._mongo_client.admin.command("ping")
                 self._db = self._mongo_client[self.db_name]
+                self._lock_manager.set_db(self._db)
                 # Compound unique index for file deduplication
                 self._db.gdrive_synced_files.create_index(
                     [("tenant_id", ASCENDING), ("connection_id", ASCENDING), ("file_id", ASCENDING)],
@@ -54,6 +58,7 @@ class GDriveStore:
                 print(f"[GDriveStore] Using in-memory store (MongoDB offline / local mode: {err})")
                 self._db = None
                 self._mongo_client = None
+                self._lock_manager.set_db(None)
 
     def get_or_create_connection(self, tenant_id: str, user_id: str, account_email: str = "") -> GDriveConnection:
         conn_id = f"conn_gdrive_{tenant_id}_{user_id}"
@@ -109,28 +114,19 @@ class GDriveStore:
                     print(f"[GDriveStore] Mongo update error: {err}")
 
     def acquire_lock(self, connection_id: str, job_id: str, lease_seconds: int = 900) -> bool:
-        now = datetime.now(timezone.utc)
-        expires_at = now + timedelta(seconds=lease_seconds)
-        with self._lock:
-            conn = self._connections.get(connection_id)
-            if not conn:
-                return False
-
-            if conn.lock.is_locked and conn.lock.expires_at and conn.lock.expires_at > now:
-                if conn.lock.locked_by_job_id == job_id:
-                    conn.lock.expires_at = expires_at
-                    self.update_connection(conn)
-                    return True
-                return False
-
-            conn.lock.is_locked = True
-            conn.lock.locked_by_job_id = job_id
-            conn.lock.locked_at = now
-            conn.lock.expires_at = expires_at
-            self.update_connection(conn)
-            return True
+        success = self._lock_manager.acquire_lock("gdrive_connections", connection_id, job_id, lease_seconds)
+        if success:
+            with self._lock:
+                conn = self._connections.get(connection_id)
+                if conn:
+                    conn.lock.is_locked = True
+                    conn.lock.locked_by_job_id = job_id
+                    conn.lock.locked_at = datetime.now(timezone.utc)
+                    conn.lock.expires_at = conn.lock.locked_at + timedelta(seconds=lease_seconds)
+        return success
 
     def release_lock(self, connection_id: str, job_id: str | None = None) -> None:
+        self._lock_manager.release_lock("gdrive_connections", connection_id, job_id)
         with self._lock:
             conn = self._connections.get(connection_id)
             if conn:
@@ -139,20 +135,30 @@ class GDriveStore:
                     conn.lock.locked_by_job_id = None
                     conn.lock.locked_at = None
                     conn.lock.expires_at = None
-                    self.update_connection(conn)
 
     def is_locked(self, connection_id: str) -> bool:
-        now = datetime.now(timezone.utc)
-        with self._lock:
-            conn = self._connections.get(connection_id)
-            if not conn and self._db is not None:
-                doc = self._db.gdrive_connections.find_one({"connection_id": connection_id})
-                if doc:
-                    conn = self._doc_to_connection(doc)
-                    self._connections[connection_id] = conn
-            if not conn:
-                return False
-            return bool(conn.lock.is_locked and conn.lock.expires_at and conn.lock.expires_at > now)
+        return self._lock_manager.is_locked("gdrive_connections", connection_id)
+
+    def start_heartbeat(self, connection_id: str, job_id: str, lease_seconds: int = 900) -> None:
+        self._lock_manager.start_heartbeat("gdrive_connections", connection_id, job_id, lease_seconds)
+
+    def stop_heartbeat(self, connection_id: str) -> None:
+        self._lock_manager.stop_heartbeat(connection_id)
+
+    def get_failed_items(self, connection_id: str) -> list[dict[str, Any]]:
+        """Retrieves failed item records from recent activities for targeted retry."""
+        failed_items = []
+        activities = self.get_activities(connection_id, limit=5)
+        seen_ids = set()
+        for act in activities:
+            for item in act.items:
+                status = item.get("status") if isinstance(item, dict) else getattr(item, "status", None)
+                if status == "FAILED":
+                    item_id = item.get("file_id") or item.get("id") or item.get("name")
+                    if item_id and item_id not in seen_ids:
+                        seen_ids.add(item_id)
+                        failed_items.append(item if isinstance(item, dict) else item.to_dict())
+        return failed_items
 
     def is_file_synced(self, tenant_id: str, connection_id: str, file_id: str) -> bool:
         key = f"{tenant_id}:{connection_id}:{file_id}"

@@ -20,6 +20,8 @@ from module_1_document_processing.composio_connector.normalizers.gdrive_normaliz
 from module_1_document_processing.composio_connector.events.canonical_event import CanonicalEvent, EventType
 from module_1_document_processing.composio_connector.date_utils import normalize_to_utc, ensure_iso_str
 from module_1_document_processing.pipeline.queue_worker import QueueWorker
+from module_1_document_processing.composio_connector.rate_limiter import global_rate_limiter
+from module_1_document_processing.composio_connector.error_classifier import classify_error, ConnectorAction, ConnectorErrorType
 
 class GDriveSyncManager:
     """Production Sync Manager orchestrating Google Drive OAuth, pagination, LlamaParse file ingestion, auto-sync, and real-time webhooks."""
@@ -269,6 +271,23 @@ class GDriveSyncManager:
             "connection_id": conn.connection_id,
         }
 
+    async def retry_failed_items(self, user_id: str, tenant_id: str = "tenant_default") -> dict[str, Any]:
+        """Collects recently failed Google Drive files and triggers a targeted recovery sync."""
+        conn = self.store.get_or_create_connection(tenant_id=tenant_id, user_id=user_id)
+        failed_items = self.store.get_failed_items(conn.connection_id)
+        if not failed_items:
+            return {
+                "status": "success",
+                "message": "No failed Google Drive files found to retry.",
+                "retried_count": 0,
+            }
+        asyncio.create_task(self.start_sync_job(conn.connection_id, trigger_type=GDriveTriggerType.RESYNC, is_resync=True))
+        return {
+            "status": "resync_started",
+            "message": f"Retrying {len(failed_items)} failed items for Google Drive.",
+            "connection_id": conn.connection_id,
+        }
+
     async def start_sync_job(
         self,
         connection_id: str,
@@ -281,8 +300,11 @@ class GDriveSyncManager:
             print(f"[GDriveSyncManager] Job {job_id} could not acquire lock for connection {connection_id}. Aborting.")
             return
 
+        self.store.start_heartbeat(connection_id=connection_id, job_id=job_id, lease_seconds=900)
+
         conn = self.store._connections.get(connection_id)
         if not conn:
+            self.store.stop_heartbeat(connection_id)
             self.store.release_lock(connection_id, job_id)
             return
 
@@ -401,14 +423,20 @@ class GDriveSyncManager:
             print(f"[GDriveSyncManager] Completed sync job {job_id} for {connection_id}. Metrics: {activity.metrics}")
 
         except Exception as err:
-            print(f"[GDriveSyncManager] Fatal error in sync job {job_id}: {err}")
-            conn.status = GDriveSyncStatus.FAILED
-            conn.current_progress = f"Error: {err}"
+            err_type, sanitized_msg, action = classify_error(err)
+            print(f"[GDriveSyncManager] Error in sync job {job_id}: {sanitized_msg} (type={err_type})")
+            if action == ConnectorAction.RECONNECT:
+                conn.status = GDriveSyncStatus.CONFIGURATION_REQUIRED
+                conn.current_progress = "Access token expired. Reconnection required."
+            else:
+                conn.status = GDriveSyncStatus.FAILED
+                conn.current_progress = f"Error: {sanitized_msg[:120]}"
             activity.status = "FAILED"
             activity.completed_at = datetime.now(timezone.utc)
             self.store.update_connection(conn)
             self.store.record_activity(activity)
         finally:
+            self.store.stop_heartbeat(connection_id)
             self.store.release_lock(connection_id, job_id)
 
     async def _process_single_file(
@@ -429,6 +457,8 @@ class GDriveSyncManager:
         # Deduplication Guard: skip if already synced UNLESS this is an edit/update event
         if not is_update and self.store.is_file_synced(conn.tenant_id, conn.connection_id, file_id):
             return False
+
+        await global_rate_limiter.acquire("gdrive")
 
         # Skip folders
         if mime_type == "application/vnd.google-apps.folder":
@@ -523,7 +553,8 @@ class GDriveSyncManager:
             return True
 
         except Exception as err:
-            print(f"[GDriveSyncManager] Failed syncing file {file_id}: {err}")
+            err_type, sanitized_err, _ = classify_error(err)
+            print(f"[GDriveSyncManager] Failed syncing file {file_id}: {sanitized_err} ({err_type})")
             activity.items.append({
                 "file_id": file_id,
                 "filename": filename,
@@ -532,7 +563,7 @@ class GDriveSyncManager:
                 "mime_type": mime_type,
                 "file_size": file_size,
                 "status": "FAILED",
-                "error_message": str(err),
+                "error_message": sanitized_err,
                 "synced_at": datetime.now(timezone.utc).isoformat(),
             })
             return None

@@ -22,6 +22,8 @@ from module_1_document_processing.composio_connector.gmail_models import (
 )
 from module_1_document_processing.composio_connector.gmail_store import GmailStore
 from module_1_document_processing.pipeline.queue_worker import QueueWorker
+from module_1_document_processing.composio_connector.rate_limiter import global_rate_limiter
+from module_1_document_processing.composio_connector.error_classifier import classify_error, ConnectorAction, ConnectorErrorType
 
 class GmailSyncManager:
     """Core synchronization manager orchestrating 90-day backfill, parallel sub-batching, locking, deduplication, and scheduler."""
@@ -349,6 +351,18 @@ class GmailSyncManager:
             "connection_id": conn.connection_id,
         }
 
+    async def retry_failed_items(self, user_id: str, tenant_id: str = "tenant_default") -> dict[str, Any]:
+        """Collects recently failed email items and triggers a targeted recovery sync."""
+        conn = self.store.get_or_create_connection(tenant_id=tenant_id, user_id=user_id)
+        failed_items = self.store.get_failed_items(conn.connection_id)
+        if not failed_items:
+            return {
+                "status": "success",
+                "message": "No failed emails found to retry.",
+                "retried_count": 0,
+            }
+        return await self.trigger_resync(user_id=user_id, tenant_id=tenant_id)
+
     def disconnect_connection(self, user_id: str, tenant_id: str = "tenant_default") -> dict[str, Any]:
         """Disconnects Gmail, revokes/invalidates backend OAuth tokens in Composio, and PRESERVES vector memories."""
         try:
@@ -392,8 +406,11 @@ class GmailSyncManager:
             print(f"[GmailSyncManager] Job {job_id} could not acquire lock for connection {connection_id}. Aborting.")
             return
 
+        self.store.start_heartbeat(connection_id=connection_id, job_id=job_id, lease_seconds=900)
+
         conn = self.store._connections.get(connection_id)
         if not conn:
+            self.store.stop_heartbeat(connection_id)
             self.store.release_lock(connection_id, job_id)
             return
 
@@ -514,14 +531,20 @@ class GmailSyncManager:
             print(f"[GmailSyncManager] Completed sync job {job_id} for {connection_id}. Metrics: {activity.metrics}")
 
         except Exception as err:
-            print(f"[GmailSyncManager] Fatal error in sync job {job_id}: {err}")
-            conn.status = GmailSyncStatus.FAILED
-            conn.current_progress = f"Error: {err}"
+            err_type, sanitized_msg, action = classify_error(err)
+            print(f"[GmailSyncManager] Error in sync job {job_id}: {sanitized_msg} (type={err_type})")
+            if action == ConnectorAction.RECONNECT:
+                conn.status = GmailSyncStatus.CONFIGURATION_REQUIRED
+                conn.current_progress = "Access token expired. Reconnection required."
+            else:
+                conn.status = GmailSyncStatus.FAILED
+                conn.current_progress = f"Error: {sanitized_msg[:120]}"
             activity.status = "FAILED"
             activity.completed_at = datetime.now(timezone.utc)
             self.store.update_connection(conn)
             self.store.record_activity(activity)
         finally:
+            self.store.stop_heartbeat(connection_id)
             self.store.release_lock(connection_id, job_id)
 
     async def _process_single_email(self, conn: GmailConnection, raw_email: dict[str, Any], activity: GmailSyncActivity) -> bool | None:
@@ -545,6 +568,8 @@ class GmailSyncManager:
         if self.store.is_message_synced(conn.tenant_id, conn.connection_id, msg_id):
             print(f"[GmailSyncManager] Skipping msg_id={msg_id} (already synced).")
             return False
+
+        await global_rate_limiter.acquire("gmail")
 
         # Format Composio payload structure
         payload = {
@@ -620,14 +645,15 @@ class GmailSyncManager:
             return True
 
         except Exception as err:
-            print(f"[GmailSyncManager] Failed syncing msg_id={msg_id}: {err}")
+            err_type, sanitized_err, _ = classify_error(err)
+            print(f"[GmailSyncManager] Failed syncing msg_id={msg_id}: {sanitized_err} ({err_type})")
             activity.items.append({
                 "message_id": msg_id,
                 "subject": subject,
                 "sender": sender,
                 "status": "FAILED",
                 "attachment_summary": attachment_summary,
-                "error_message": str(err),
+                "error_message": sanitized_err,
                 "synced_at": datetime.now(timezone.utc).isoformat(),
             })
             return None

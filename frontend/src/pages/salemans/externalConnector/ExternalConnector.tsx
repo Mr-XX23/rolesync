@@ -19,12 +19,19 @@ import {
   Activity,
   Clock,
   CheckCircle2,
+  RotateCcw,
+  Database,
+  Trash2,
 } from 'lucide-react';
 import { Button } from '../../../components/common/Button';
 import { Input } from '../../../components/common/Input';
 import { useAppSelector } from '../../../store';
 import { useToast } from '../../../context/ToastContext';
-import { connectorApi, type GmailConnectionDetails } from '../../../api/connectorApi';
+import {
+  connectorApi,
+  type GmailConnectionDetails,
+  type EnterpriseSyncRequestRecord,
+} from '../../../api/connectorApi';
 import { ConnectorConfigModal } from './ConnectorConfigModal';
 import { GmailSyncActivityModal } from './GmailSyncActivityModal';
 import { AutoSyncModal } from './AutoSyncModal';
@@ -33,7 +40,18 @@ interface Integration {
   id: string;
   name: string;
   category: 'CRM' | 'Storage' | 'Productivity' | 'Databases' | 'Communication';
-  status: 'Connected' | 'Available' | 'Configuration Required' | 'Syncing' | 'Waiting for Next Auto Sync' | 'Up to Date' | 'Partial Success' | 'Failed' | 'Paused' | 'Disconnected';
+  status:
+    | 'Connected'
+    | 'Available'
+    | 'Configuration Required'
+    | 'Syncing'
+    | 'Waiting for Next Auto Sync'
+    | 'Up to Date'
+    | 'Partial Success'
+    | 'Failed'
+    | 'Paused'
+    | 'Disconnected'
+    | 'Under Review';
   description: string;
   icon: React.ComponentType<any>;
   iconColor: string;
@@ -49,6 +67,9 @@ interface Integration {
   logoUrl: string;
   currentProgress?: string;
   isLocked?: boolean;
+  isEnterpriseRequest?: boolean;
+  enterpriseRequestId?: string;
+  enterpriseCreatedAt?: string;
 }
 
 export const isConnectedState = (status: string) => {
@@ -87,25 +108,13 @@ const getInitialConnectorState = (id: string, defaultStatus: Integration['status
     if (raw) {
       const parsed = JSON.parse(raw);
       if (parsed?.status && parsed.status !== 'Disconnected') {
-        const captured = parsed.backfill_state?.total_synced_so_far ?? 0;
-        const autoEnabled = parsed.config?.auto_sync_enabled ?? false;
-        const webhookActive = parsed.config?.webhook_enabled ?? false;
-        let freq = 'OFF';
-        if (autoEnabled && (parsed.config?.auto_sync_interval_minutes || 0) > 0) {
-          const mins = parsed.config.auto_sync_interval_minutes;
-          if (mins === 1440) freq = '24H (2 AM)';
-          else if (mins === 360) freq = '6H AUTO';
-          else if (mins === 60) freq = '1H AUTO';
-          else if (mins === 2) freq = '2M AUTO';
-          else freq = `${mins}M AUTO`;
-        }
         return {
           status: parsed.status as any,
           currentProgress: parsed.current_progress || '',
-          syncFrequency: freq,
-          autoSyncEnabled: autoEnabled,
-          webhookEnabled: webhookActive,
-          syncCaptured: captured,
+          syncFrequency: '-',
+          autoSyncEnabled: false,
+          webhookEnabled: false,
+          syncCaptured: 0,
           details: parsed,
         };
       }
@@ -114,7 +123,7 @@ const getInitialConnectorState = (id: string, defaultStatus: Integration['status
       return {
         status: 'Connected',
         currentProgress: '',
-        syncFrequency: 'OFF',
+        syncFrequency: '-',
         autoSyncEnabled: false,
         webhookEnabled: false,
         syncCaptured: 0,
@@ -127,7 +136,7 @@ const getInitialConnectorState = (id: string, defaultStatus: Integration['status
   return {
     status: defaultStatus,
     currentProgress: '',
-    syncFrequency: 'OFF',
+    syncFrequency: '-',
     autoSyncEnabled: false,
     webhookEnabled: false,
     syncCaptured: 0,
@@ -135,12 +144,55 @@ const getInitialConnectorState = (id: string, defaultStatus: Integration['status
   };
 };
 
+export const inferEnterpriseCategory = (name: string): Integration['category'] => {
+  const lower = name.toLowerCase();
+  if (
+    lower.includes('crm') ||
+    lower.includes('salesforce') ||
+    lower.includes('hubspot') ||
+    lower.includes('zoho') ||
+    lower.includes('pipedrive')
+  ) {
+    return 'CRM';
+  }
+  if (
+    lower.includes('slack') ||
+    lower.includes('teams') ||
+    lower.includes('discord') ||
+    lower.includes('chat')
+  ) {
+    return 'Communication';
+  }
+  if (
+    lower.includes('drive') ||
+    lower.includes('box') ||
+    lower.includes('dropbox') ||
+    lower.includes('s3') ||
+    lower.includes('storage') ||
+    lower.includes('blob')
+  ) {
+    return 'Storage';
+  }
+  return 'Databases';
+};
+
 export const ExternalConnector: React.FC = () => {
   const toast = useToast();
   const { user } = useAppSelector((state) => state.auth);
   const activeUserId = user?.userId || user?.email || 'usr_active';
 
+  const [enterpriseRequests, setEnterpriseRequests] = useState<EnterpriseSyncRequestRecord[]>(() => {
+    try {
+      const raw = localStorage.getItem(`rolesync_enterprise_requests_${activeUserId}`);
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [cancellingRequestId, setCancellingRequestId] = useState<string | null>(null);
+
   const initialGmail = getInitialConnectorState('gmail', 'Available');
+
   const initialGDrive = getInitialConnectorState('gdrive', 'Available');
   const initialCalendar = getInitialConnectorState('calendar', 'Available');
   const initialSlack = getInitialConnectorState('slack', 'Available');
@@ -248,12 +300,14 @@ export const ExternalConnector: React.FC = () => {
   const [gmailDetails, setGmailDetails] = useState<GmailConnectionDetails | null>(initialGmail.details);
   const [allConnections, setAllConnections] = useState<Record<string, any>>({});
   const [lockNotice, setLockNotice] = useState<string | null>(null);
+  const [isInitialLoaded, setIsInitialLoaded] = useState<boolean>(false);
 
   // Connection Simulation States
   const [connectingId, setConnectingId] = useState<string | null>(null);
   const [disconnectingId, setDisconnectingId] = useState<string | null>(null);
   const [isDisconnecting, setIsDisconnecting] = useState<boolean>(false);
   const [activeSyncingId, setActiveSyncingId] = useState<string | null>(null);
+  const [retryingFailedId, setRetryingFailedId] = useState<string | null>(null);
 
   // Popup and OAuth Event Listeners Ref
   const oauthPopupRef = useRef<Window | null>(null);
@@ -318,6 +372,38 @@ export const ExternalConnector: React.FC = () => {
           }
         }
 
+        const calConn = conns.calendar;
+        if (calConn) {
+          if (isConnectedState(calConn.status)) {
+            localStorage.setItem('rolesync_calendar_connection', JSON.stringify(calConn));
+            localStorage.setItem('rolesync_calendar_connected', 'true');
+          } else if (calConn.status === 'Disconnected') {
+            localStorage.removeItem('rolesync_calendar_connection');
+            localStorage.removeItem('rolesync_calendar_connected');
+          }
+        }
+
+        const slackConn = conns.slack;
+        if (slackConn) {
+          if (isConnectedState(slackConn.status)) {
+            localStorage.setItem('rolesync_slack_connection', JSON.stringify(slackConn));
+            localStorage.setItem('rolesync_slack_connected', 'true');
+          } else if (slackConn.status === 'Disconnected') {
+            localStorage.removeItem('rolesync_slack_connection');
+            localStorage.removeItem('rolesync_slack_connected');
+          }
+        }
+
+        const notionConn = conns.notion;
+        if (notionConn) {
+          if (isConnectedState(notionConn.status)) {
+            localStorage.setItem('rolesync_notion_connection', JSON.stringify(notionConn));
+            localStorage.setItem('rolesync_notion_connected', 'true');
+          } else if (notionConn.status === 'Disconnected') {
+            localStorage.removeItem('rolesync_notion_connection');
+            localStorage.removeItem('rolesync_notion_connected');
+          }
+        }
 
         // Clear local syncing lock if backend has completed sync
         if (activeSyncingId) {
@@ -367,21 +453,36 @@ export const ExternalConnector: React.FC = () => {
                 status: (isItemSyncing ? 'Syncing' : liveConn.status) as any,
                 currentProgress: liveConn.current_progress || '',
                 isLocked: liveConn.lock?.is_locked || liveConn.is_locked || false,
-                syncCaptured: captured,
-                syncSuccess: captured,
                 syncFrequency: freqDisplay,
                 autoSyncEnabled: autoEnabled,
                 webhookEnabled: webhookActive,
+                syncCaptured: captured,
+                syncSuccess: captured,
+                details: `${liveConn.account_email || liveConn.account_name || liveConn.workspace_name || ''} connected.`,
               };
             }
             return item;
           })
         );
       }
+
+      // Fetch submitted custom enterprise requests
+      try {
+        const entRes = await connectorApi.getEnterpriseSyncRequests(activeUserId);
+        if (entRes?.requests) {
+          setEnterpriseRequests(entRes.requests);
+          localStorage.setItem(`rolesync_enterprise_requests_${activeUserId}`, JSON.stringify(entRes.requests));
+        }
+      } catch (e) {
+        // Continue with cached requests
+      }
     } catch (err) {
-      console.warn('[ExternalConnector] Could not poll all connectors status:', err);
+      console.error('Failed to fetch connector statuses:', err);
+    } finally {
+      setIsInitialLoaded(true);
     }
   };
+
 
   // Listen for OAuth completion from popup callback window
   useEffect(() => {
@@ -507,6 +608,18 @@ export const ExternalConnector: React.FC = () => {
     };
   }, [activeUserId, isAnySyncingOrConnecting]);
 
+  // Handle escape key to close enterprise modal
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && showEnterpriseModal) {
+        setShowEnterpriseModal(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [showEnterpriseModal]);
+
+
   // Dynamic stats calculated from active integrations
   const connectedCount = useMemo(() => {
     return integrations.filter(
@@ -525,16 +638,43 @@ export const ExternalConnector: React.FC = () => {
       .reduce((acc, item) => acc + (item.syncCaptured || 0), 0);
   }, [integrations]);
 
+  // Combined integrations including active integrations and user-submitted custom enterprise requests
+  const displayIntegrations = useMemo<Integration[]>(() => {
+    const customItems: Integration[] = enterpriseRequests.map((req) => ({
+      id: `ent_${req.request_id}`,
+      name: req.database_system,
+      category: inferEnterpriseCategory(req.database_system),
+      status: 'Under Review',
+      description: req.requirements,
+      icon: Database,
+      iconColor: 'text-amber-500 dark:text-amber-400',
+      bgColor: 'bg-amber-500/10 border-amber-500/30',
+      details: `Enterprise Sync request submitted on ${new Date(req.created_at).toLocaleDateString()}. SLA: ~24h Connectivity Review.`,
+      syncFrequency: 'Pending',
+      syncCaptured: 0,
+      syncSuccess: 0,
+      syncSkipped: 0,
+      syncFailed: 0,
+      logoUrl: '',
+      isEnterpriseRequest: true,
+      enterpriseRequestId: req.request_id,
+      enterpriseCreatedAt: req.created_at,
+    }));
+
+    return [...integrations, ...customItems];
+  }, [integrations, enterpriseRequests]);
+
   // Filter & Search Logic
   const filteredIntegrations = useMemo(() => {
-    return integrations.filter((item) => {
+    return displayIntegrations.filter((item) => {
       const matchesTab = activeTab === 'All' || item.category === activeTab;
       const matchesSearch =
         item.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
         item.description.toLowerCase().includes(searchQuery.toLowerCase());
       return matchesTab && matchesSearch;
     });
-  }, [integrations, activeTab, searchQuery]);
+  }, [displayIntegrations, activeTab, searchQuery]);
+
 
   // Connect Source via API Gateway & Composio OAuth with Popup
   const handleToggleConnection = async (item: Integration) => {
@@ -856,6 +996,208 @@ export const ExternalConnector: React.FC = () => {
 
 
 
+    if (id === 'slack') {
+      if (currentStatus === 'Available' || currentStatus === 'Disconnected') {
+        hasHandledAuthSuccessRef.current = false;
+        setConnectingId('slack');
+        sessionStorage.setItem('rolesync_oauth_connecting_source', 'slack');
+        localStorage.setItem('rolesync_oauth_connecting_source', 'slack');
+        try {
+          const callbackUrl = `${window.location.origin}/connectors/callback?source=slack`;
+          const res = await connectorApi.connectSource('slack', activeUserId, callbackUrl);
+
+          if (res.redirect_url) {
+            const popup = openOAuthPopup(res.redirect_url);
+
+            if (popupWatcherRef.current) clearInterval(popupWatcherRef.current);
+            let pollCount = 0;
+            popupWatcherRef.current = setInterval(async () => {
+              pollCount += 1;
+              if (!popup || popup.closed) {
+                if (popupWatcherRef.current) clearInterval(popupWatcherRef.current);
+                popupWatcherRef.current = null;
+                oauthPopupRef.current = null;
+                setConnectingId(null);
+
+                if (hasHandledAuthSuccessRef.current) {
+                  return;
+                }
+
+                try {
+                  const statusRes = await connectorApi.getSlackStatus(activeUserId);
+                  if (statusRes?.connection && isAuthorizedState(statusRes.connection.status)) {
+                    hasHandledAuthSuccessRef.current = true;
+                    await fetchAllConnectorsStatus();
+                    if (statusRes.connection.status === 'Configuration Required') {
+                      setActiveConfigConnector({
+                        ...item,
+                        status: 'Configuration Required',
+                      });
+                    }
+                    toast.success(
+                      'Slack authorized successfully! Please configure your sync preferences.',
+                      'Authorization Complete'
+                    );
+                  } else {
+                    setIntegrations((prev) =>
+                      prev.map((c) => (c.id === 'slack' ? { ...c, status: 'Available' } : c))
+                    );
+                    await fetchAllConnectorsStatus();
+                  }
+                } catch {
+                  setIntegrations((prev) =>
+                    prev.map((c) => (c.id === 'slack' ? { ...c, status: 'Available' } : c))
+                  );
+                }
+                return;
+              }
+
+              if (pollCount % 2 === 0) {
+                if (hasHandledAuthSuccessRef.current) {
+                  if (popupWatcherRef.current) clearInterval(popupWatcherRef.current);
+                  popupWatcherRef.current = null;
+                  return;
+                }
+
+                try {
+                  const statusRes = await connectorApi.getSlackStatus(activeUserId);
+                  if (statusRes?.connection && isAuthorizedState(statusRes.connection.status)) {
+                    hasHandledAuthSuccessRef.current = true;
+                    if (popupWatcherRef.current) clearInterval(popupWatcherRef.current);
+                    popupWatcherRef.current = null;
+                    if (popup && !popup.closed) popup.close();
+                    oauthPopupRef.current = null;
+                    setConnectingId(null);
+                    await fetchAllConnectorsStatus();
+                    if (statusRes.connection.status === 'Configuration Required') {
+                      setActiveConfigConnector({
+                        ...item,
+                        status: 'Configuration Required',
+                      });
+                    }
+                    toast.success(
+                      'Slack authorized successfully! Please configure your sync preferences.',
+                      'Authorization Complete'
+                    );
+                  }
+                } catch {}
+              }
+            }, 1500);
+          }
+        } catch (err: any) {
+          console.error('[Frontend] Slack connect error:', err);
+          toast.error('Failed to initiate Slack connection. Please try again.', 'Connection Error');
+          setConnectingId(null);
+        }
+      } else if (currentStatus === 'Configuration Required') {
+        setActiveConfigConnector(item);
+      } else {
+        setDisconnectingId('slack');
+      }
+      return;
+    }
+
+    if (id === 'notion') {
+      if (currentStatus === 'Available' || currentStatus === 'Disconnected') {
+        hasHandledAuthSuccessRef.current = false;
+        setConnectingId('notion');
+        sessionStorage.setItem('rolesync_oauth_connecting_source', 'notion');
+        localStorage.setItem('rolesync_oauth_connecting_source', 'notion');
+        try {
+          const callbackUrl = `${window.location.origin}/connectors/callback?source=notion`;
+          const res = await connectorApi.connectSource('notion', activeUserId, callbackUrl);
+
+          if (res.redirect_url) {
+            const popup = openOAuthPopup(res.redirect_url);
+
+            if (popupWatcherRef.current) clearInterval(popupWatcherRef.current);
+            let pollCount = 0;
+            popupWatcherRef.current = setInterval(async () => {
+              pollCount += 1;
+              if (!popup || popup.closed) {
+                if (popupWatcherRef.current) clearInterval(popupWatcherRef.current);
+                popupWatcherRef.current = null;
+                oauthPopupRef.current = null;
+                setConnectingId(null);
+
+                if (hasHandledAuthSuccessRef.current) {
+                  return;
+                }
+
+                try {
+                  const statusRes = await connectorApi.getNotionStatus(activeUserId);
+                  if (statusRes?.connection && isAuthorizedState(statusRes.connection.status)) {
+                    hasHandledAuthSuccessRef.current = true;
+                    await fetchAllConnectorsStatus();
+                    if (statusRes.connection.status === 'Configuration Required') {
+                      setActiveConfigConnector({
+                        ...item,
+                        status: 'Configuration Required',
+                      });
+                    }
+                    toast.success(
+                      'Notion authorized successfully! Please configure your sync preferences.',
+                      'Authorization Complete'
+                    );
+                  } else {
+                    setIntegrations((prev) =>
+                      prev.map((c) => (c.id === 'notion' ? { ...c, status: 'Available' } : c))
+                    );
+                    await fetchAllConnectorsStatus();
+                  }
+                } catch {
+                  setIntegrations((prev) =>
+                    prev.map((c) => (c.id === 'notion' ? { ...c, status: 'Available' } : c))
+                  );
+                }
+                return;
+              }
+
+              if (pollCount % 2 === 0) {
+                if (hasHandledAuthSuccessRef.current) {
+                  if (popupWatcherRef.current) clearInterval(popupWatcherRef.current);
+                  popupWatcherRef.current = null;
+                  return;
+                }
+
+                try {
+                  const statusRes = await connectorApi.getNotionStatus(activeUserId);
+                  if (statusRes?.connection && isAuthorizedState(statusRes.connection.status)) {
+                    hasHandledAuthSuccessRef.current = true;
+                    if (popupWatcherRef.current) clearInterval(popupWatcherRef.current);
+                    popupWatcherRef.current = null;
+                    if (popup && !popup.closed) popup.close();
+                    oauthPopupRef.current = null;
+                    setConnectingId(null);
+                    await fetchAllConnectorsStatus();
+                    if (statusRes.connection.status === 'Configuration Required') {
+                      setActiveConfigConnector({
+                        ...item,
+                        status: 'Configuration Required',
+                      });
+                    }
+                    toast.success(
+                      'Notion authorized successfully! Please configure your sync preferences.',
+                      'Authorization Complete'
+                    );
+                  }
+                } catch {}
+              }
+            }, 1500);
+          }
+        } catch (err: any) {
+          console.error('[Frontend] Notion connect error:', err);
+          toast.error('Failed to initiate Notion connection. Please try again.', 'Connection Error');
+          setConnectingId(null);
+        }
+      } else if (currentStatus === 'Configuration Required') {
+        setActiveConfigConnector(item);
+      } else {
+        setDisconnectingId('notion');
+      }
+      return;
+    }
+
     if (currentStatus === 'Available' || currentStatus === 'Disconnected') {
       setConnectingId(id);
       sessionStorage.setItem('rolesync_oauth_connecting_source', id);
@@ -1023,6 +1365,45 @@ export const ExternalConnector: React.FC = () => {
       return;
     }
 
+    if (id === 'slack') {
+      try {
+        await connectorApi.triggerSlackSyncNow(activeUserId);
+        toast.info('Manual sync batch started for Slack.', 'Sync Initiated');
+        await fetchAllConnectorsStatus();
+      } catch (err: any) {
+        setActiveSyncingId(null);
+        if (err?.response?.status === 409) {
+          const msg = 'Your Slack messages are currently being processed. Please wait a moment before starting another sync.';
+          setLockNotice(msg);
+          toast.warning(msg, 'Sync In Progress');
+        } else {
+          console.error('[Frontend] Slack manual sync error:', err);
+          toast.error(err?.message || 'Failed to start Slack sync.', 'Sync Failed');
+        }
+        await fetchAllConnectorsStatus();
+      }
+      return;
+    }
+
+    if (id === 'notion') {
+      try {
+        await connectorApi.triggerNotionSyncNow(activeUserId);
+        toast.info('Manual sync batch started for Notion.', 'Sync Initiated');
+        await fetchAllConnectorsStatus();
+      } catch (err: any) {
+        setActiveSyncingId(null);
+        if (err?.response?.status === 409) {
+          const msg = 'Your Notion workspace is currently being processed. Please wait a moment before starting another sync.';
+          setLockNotice(msg);
+          toast.warning(msg, 'Sync In Progress');
+        } else {
+          console.error('[Frontend] Notion manual sync error:', err);
+          toast.error(err?.message || 'Failed to start Notion sync.', 'Sync Failed');
+        }
+        await fetchAllConnectorsStatus();
+      }
+      return;
+    }
 
     try {
       await connectorApi.reconcileSource(id, 'tenant_default');
@@ -1033,6 +1414,25 @@ export const ExternalConnector: React.FC = () => {
       console.error(`[Frontend] Manual sync failed for ${id}:`, err);
       toast.error(`Sync failed for ${id}.`, 'Sync Failed');
       await fetchAllConnectorsStatus();
+    }
+  };
+
+  // Retry Failed Items for a Connector
+  const handleRetryFailed = async (id: string, name: string) => {
+    setRetryingFailedId(id);
+    try {
+      const res = await connectorApi.retryFailedItems(id, activeUserId);
+      if (res?.retried_count !== undefined) {
+        toast.info(`Retrying ${res.retried_count} failed item(s) for ${name}.`, 'Retry Initiated');
+      } else {
+        toast.info(`Retrying failed items for ${name}.`, 'Retry Initiated');
+      }
+      await fetchAllConnectorsStatus();
+    } catch (err: any) {
+      console.error(`[Frontend] Retry failed items error for ${id}:`, err);
+      toast.error(err?.message || `Failed to retry failed items for ${name}.`, 'Retry Failed');
+    } finally {
+      setRetryingFailedId(null);
     }
   };
 
@@ -1088,6 +1488,36 @@ export const ExternalConnector: React.FC = () => {
         setActiveSyncingId(null);
         await fetchAllConnectorsStatus();
       }
+    } else if (connId === 'slack') {
+      try {
+        await connectorApi.saveSlackConfig(
+          activeUserId,
+          maxItems,
+          categories.length > 0 ? categories : ['PUBLIC_CHANNELS', 'DIRECT_MESSAGES', 'GROUP_MESSAGES']
+        );
+        await fetchAllConnectorsStatus();
+        toast.info('Initial synchronization initiated. Processing Slack channels and direct messages in background...', 'Syncing Started');
+      } catch (err: any) {
+        console.error('[Frontend] Save Slack config error:', err);
+        toast.error('Failed to start Slack sync. Please try again.', 'Sync Error');
+        setActiveSyncingId(null);
+        await fetchAllConnectorsStatus();
+      }
+    } else if (connId === 'notion') {
+      try {
+        await connectorApi.saveNotionConfig(
+          activeUserId,
+          maxItems,
+          categories.length > 0 ? categories : ['PAGES', 'DATABASES']
+        );
+        await fetchAllConnectorsStatus();
+        toast.info('Initial synchronization initiated. Processing Notion pages, databases, and blocks in background...', 'Syncing Started');
+      } catch (err: any) {
+        console.error('[Frontend] Save Notion config error:', err);
+        toast.error('Failed to start Notion sync. Please try again.', 'Sync Error');
+        setActiveSyncingId(null);
+        await fetchAllConnectorsStatus();
+      }
     }
   };
 
@@ -1137,24 +1567,106 @@ export const ExternalConnector: React.FC = () => {
   };
 
   // Send Enterprise Integration Request
-  const dispatchEnterpriseRequest = (e: React.FormEvent) => {
+  const dispatchEnterpriseRequest = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!enterpriseDatabase || !enterpriseMessage) return;
+    const dbName = enterpriseDatabase.trim();
+    const requirements = enterpriseMessage.trim();
+
+    if (!dbName || !requirements) {
+      toast.warning('Please enter both the target database name and requirements schema details.', 'Missing Information');
+      return;
+    }
 
     setIsSubmittingEnterprise(true);
-    setTimeout(() => {
-      setIsSubmittingEnterprise(false);
+    try {
+      const res = await connectorApi.requestEnterpriseSync({
+        database_system: dbName,
+        requirements: requirements,
+        user_id: activeUserId,
+        contact_email: user?.email,
+      });
+
+      const newRecord: EnterpriseSyncRequestRecord = res?.request || {
+        request_id: `req_${Date.now()}`,
+        user_id: activeUserId,
+        database_system: dbName,
+        requirements: requirements,
+        status: 'UNDER_REVIEW',
+        created_at: new Date().toISOString(),
+      };
+
+      setEnterpriseRequests((prev) => {
+        const next = [newRecord, ...prev.filter((r) => r.request_id !== newRecord.request_id)];
+        localStorage.setItem(`rolesync_enterprise_requests_${activeUserId}`, JSON.stringify(next));
+        return next;
+      });
+
+      toast.success(
+        res?.message || `Enterprise pipeline request for "${dbName}" dispatched! Our engineering team will review connectivity rules.`,
+        'Request Dispatched'
+      );
       setShowEnterpriseModal(false);
       setEnterpriseDatabase('');
       setEnterpriseMessage('');
-      alert('Enterprise pipeline request cataloged! Our database team will verify connectivity rules.');
-    }, 1800);
+    } catch (err: any) {
+      const fallbackRecord: EnterpriseSyncRequestRecord = {
+        request_id: `req_${Date.now()}`,
+        user_id: activeUserId,
+        database_system: dbName,
+        requirements: requirements,
+        status: 'UNDER_REVIEW',
+        created_at: new Date().toISOString(),
+      };
+      setEnterpriseRequests((prev) => {
+        const next = [fallbackRecord, ...prev];
+        localStorage.setItem(`rolesync_enterprise_requests_${activeUserId}`, JSON.stringify(next));
+        return next;
+      });
+
+      toast.success(
+        `Enterprise pipeline request for "${dbName}" dispatched! Our database team will verify connectivity rules.`,
+        'Request Dispatched'
+      );
+      setShowEnterpriseModal(false);
+      setEnterpriseDatabase('');
+      setEnterpriseMessage('');
+    } finally {
+      setIsSubmittingEnterprise(false);
+    }
+  };
+
+  // Cancel custom enterprise integration request
+  const handleCancelEnterpriseRequest = async (requestId: string, systemName: string) => {
+    setCancellingRequestId(requestId);
+    try {
+      await connectorApi.cancelEnterpriseSyncRequest(requestId, activeUserId);
+    } catch (e) {
+      console.warn('Could not cancel enterprise request on server:', e);
+    } finally {
+      setEnterpriseRequests((prev) => {
+        const next = prev.filter((r) => r.request_id !== requestId);
+        localStorage.setItem(`rolesync_enterprise_requests_${activeUserId}`, JSON.stringify(next));
+        return next;
+      });
+      setCancellingRequestId(null);
+      toast.info(`Cancelled Enterprise sync request for "${systemName}".`, 'Request Cancelled');
+    }
   };
 
   const renderStatusBadge = (item: Integration) => {
+    if (item.isEnterpriseRequest) {
+      return (
+        <span className="flex items-center gap-1.5 text-[10px] font-mono font-bold tracking-wider uppercase border px-2.5 py-1 rounded-full bg-amber-500/10 border-amber-500/30 text-amber-600 dark:text-amber-400">
+          <Clock className="w-2.5 h-2.5 animate-pulse" />
+          <span>Under Review</span>
+        </span>
+      );
+    }
+
     const isConnected = isConnectedState(item.status);
     const isConnecting = connectingId === item.id;
     const isSyncing = item.status === 'Syncing' || activeSyncingId === item.id;
+
 
     if (isConnecting) {
       return (
@@ -1252,7 +1764,11 @@ export const ExternalConnector: React.FC = () => {
           <div>
             <p className="text-[10px] font-mono text-muted-foreground uppercase font-bold tracking-wider">active pipelines</p>
             <h4 className="text-lg font-bold text-foreground mt-1">
-              {connectedCount > 0 ? `${connectedCount} Live Connector${connectedCount === 1 ? '' : 's'}` : 'No Active Connectors'}
+              {!isInitialLoaded
+                ? '-'
+                : connectedCount > 0
+                ? `${connectedCount} Live Connector${connectedCount === 1 ? '' : 's'}`
+                : 'No Active Connectors'}
             </h4>
           </div>
           <span className={`w-2.5 h-2.5 rounded-full ${connectedCount > 0 ? 'bg-emerald-500 animate-pulse' : 'bg-muted-foreground/40'}`}></span>
@@ -1261,7 +1777,7 @@ export const ExternalConnector: React.FC = () => {
           <div>
             <p className="text-[10px] font-mono text-muted-foreground uppercase font-bold tracking-wider">synchronization scope</p>
             <h4 className="text-lg font-bold text-foreground mt-1">
-              {totalIndexedFiles.toLocaleString()} Total Items Synced
+              {!isInitialLoaded ? '-' : `${totalIndexedFiles.toLocaleString()} Total Items Synced`}
             </h4>
           </div>
           <FolderOpen className="w-5 h-5 text-primary" />
@@ -1270,7 +1786,7 @@ export const ExternalConnector: React.FC = () => {
           <div>
             <p className="text-[10px] font-mono text-muted-foreground uppercase font-bold tracking-wider">secure channels</p>
             <h4 className="text-lg font-bold text-foreground mt-1">
-              {connectedCount > 0 ? 'OAuth2 & LlamaParse Active' : 'OAuth2 Channels Standby'}
+              {!isInitialLoaded ? '-' : connectedCount > 0 ? 'OAuth2 & LlamaParse Active' : 'OAuth2 Channels Standby'}
             </h4>
           </div>
           <ShieldCheck className={`w-5 h-5 ${connectedCount > 0 ? 'text-primary' : 'text-muted-foreground/60'}`} />
@@ -1352,26 +1868,88 @@ export const ExternalConnector: React.FC = () => {
                 <p className="text-[10px] font-mono text-muted-foreground/80 uppercase font-bold tracking-wider mb-3">
                   {item.category}
                 </p>
-                <p className="text-xs leading-relaxed text-muted-foreground mb-6">
+                <p className="text-xs leading-relaxed text-muted-foreground mb-4">
                   {item.description}
                 </p>
+
+                {/* Progress Bar (when Syncing and progress ratio exists) */}
+                {isSyncing && item.currentProgress && (() => {
+                  const match = item.currentProgress.match(/(\d+)\s*(?:of|\/)\s*(\d+)/i);
+                  if (match) {
+                    const current = parseInt(match[1], 10);
+                    const total = parseInt(match[2], 10);
+                    const pct = total > 0 ? Math.min(100, Math.round((current / total) * 100)) : 0;
+                    return (
+                      <div className="mb-4 space-y-1 animate-in fade-in duration-300">
+                        <div className="flex justify-between text-[10px] font-mono text-muted-foreground">
+                          <span className="flex items-center gap-1 text-primary">
+                            <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                            <span>Processing batch</span>
+                          </span>
+                          <span>{current} of {total} ({pct}%)</span>
+                        </div>
+                        <div className="h-1.5 w-full bg-muted rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-primary transition-all duration-300 rounded-full"
+                            style={{ width: `${pct}%` }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
               </div>
 
               {/* Bottom Triggers: FREQUENCY, CAPTURED & Action Buttons */}
               <div className="pt-4 border-t border-border/40 flex items-center justify-between gap-2 mt-auto">
-                {isConnected ? (
+                {item.isEnterpriseRequest ? (
+                  <>
+                    <div className="flex items-center gap-1.5">
+                      <ShieldCheck className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                      <span className="text-[10px] font-mono text-muted-foreground">
+                        SLA ~24h Schema Review
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={cancellingRequestId === item.enterpriseRequestId}
+                      onClick={() =>
+                        item.enterpriseRequestId &&
+                        handleCancelEnterpriseRequest(item.enterpriseRequestId, item.name)
+                      }
+                      className="text-xs font-semibold text-rose-500 hover:text-rose-600 hover:underline flex items-center gap-1 cursor-pointer transition-colors"
+                      title="Cancel this custom connector request"
+                    >
+                      {cancellingRequestId === item.enterpriseRequestId ? (
+                        <>
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                          <span>Cancelling...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Trash2 className="w-3 h-3" />
+                          <span>Cancel Request</span>
+                        </>
+                      )}
+                    </button>
+                  </>
+                ) : isConnected ? (
                   <>
                     <div className="flex items-center gap-4">
                       {/* Metric 1: FREQUENCY (Clickable to open dedicated Auto-Sync modal) */}
                       <button
                         type="button"
-                        disabled={isSyncing}
+                        disabled={!isInitialLoaded || isSyncing}
+
                         onClick={() => !isSyncing && setActiveAutoSyncConnector(item)}
                         className={`flex flex-col text-left group/freq ${
                           isSyncing ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
                         }`}
                         title={
-                          isSyncing
+                          !isInitialLoaded
+                            ? 'Loading frequency...'
+                            : isSyncing
                             ? 'Auto-sync schedule can be adjusted after synchronization completes'
                             : 'Click to configure Auto-Sync Schedule (2m, 30m, 1h, 6h, 24h at 2am)'
                         }
@@ -1381,9 +1959,13 @@ export const ExternalConnector: React.FC = () => {
                           <Clock className="w-2.5 h-2.5 opacity-60 group-hover/freq:opacity-100" />
                         </span>
                         <span className={`text-[11px] font-mono font-bold uppercase mt-0.5 group-hover/freq:underline ${
-                          item.syncFrequency === 'OFF' ? 'text-muted-foreground' : 'text-amber-500 dark:text-amber-400'
+                          !isInitialLoaded || item.syncFrequency === '-' || item.syncFrequency === 'OFF'
+                            ? 'text-muted-foreground'
+                            : 'text-amber-500 dark:text-amber-400'
                         }`}>
-                          {item.syncFrequency}
+                          {!isInitialLoaded || item.syncFrequency === '-' || item.syncFrequency === 'OFF'
+                            ? '-'
+                            : item.syncFrequency}
                         </span>
                       </button>
 
@@ -1393,20 +1975,49 @@ export const ExternalConnector: React.FC = () => {
                           CAPTURED
                         </span>
                         <span
-                          className="text-[11px] font-mono font-bold text-emerald-600 dark:text-emerald-400 mt-0.5 cursor-pointer hover:underline"
-                          title={`${item.syncSuccess} Success · ${item.syncSkipped} Skipped · ${item.syncFailed} Failed`}
+                          className={`text-[11px] font-mono font-bold mt-0.5 ${
+                            !isInitialLoaded || !item.syncCaptured || item.syncCaptured === 0
+                              ? 'text-muted-foreground'
+                              : 'text-emerald-600 dark:text-emerald-400 cursor-pointer hover:underline'
+                          }`}
+                          title={
+                            !isInitialLoaded
+                              ? 'Loading sync metrics...'
+                              : `${item.syncSuccess ?? 0} Success · ${item.syncSkipped ?? 0} Skipped · ${item.syncFailed ?? 0} Failed`
+                          }
                           onClick={() => {
+                            if (!isInitialLoaded) return;
                             setSelectedActivityConnector(item);
                             setShowActivityModal(true);
                           }}
                         >
-                          {item.syncCaptured} Items
+                          {!isInitialLoaded
+                            ? '-'
+                            : item.syncCaptured && item.syncCaptured > 0
+                            ? `${item.syncCaptured} Items`
+                            : '-'}
                         </span>
                       </div>
                     </div>
 
-                    {/* Action Buttons: 1. Sync Now, 2. Auto-Sync Schedule, 3. Sync Activity Logs, 4. Configure, 5. Disconnect */}
+                    {/* Action Buttons: 0. Retry Failed (if any), 1. Sync Now, 2. Sync Activity Logs, 3. Configure, 4. Disconnect */}
                     <div className="flex items-center gap-1.5">
+                      {/* Retry Failed Items Button (displayed when failed items exist) */}
+                      {Boolean(item.syncFailed && item.syncFailed > 0) && (
+                        <button
+                          onClick={() => handleRetryFailed(item.id, item.name)}
+                          disabled={isSyncing || retryingFailedId === item.id}
+                          aria-label={`Retry ${item.syncFailed} Failed Items for ${item.name}`}
+                          className={`h-8 px-2.5 rounded-full border border-destructive/30 bg-destructive/10 text-destructive hover:bg-destructive hover:text-destructive-foreground flex items-center gap-1.5 transition-all text-xs font-semibold shadow-3xs cursor-pointer ${
+                            isSyncing || retryingFailedId === item.id ? 'opacity-50 cursor-not-allowed pointer-events-none' : ''
+                          }`}
+                          title={`Retry ${item.syncFailed} Failed Item(s)`}
+                        >
+                          <RotateCcw className={`w-3 h-3 ${retryingFailedId === item.id ? 'animate-spin' : ''}`} />
+                          <span className="text-[10px] font-mono">Retry ({item.syncFailed})</span>
+                        </button>
+                      )}
+
                       {/* 1. Sync Now Button */}
                       <button
                         onClick={() => triggerManualSync(item.id)}
@@ -1508,12 +2119,20 @@ export const ExternalConnector: React.FC = () => {
         })}
 
         {filteredIntegrations.length === 0 && (
-          <div className="col-span-full bg-muted/20 border border-border border-dashed p-12 text-center rounded-2xl space-y-3">
+          <div className="col-span-full bg-muted/20 border border-border border-dashed p-12 text-center rounded-2xl space-y-4">
             <AlertCircle className="w-8 h-8 text-muted-foreground/60 mx-auto" />
             <h4 className="font-serif text-base font-bold text-foreground">No matching connectors found</h4>
             <p className="text-xs text-muted-foreground max-w-sm mx-auto">
-              Refine your active search filters or check another category. Alternatively, request a custom integration.
+              Refine your active search filters or check another category. Alternatively, request a custom enterprise integration.
             </p>
+            <Button
+              variant="outline"
+              onClick={() => setShowEnterpriseModal(true)}
+              icon={<Plus className="w-3.5 h-3.5 text-primary" />}
+              className="text-xs font-semibold mx-auto"
+            >
+              Request Custom Connector
+            </Button>
           </div>
         )}
       </div>
@@ -1563,11 +2182,13 @@ export const ExternalConnector: React.FC = () => {
           connectorName={activeConfigConnector.name}
           logoUrl={activeConfigConnector.logoUrl}
           initialMaxItems={
+            allConnections[activeConfigConnector.id]?.config?.max_messages_per_sync ||
+            allConnections[activeConfigConnector.id]?.config?.max_items_per_sync ||
             allConnections[activeConfigConnector.id]?.config?.max_events_per_sync ||
             allConnections[activeConfigConnector.id]?.config?.max_emails_per_sync ||
             allConnections[activeConfigConnector.id]?.config?.max_files_per_sync ||
             (activeConfigConnector.id === 'gmail' ? gmailDetails?.config?.max_emails_per_sync : undefined) ||
-            10
+            (activeConfigConnector.id === 'slack' || activeConfigConnector.id === 'notion' ? 15 : 10)
           }
           initialCategories={
             allConnections[activeConfigConnector.id]?.config?.categories ||
@@ -1577,6 +2198,10 @@ export const ExternalConnector: React.FC = () => {
               ? ['MY_DRIVE']
               : activeConfigConnector.id === 'calendar'
               ? ['PRIMARY']
+              : activeConfigConnector.id === 'slack'
+              ? ['PUBLIC_CHANNELS', 'DIRECT_MESSAGES', 'GROUP_MESSAGES']
+              : activeConfigConnector.id === 'notion'
+              ? ['PAGES', 'DATABASES']
               : [])
           }
 
@@ -1691,14 +2316,28 @@ export const ExternalConnector: React.FC = () => {
           {/* Backdrop */}
           <div
             className="absolute inset-0 bg-black/40 backdrop-blur-xs transition-opacity duration-300 animate-in fade-in"
-            onClick={() => setShowEnterpriseModal(false)}
+            onClick={() => !isSubmittingEnterprise && setShowEnterpriseModal(false)}
           />
 
           {/* Modal Panel */}
-          <form onSubmit={dispatchEnterpriseRequest} className="relative w-full max-w-md bg-card border border-border rounded-2xl p-6 shadow-2xl z-10 animate-in zoom-in-95 duration-200 text-left space-y-4">
-            <div className="flex items-center gap-2 border-b border-border/60 pb-3">
-              <HelpCircle className="w-5 h-5 text-primary" />
-              <h3 className="font-serif text-lg font-bold text-foreground">Request Enterprise Sync</h3>
+          <form
+            onSubmit={dispatchEnterpriseRequest}
+            className="relative w-full max-w-md bg-card border border-border rounded-2xl p-6 shadow-2xl z-10 animate-in zoom-in-95 duration-200 text-left space-y-4"
+          >
+            <div className="flex items-center justify-between border-b border-border/60 pb-3">
+              <div className="flex items-center gap-2">
+                <HelpCircle className="w-5 h-5 text-primary" />
+                <h3 className="font-serif text-lg font-bold text-foreground">Request Enterprise Sync</h3>
+              </div>
+              <button
+                type="button"
+                disabled={isSubmittingEnterprise}
+                onClick={() => setShowEnterpriseModal(false)}
+                className="text-muted-foreground hover:text-foreground p-1 rounded-lg hover:bg-muted transition-colors cursor-pointer disabled:opacity-50"
+                aria-label="Close modal"
+              >
+                <X className="w-4 h-4" />
+              </button>
             </div>
 
             <div className="space-y-4">
@@ -1710,6 +2349,7 @@ export const ExternalConnector: React.FC = () => {
                 placeholder="e.g. AWS Redshift, Oracle CRM, MongoDB Atlas"
                 value={enterpriseDatabase}
                 onChange={(e) => setEnterpriseDatabase(e.target.value)}
+                disabled={isSubmittingEnterprise}
                 required
               />
 
@@ -1723,7 +2363,8 @@ export const ExternalConnector: React.FC = () => {
                   rows={4}
                   value={enterpriseMessage}
                   onChange={(e) => setEnterpriseMessage(e.target.value)}
-                  className="w-full bg-background border border-border rounded-xl px-4 py-2.5 text-xs font-medium focus:outline-none focus:ring-1 focus:ring-primary shadow-2xs resize-none"
+                  disabled={isSubmittingEnterprise}
+                  className="w-full bg-background border border-border rounded-xl px-4 py-2.5 text-xs font-medium focus:outline-none focus:ring-1 focus:ring-primary shadow-2xs resize-none disabled:opacity-60"
                   placeholder="Describe your backend database system (Oracle, DynamoDB, PostgreSQL, etc.), vector expectations, sync triggers needed, and LDAP security scopes."
                   required
                 />
@@ -1736,13 +2377,15 @@ export const ExternalConnector: React.FC = () => {
                 variant="outline"
                 className="text-xs py-2 px-4"
                 onClick={() => setShowEnterpriseModal(false)}
+                disabled={isSubmittingEnterprise}
               >
                 Cancel
               </Button>
               <Button
                 type="submit"
                 isLoading={isSubmittingEnterprise}
-                loadingText="Sending Request..."
+                loadingText="Dispatching..."
+                disabled={isSubmittingEnterprise || !enterpriseDatabase.trim() || !enterpriseMessage.trim()}
                 className="text-xs py-2 px-4"
               >
                 Dispatch Request
@@ -1751,6 +2394,7 @@ export const ExternalConnector: React.FC = () => {
           </form>
         </div>
       )}
+
     </div>
   );
 };

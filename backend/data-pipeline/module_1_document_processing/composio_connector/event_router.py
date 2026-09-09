@@ -60,11 +60,23 @@ class EventRouter:
             return normalize_calendar(payload, tenant_id)
 
         # 4. Slack routing
-        if "SLACK" in trigger_slug or toolkit_slug == "slack":
+        if (
+            "SLACK" in trigger_slug
+            or toolkit_slug in ("slack", "slackbot")
+            or "slack" in inner_event_type
+            or ("channel" in payload and "ts" in payload)
+            or ("channel" in inner_payload and "ts" in inner_payload)
+        ):
             return normalize_slack(payload, tenant_id)
 
         # 5. Notion routing
-        if "NOTION" in trigger_slug or toolkit_slug == "notion":
+        if (
+            "NOTION" in trigger_slug
+            or toolkit_slug == "notion"
+            or "notion" in inner_event_type
+            or ("object" in payload and payload.get("object") in ("page", "database", "block", "comment"))
+            or ("object" in inner_payload and inner_payload.get("object") in ("page", "database", "block", "comment"))
+        ):
             return normalize_notion(payload, tenant_id)
 
         return None
