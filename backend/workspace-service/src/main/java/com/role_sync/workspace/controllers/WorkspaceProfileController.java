@@ -67,8 +67,11 @@ public class WorkspaceProfileController {
 
     @PostMapping
     public Mono<ResponseEntity<Map<String, Object>>> createOrUpdateProfile(
+            @RequestHeader(value = "X-User-Id", required = false) String userIdHeader,
+            @RequestHeader(value = "X-Auth-User-Id", required = false) String authUserIdHeader,
             @Valid @RequestBody WorkspaceProfileRequest request) {
-        return workspaceProfileService.createOrUpdateProfile(request)
+        UUID authUserId = resolveAuthUserId(userIdHeader, authUserIdHeader);
+        return workspaceProfileService.createOrUpdateProfile(authUserId, request)
                 .map(profile -> ResponseEntity.status(HttpStatus.CREATED)
                         .body(Map.of(
                                 "profile_id", profile.getProfileId(),

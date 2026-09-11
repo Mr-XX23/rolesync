@@ -48,9 +48,12 @@ public class WorkspaceController {
     @PostMapping("/{workspaceId}/members")
     public Mono<ResponseEntity<Map<String, Object>>> addMember(
             @PathVariable UUID workspaceId,
+            @RequestHeader(value = "X-User-Id", required = false) String userIdHeader,
+            @RequestHeader(value = "X-Auth-User-Id", required = false) String authUserIdHeader,
             @Valid @RequestBody AddMemberRequest request) {
 
-        return workspaceService.addMemberToWorkspace(workspaceId, request)
+        UUID callerAuthUserId = resolveAuthUserId(userIdHeader, authUserIdHeader);
+        return workspaceService.addMemberToWorkspace(workspaceId, callerAuthUserId, request)
                 .map(membershipId -> ResponseEntity.status(HttpStatus.CREATED)
                         .body(Map.of(
                                 "membership_id", membershipId,
@@ -62,9 +65,12 @@ public class WorkspaceController {
     public Mono<ResponseEntity<WorkspaceMembershipResponse>> updateMemberRole(
             @PathVariable UUID workspaceId,
             @PathVariable UUID membershipId,
+            @RequestHeader(value = "X-User-Id", required = false) String userIdHeader,
+            @RequestHeader(value = "X-Auth-User-Id", required = false) String authUserIdHeader,
             @Valid @RequestBody UpdateMemberRoleRequest request) {
 
-        return workspaceService.updateMemberRole(workspaceId, membershipId, request)
+        UUID callerAuthUserId = resolveAuthUserId(userIdHeader, authUserIdHeader);
+        return workspaceService.updateMemberRole(workspaceId, membershipId, callerAuthUserId, request)
                 .map(ResponseEntity::ok);
     }
 

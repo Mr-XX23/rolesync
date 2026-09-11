@@ -30,7 +30,7 @@ public class WorkspaceProfileServiceImpl implements WorkspaceProfileService {
 
     @Override
     @Transactional
-    public Mono<WorkspaceProfile> createOrUpdateProfile(WorkspaceProfileRequest request) {
+    public Mono<WorkspaceProfile> createOrUpdateProfile(UUID authUserId, WorkspaceProfileRequest request) {
         return Mono.fromCallable(() -> {
             String sanitizedFirst = com.role_sync.workspace.utils.SanitizationUtils.sanitizeText(request.getFirstName());
             String sanitizedLast = com.role_sync.workspace.utils.SanitizationUtils.sanitizeText(request.getLastName());
@@ -60,7 +60,7 @@ public class WorkspaceProfileServiceImpl implements WorkspaceProfileService {
             // If an external image URL is provided and not yet hosted on Cloudinary, host it permanently
             if (sanitizedAvatar != null && !sanitizedAvatar.isBlank() && !sanitizedAvatar.contains("cloudinary.com")) {
                 try {
-                    String permanentUrl = cloudinaryService.uploadImageUrl(sanitizedAvatar, request.getAuthUserId().toString()).block();
+                    String permanentUrl = cloudinaryService.uploadImageUrl(sanitizedAvatar, authUserId.toString()).block();
                     if (permanentUrl != null && !permanentUrl.isBlank()) {
                         sanitizedAvatar = permanentUrl;
                     }
@@ -70,11 +70,11 @@ public class WorkspaceProfileServiceImpl implements WorkspaceProfileService {
             }
 
             java.time.LocalDateTime now = java.time.LocalDateTime.now();
-            WorkspaceProfile profile = workspaceProfileRepository.findByAuthUserId(request.getAuthUserId())
+            WorkspaceProfile profile = workspaceProfileRepository.findByAuthUserId(authUserId)
                     .orElse(null);
             if (profile == null) {
                 profile = WorkspaceProfile.builder()
-                        .authUserId(request.getAuthUserId())
+                        .authUserId(authUserId)
                         .dailyUpdateCount(1)
                         .updateWindowStart(now)
                         .firstName(sanitizedFirst)

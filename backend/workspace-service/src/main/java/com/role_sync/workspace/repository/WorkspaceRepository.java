@@ -15,4 +15,7 @@ public interface WorkspaceRepository extends JpaRepository<Workspace, UUID> {
     List<Workspace> findByOwnerProfileId(@Param("ownerProfileId") UUID ownerProfileId);
 
     List<Workspace> findByIsActive(Boolean isActive);
+
+    @Query("SELECT w.owner.profileId FROM Workspace w WHERE w.workspaceId = :workspaceId")
+    java.util.Optional<UUID> findOwnerProfileId(@Param("workspaceId") UUID workspaceId);
 }

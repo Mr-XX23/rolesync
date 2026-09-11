@@ -23,4 +23,16 @@ public interface WorkspaceMembershipRepository extends JpaRepository<WorkspaceMe
     List<WorkspaceMembership> findActiveMembershipsWithWorkspace(@Param("profileId") UUID profileId);
 
     Optional<WorkspaceMembership> findByWorkspaceWorkspaceIdAndProfileProfileId(UUID workspaceId, UUID profileId);
+
+    // --- Authorization projections (resolved as SQL joins; no lazy-proxy navigation) ---
+
+    @Query("SELECT wm.role.roleName FROM WorkspaceMembership wm " +
+           "WHERE wm.workspace.workspaceId = :workspaceId AND wm.profile.profileId = :profileId AND wm.isActive = true")
+    Optional<String> findActiveRoleName(@Param("workspaceId") UUID workspaceId, @Param("profileId") UUID profileId);
+
+    @Query("SELECT wm.workspace.workspaceId FROM WorkspaceMembership wm WHERE wm.membershipId = :membershipId")
+    Optional<UUID> findWorkspaceIdByMembershipId(@Param("membershipId") UUID membershipId);
+
+    @Query("SELECT wm.profile.profileId FROM WorkspaceMembership wm WHERE wm.membershipId = :membershipId")
+    Optional<UUID> findProfileIdByMembershipId(@Param("membershipId") UUID membershipId);
 }

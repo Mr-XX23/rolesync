@@ -1,7 +1,6 @@
 package com.role_sync.workspace.dto;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
-import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import lombok.Data;
@@ -17,7 +16,8 @@ import java.util.UUID;
 @Builder
 public class WorkspaceProfileRequest {
 
-    @NotNull(message = "auth_user_id cannot be null")
+    // Server-derived from the gateway-verified X-User-Id; any value sent by the
+    // client is ignored (kept for backward-compatible request bodies).
     @JsonProperty("auth_user_id")
     private UUID authUserId;
 
