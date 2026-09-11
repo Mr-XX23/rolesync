@@ -10,6 +10,8 @@ from uuid import UUID, uuid4
 from sqlalchemy import or_, func, text
 from sqlalchemy.orm import Session, joinedload, selectinload
 
+from catalog.search_ranking import SearchableProduct, rank_products
+
 from catalog.models import (
     Category,
     Product,
@@ -1876,163 +1878,112 @@ class ProductService:
         tenant_id: UUID,
         query: str,
         limit: int = 20,
+        expand: bool = True,
     ) -> SemanticSearchResponse:
         """
-        AI-powered semantic search with OpenRouter query expansion and
-        weighted multi-attribute relevance ranking. Robust local fallback included.
+        Relevance-ranked catalog search (BM25 over weighted product fields, see
+        ``catalog.search_ranking``), optionally widened with synonyms from an LLM.
         """
         clean_query = query.strip()
         if not clean_query:
             return SemanticSearchResponse(query="", expanded_terms=[], results=[])
 
-        expanded_terms: List[str] = []
-
-        # 1. Attempt OpenRouter query expansion if API key present
-        api_key = (
-            os.environ.get("OPENROUTER_API_KEY")
-            or os.environ.get("OPEN_ROUTER_API")
-            or os.environ.get("OPENROUTER_API")
-            or ""
-        ).strip()
-
-        if api_key:
-            try:
-                import requests
-
-                headers = {
-                    "Authorization": f"Bearer {api_key}",
-                    "HTTP-Referer": "https://rolesync.ai",
-                    "X-Title": "RoleSync Enterprise AI",
-                    "Content-Type": "application/json",
-                }
-
-                system_prompt = (
-                    "You are an expert sales catalog search analyzer. Given a user/customer query, "
-                    "extract 3-6 high-intent synonyms, related product categories, or search keywords. "
-                    "Respond ONLY with a JSON object: {\"expanded_terms\": [\"term1\", \"term2\", ...]}"
-                )
-
-                candidate_models = [
-                    "meta-llama/llama-3.3-70b-instruct:free",
-                    "google/gemma-2-9b-it:free",
-                    "liquid/lfm-2.5-2.6b:free",
-                ]
-
-                for model in candidate_models:
-                    try:
-                        res = requests.post(
-                            "https://openrouter.ai/api/v1/chat/completions",
-                            headers=headers,
-                            json={
-                                "model": model,
-                                "messages": [
-                                    {"role": "system", "content": system_prompt},
-                                    {"role": "user", "content": f"Customer Query: {clean_query}"},
-                                ],
-                                "temperature": 0.2,
-                                "max_tokens": 150,
-                            },
-                            timeout=5,
-                        )
-                        if res.status_code == 200:
-                            data = res.json()
-                            content = data["choices"][0]["message"]["content"].strip()
-                            clean_json = re.sub(r"^```json\s*|^```\s*|```$", "", content, flags=re.MULTILINE).strip()
-                            parsed = json.loads(clean_json)
-                            terms = [str(t).lower().strip() for t in parsed.get("expanded_terms", []) if str(t).strip()]
-                            if terms:
-                                expanded_terms = terms[:6]
-                                break
-                    except Exception:
-                        continue
-            except Exception as e:
-                logger.warning(f"OpenRouter query expansion failed: {e}")
-
-        # 2. Local token fallback/augmentation
-        raw_tokens = [
-            t.lower()
-            for t in re.split(r"[\s,.;:!?\-\_]+", clean_query)
-            if len(t) > 2
-        ]
-        all_search_tokens = list(dict.fromkeys(raw_tokens + [t.lower() for t in expanded_terms]))
-
-        # 3. Fetch tenant products
+        expanded_terms = self._expand_query(clean_query) if expand else []
         products = (
             self.db.query(Product)
             .options(selectinload(Product.variants))
             .filter(Product.tenant_id == tenant_id, Product.status != "RETIRED")
             .all()
         )
-
-        scored_items: List[SemanticMatchItem] = []
-        for prod in products:
-            score = 0.0
-            matched_terms: List[str] = []
-
-            name_lower = (prod.name or "").lower()
-            desc_lower = (prod.description or "").lower()
-            cat_lower = (prod.category or "").lower()
-            subcat_lower = (prod.subcategory or "").lower()
-            val_prop_lower = (prod.value_proposition or "").lower()
-            keywords_lower = [k.lower() for k in (prod.keywords or [])]
-            use_cases_lower = [u.lower() for u in (prod.use_cases or [])]
-            industries_lower = [ind.lower() for ind in (prod.target_industries or [])]
-            skus_lower = [v.sku.lower() for v in (prod.variants or [])]
-
-            # Exact query in name or SKU gets major boost
-            if clean_query.lower() in name_lower:
-                score += 25.0
-                matched_terms.append(prod.name)
-            for sku in skus_lower:
-                if clean_query.lower() in sku:
-                    score += 30.0
-                    matched_terms.append(sku)
-
-            for token in all_search_tokens:
-                if token in name_lower:
-                    score += 15.0
-                    matched_terms.append(token)
-                for sku in skus_lower:
-                    if token in sku:
-                        score += 15.0
-                        matched_terms.append(sku)
-                if token in cat_lower or token in subcat_lower:
-                    score += 10.0
-                    matched_terms.append(prod.category)
-                for kw in keywords_lower:
-                    if token in kw:
-                        score += 10.0
-                        matched_terms.append(kw)
-                for uc in use_cases_lower:
-                    if token in uc:
-                        score += 12.0
-                        matched_terms.append(uc)
-                if token in val_prop_lower:
-                    score += 8.0
-                    matched_terms.append("value proposition")
-                for ind in industries_lower:
-                    if token in ind:
-                        score += 6.0
-                        matched_terms.append(ind)
-                if token in desc_lower:
-                    score += 4.0
-
-            if score > 0:
-                unique_matched = list(dict.fromkeys(matched_terms))[:5]
-                rationale = f"Matched {', '.join(unique_matched)}" if unique_matched else "Relevant catalog match"
-                scored_items.append(
-                    SemanticMatchItem(
-                        product_id=prod.id,
-                        score=round(score, 1),
-                        matched_terms=unique_matched,
-                        rationale=rationale,
-                    )
+        ranked = rank_products(
+            clean_query,
+            (
+                SearchableProduct(
+                    product_id=prod.id,
+                    name=prod.name or "",
+                    category=prod.category or "",
+                    subcategory=prod.subcategory or "",
+                    keywords=prod.keywords or [],
+                    use_cases=prod.use_cases or [],
+                    value_proposition=prod.value_proposition or "",
+                    target_industries=prod.target_industries or [],
+                    description=prod.description or "",
+                    skus=[variant.sku for variant in prod.variants or [] if variant.sku],
                 )
-
-        scored_items.sort(key=lambda item: item.score, reverse=True)
+                for prod in products
+            ),
+            expanded_terms=expanded_terms,
+            limit=limit,
+        )
         return SemanticSearchResponse(
             query=clean_query,
             expanded_terms=expanded_terms,
-            results=scored_items[:limit],
+            results=[
+                SemanticMatchItem(
+                    product_id=item.product_id,
+                    score=item.score,
+                    matched_terms=item.matched_terms,
+                    rationale=item.rationale,
+                )
+                for item in ranked
+            ],
         )
+
+    @staticmethod
+    def _expand_query(query: str) -> List[str]:
+        """Up to 6 synonyms or related terms from an OpenRouter model; [] if unavailable."""
+        api_key = (
+            os.environ.get("OPENROUTER_API_KEY")
+            or os.environ.get("OPEN_ROUTER_API")
+            or os.environ.get("OPENROUTER_API")
+            or ""
+        ).strip()
+        if not api_key:
+            return []
+        models = [
+            model.strip()
+            for model in os.environ.get("CATALOG_QUERY_EXPANSION_MODELS", "nvidia/nemotron-3.5-lightning:free").split(",")
+            if model.strip()
+        ]
+        system_prompt = (
+            "You are an expert sales catalog search analyzer. Given a user/customer query, "
+            "extract 3-6 high-intent synonyms, related product categories, or search keywords. "
+            "Respond ONLY with a JSON object: {\"expanded_terms\": [\"term1\", \"term2\", ...]}"
+        )
+        try:
+            import requests
+
+            res = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "HTTP-Referer": "https://rolesync.ai",
+                    "X-Title": "RoleSync Enterprise AI",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "models": models,  # OpenRouter falls through to the next model on errors
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": f"Customer Query: {query}"},
+                    ],
+                    "temperature": 0.2,
+                    "max_tokens": 150,
+                    # Synonyms need no thinking; free reasoning models otherwise spend the whole budget on it.
+                    "reasoning": {"enabled": False},
+                },
+                timeout=float(os.environ.get("CATALOG_QUERY_EXPANSION_TIMEOUT_SECONDS", "6")),
+            )
+            if res.status_code != 200:
+                logger.warning("catalog query expansion: OpenRouter answered %s", res.status_code)
+                return []
+            content = res.json()["choices"][0]["message"].get("content") or ""
+            match = re.search(r"\{.*\}", content, flags=re.DOTALL)
+            parsed = json.loads(match.group(0)) if match else {}
+        except Exception as exc:
+            logger.warning("catalog query expansion failed: %s", exc)
+            return []
+        raw_terms = parsed.get("expanded_terms", []) if isinstance(parsed, dict) else []
+        return [str(term).lower().strip() for term in raw_terms if str(term).strip()][:6]
+
 
