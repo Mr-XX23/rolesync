@@ -7,6 +7,7 @@ import com.rolesync.authservice.models.OtpEventLog;
 import com.rolesync.authservice.repository.OtpEventLogRepository;
 import com.rolesync.authservice.repository.UserRepository;
 import com.rolesync.authservice.services.AuthSecurityEventService;
+import com.rolesync.authservice.services.EmailService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.constraints.NotBlank;
 
@@ -28,6 +29,7 @@ public class VerifyPhone {
         private final PasswordEncoder passwordEncoder;
         private final OtpEventLogRepository otpEventLogRepository;
         private final AuthSecurityEventService securityEventService;
+        private final EmailService emailService;
         private final com.rolesync.authservice.kafka.producer.AuthEventPublisher authEventPublisher;
 
         /**
@@ -167,6 +169,12 @@ public class VerifyPhone {
                                                         } catch (Exception e) {
                                                                 log.error("Failed to publish USER_REGISTERED event after phone verification commit", e);
                                                         }
+                                                        // Account is now ACTIVE — welcome the user (skipped if no email).
+                                                        try {
+                                                                emailService.sendWelcomeEmail(finalUser.getEmail(), finalUser.getUsername(), finalUser.getAuthUserId());
+                                                        } catch (Exception e) {
+                                                                log.error("Failed to send welcome email after phone verification commit", e);
+                                                        }
                                                 }
                                         }
                                 }
@@ -177,6 +185,12 @@ public class VerifyPhone {
                                         authEventPublisher.publishUserRegistered(user);
                                 } catch (Exception e) {
                                         log.error("Failed to publish USER_REGISTERED event after phone verification", e);
+                                }
+                                // Account is now ACTIVE — welcome the user (skipped if no email).
+                                try {
+                                        emailService.sendWelcomeEmail(user.getEmail(), user.getUsername(), user.getAuthUserId());
+                                } catch (Exception e) {
+                                        log.error("Failed to send welcome email after phone verification", e);
                                 }
                         }
                 }

@@ -164,6 +164,68 @@ public class EmailService {
         }
     }
 
+    /**
+     * Sends a one-time welcome / onboarding email after a new user's account
+     * becomes ACTIVE (immediately for Google OAuth sign-ups; after email
+     * verification for email/password sign-ups). Best-effort: a missing or
+     * invalid email (e.g. a phone-only account) is skipped without error.
+     *
+     * @param email         recipient email address
+     * @param recipientName the user's display name for the greeting (may be null)
+     * @param authUserId    the user's id, for event logging
+     */
+    @Async
+    public CompletableFuture<EmailResponse> sendWelcomeEmail(String email, String recipientName, UUID authUserId) {
+        try {
+            // Phone-only accounts may have no email — nothing to send, not an error.
+            if (!isValidEmail(email)) {
+                log.info("Skipping welcome email - no valid email address for user: {}", authUserId);
+                return CompletableFuture.completedFuture(
+                        EmailResponse.builder()
+                                .success(false)
+                                .message("No valid email address")
+                                .build());
+            }
+
+            if (isRateLimited(email)) {
+                log.warn("Rate limit exceeded, skipping welcome email for: {}", email);
+                return CompletableFuture.completedFuture(
+                        EmailResponse.builder()
+                                .success(false)
+                                .message("Too many emails sent. Please try again later.")
+                                .build());
+            }
+
+            String displayName = (recipientName != null && !recipientName.isBlank())
+                    ? recipientName.trim()
+                    : "there";
+            String getStartedLink = frontendUrl + "/signin";
+
+            Map<String, Object> variables = new HashMap<>();
+            variables.put("appName", appName);
+            variables.put("recipientName", displayName);
+            variables.put("getStartedLink", getStartedLink);
+
+            EmailRequest request = EmailRequest.builder()
+                    .to(email)
+                    .subject(String.format("Welcome to %s!", appName))
+                    .templateName("welcome")
+                    .templateVariables(variables)
+                    .isHtml(true)
+                    .build();
+
+            return sendEmailWithRetry(request, EmailEventLog.EmailType.WELCOME, authUserId);
+
+        } catch (Exception e) {
+            log.error("Unexpected error sending welcome email to: {}", email, e);
+            return CompletableFuture.completedFuture(
+                    EmailResponse.builder()
+                            .success(false)
+                            .message("Failed to send welcome email")
+                            .build());
+        }
+    }
+
     @Retryable(retryFor = { MailException.class,
             MessagingException.class }, maxAttempts = 3, backoff = @Backoff(delay = 2000, multiplier = 2))
     @Transactional

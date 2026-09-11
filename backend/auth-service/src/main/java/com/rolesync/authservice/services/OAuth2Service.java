@@ -34,6 +34,7 @@ public class OAuth2Service {
     private final AuthSecurityEventService securityEvents;
     private final AuthEventPublisher authEventPublisher;
     private final EntityManager entityManager;
+    private final EmailService emailService;
 
     private final Random random = new SecureRandom();
 
@@ -146,6 +147,12 @@ public class OAuth2Service {
             authEventPublisher.publishUserRegistered(savedUser);
         } catch (Exception e) {
             log.error("Failed to publish user registered event for OAuth2 user: {}", savedUser.getAuthUserId(), e);
+        }
+        // New OAuth accounts are ACTIVE immediately (no verification step) — welcome them now.
+        try {
+            emailService.sendWelcomeEmail(savedUser.getEmail(), savedUser.getUsername(), savedUser.getAuthUserId());
+        } catch (Exception e) {
+            log.error("Failed to send welcome email for OAuth2 user: {}", savedUser.getAuthUserId(), e);
         }
         return savedUser;
     }

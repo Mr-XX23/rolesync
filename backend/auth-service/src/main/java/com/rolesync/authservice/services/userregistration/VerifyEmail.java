@@ -21,6 +21,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 import com.rolesync.authservice.services.SseNotificationService;
 import com.rolesync.authservice.services.OtpService;
 import com.rolesync.authservice.services.SmsService;
+import com.rolesync.authservice.services.EmailService;
 import java.util.UUID;
 
 import java.time.LocalDateTime;
@@ -38,6 +39,7 @@ public class VerifyEmail {
     private final SseNotificationService sseNotificationService;
     private final OtpService otpService;
     private final SmsService smsService;
+    private final EmailService emailService;
     private final com.rolesync.authservice.kafka.producer.AuthEventPublisher authEventPublisher;
 
     @Value("${app.frontend.url:http://localhost:3000}")
@@ -174,6 +176,12 @@ public class VerifyEmail {
                                 } catch (Exception e) {
                                     log.error("Failed to publish USER_REGISTERED event after email verification commit for user: {}", userId, e);
                                 }
+                                // Email-only account is now ACTIVE — send the welcome email.
+                                try {
+                                    emailService.sendWelcomeEmail(user.getEmail(), user.getUsername(), userId);
+                                } catch (Exception e) {
+                                    log.error("Failed to send welcome email after email verification commit for user: {}", userId, e);
+                                }
                             }
                             sseNotificationService.notifyEmailVerified(userId, hasPhone);
                         }
@@ -191,6 +199,12 @@ public class VerifyEmail {
                             authEventPublisher.publishUserRegistered(user);
                         } catch (Exception e) {
                             log.error("Failed to publish USER_REGISTERED event for user: {}", userId, e);
+                        }
+                        // Email-only account is now ACTIVE — send the welcome email.
+                        try {
+                            emailService.sendWelcomeEmail(user.getEmail(), user.getUsername(), userId);
+                        } catch (Exception e) {
+                            log.error("Failed to send welcome email after email verification for user: {}", userId, e);
                         }
                     }
                     sseNotificationService.notifyEmailVerified(userId, hasPhone);
