@@ -1,6 +1,7 @@
-from fastapi import APIRouter, HTTPException, Query, Header
+from fastapi import APIRouter, HTTPException, Query, Header, Depends
 from pydantic import BaseModel, Field
 from typing import Any
+from module_1_document_processing.identity import bind_identity, authed_user_id
 from module_1_document_processing.composio_connector.connector_service import ConnectorService
 from module_1_document_processing.composio_connector.gmail_sync_manager import GmailSyncManager
 from module_1_document_processing.composio_connector.gdrive_sync_manager import GDriveSyncManager
@@ -13,7 +14,10 @@ from module_1_document_processing.composio_connector.slack_models import SlackSy
 from module_1_document_processing.composio_connector.notion_models import NotionSyncConfig, NotionTriggerType
 from module_1_document_processing.composio_connector.enterprise_store import EnterpriseStore
 
-router = APIRouter(tags=["Connectors"])
+# Every connector route requires the gateway-verified identity (X-User-Id) and
+# acts only on that user's connected accounts. The client-supplied `user_id`
+# field on request models is ignored (see authed_user_id() usage below).
+router = APIRouter(tags=["Connectors"], dependencies=[Depends(bind_identity)])
 connector_service = ConnectorService()
 gmail_sync_manager = GmailSyncManager()
 gdrive_sync_manager = GDriveSyncManager()
@@ -129,11 +133,11 @@ class SimulateNotionWebhookRequest(BaseModel):
 @router.get("/connectors/status")
 def get_all_connectors_status(user_id: str = "usr_active", x_tenant_id: str = Header(default="tenant_default")):
     """Production endpoint returning live OAuth connectivity, sync metrics, and parameters for all 5 connectors."""
-    gmail_conn = gmail_sync_manager.get_connection_status(user_id=user_id, tenant_id=x_tenant_id)
-    gdrive_conn = gdrive_sync_manager.get_connection_status(user_id=user_id, tenant_id=x_tenant_id)
-    cal_conn = calendar_sync_manager.get_connection_status(user_id=user_id, tenant_id=x_tenant_id)
-    slack_conn = slack_sync_manager.get_connection_status(user_id=user_id, tenant_id=x_tenant_id)
-    notion_conn = notion_sync_manager.get_connection_status(user_id=user_id, tenant_id=x_tenant_id)
+    gmail_conn = gmail_sync_manager.get_connection_status(user_id=authed_user_id(), tenant_id=x_tenant_id)
+    gdrive_conn = gdrive_sync_manager.get_connection_status(user_id=authed_user_id(), tenant_id=x_tenant_id)
+    cal_conn = calendar_sync_manager.get_connection_status(user_id=authed_user_id(), tenant_id=x_tenant_id)
+    slack_conn = slack_sync_manager.get_connection_status(user_id=authed_user_id(), tenant_id=x_tenant_id)
+    notion_conn = notion_sync_manager.get_connection_status(user_id=authed_user_id(), tenant_id=x_tenant_id)
 
     return {
         "status": "success",
@@ -150,37 +154,37 @@ def get_all_connectors_status(user_id: str = "usr_active", x_tenant_id: str = He
 def connect_connector(source: str, req: ConnectRequest, x_tenant_id: str = Header(default="tenant_default")):
     if source.lower() == "gmail":
         return gmail_sync_manager.initiate_oauth_flow(
-            user_id=req.user_id,
+            user_id=authed_user_id(),
             tenant_id=x_tenant_id,
             callback_url=req.callback_url,
         )
     elif source.lower() in ("gdrive", "googledrive", "google_drive"):
         return gdrive_sync_manager.initiate_oauth_flow(
-            user_id=req.user_id,
+            user_id=authed_user_id(),
             tenant_id=x_tenant_id,
             callback_url=req.callback_url,
         )
     elif source.lower() in ("calendar", "googlecalendar", "google_calendar"):
         return calendar_sync_manager.initiate_oauth_flow(
-            user_id=req.user_id,
+            user_id=authed_user_id(),
             tenant_id=x_tenant_id,
             callback_url=req.callback_url,
         )
     elif source.lower() == "slack":
         return slack_sync_manager.initiate_oauth_flow(
-            user_id=req.user_id,
+            user_id=authed_user_id(),
             tenant_id=x_tenant_id,
             callback_url=req.callback_url,
         )
     elif source.lower() == "notion":
         return notion_sync_manager.initiate_oauth_flow(
-            user_id=req.user_id,
+            user_id=authed_user_id(),
             tenant_id=x_tenant_id,
             callback_url=req.callback_url,
         )
 
     res = connector_service.connect_source(
-        user_id=req.user_id,
+        user_id=authed_user_id(),
         source=source,
         callback_url=req.callback_url,
     )
@@ -192,19 +196,19 @@ def connect_connector(source: str, req: ConnectRequest, x_tenant_id: str = Heade
 def disconnect_connector(source: str, req: ConnectRequest, x_tenant_id: str = Header(default="tenant_default")):
     try:
         if source.lower() == "gmail":
-            return gmail_sync_manager.disconnect_connection(user_id=req.user_id, tenant_id=x_tenant_id)
+            return gmail_sync_manager.disconnect_connection(user_id=authed_user_id(), tenant_id=x_tenant_id)
         elif source.lower() in ("gdrive", "googledrive", "google_drive"):
-            return gdrive_sync_manager.disconnect_connection(user_id=req.user_id, tenant_id=x_tenant_id)
+            return gdrive_sync_manager.disconnect_connection(user_id=authed_user_id(), tenant_id=x_tenant_id)
         elif source.lower() in ("calendar", "googlecalendar", "google_calendar"):
-            return calendar_sync_manager.disconnect_connection(user_id=req.user_id, tenant_id=x_tenant_id)
+            return calendar_sync_manager.disconnect_connection(user_id=authed_user_id(), tenant_id=x_tenant_id)
         elif source.lower() == "slack":
-            return slack_sync_manager.disconnect_connection(user_id=req.user_id, tenant_id=x_tenant_id)
+            return slack_sync_manager.disconnect_connection(user_id=authed_user_id(), tenant_id=x_tenant_id)
         elif source.lower() == "notion":
-            return notion_sync_manager.disconnect_connection(user_id=req.user_id, tenant_id=x_tenant_id)
+            return notion_sync_manager.disconnect_connection(user_id=authed_user_id(), tenant_id=x_tenant_id)
 
         # Invalidate and revoke OAuth token in Composio backend
         try:
-            connector_service.composio.disconnect_user_account(user_id=req.user_id, source=source)
+            connector_service.composio.disconnect_user_account(user_id=authed_user_id(), source=source)
         except Exception as err:
             print(f"[ConnectorRoutes] Error disconnecting {source}: {err}")
 
@@ -213,13 +217,13 @@ def disconnect_connector(source: str, req: ConnectRequest, x_tenant_id: str = He
             "message": f"{source} disconnected. OAuth tokens invalidated. Synced memories preserved.",
         }
     finally:
-        connector_service.composio.clear_cache(req.user_id)
+        connector_service.composio.clear_cache(authed_user_id())
 
 
 @router.post("/connectors/gmail/config")
 async def save_gmail_config(req: GmailConfigRequest, x_tenant_id: str = Header(default="tenant_default")):
     res = await gmail_sync_manager.save_configuration_and_start_sync(
-        user_id=req.user_id,
+        user_id=authed_user_id(),
         tenant_id=x_tenant_id,
         config_data=req.model_dump(),
     )
@@ -231,7 +235,7 @@ async def save_gmail_config(req: GmailConfigRequest, x_tenant_id: str = Header(d
 async def update_gmail_auto_sync(req: AutoSyncScheduleRequest, x_tenant_id: str = Header(default="tenant_default")):
     """Dedicated endpoint to update Auto-Sync schedule frequency and webhook status for Gmail."""
     res = await gmail_sync_manager.update_auto_sync_schedule(
-        user_id=req.user_id,
+        user_id=authed_user_id(),
         tenant_id=x_tenant_id,
         sync_frequency=req.sync_frequency,
         interval_minutes=req.interval_minutes,
@@ -249,7 +253,7 @@ async def update_source_auto_sync(source: str, req: AutoSyncScheduleRequest, x_t
         return await update_gmail_auto_sync(req, x_tenant_id=x_tenant_id)
     elif source.lower() in ("gdrive", "googledrive", "google_drive"):
         return gdrive_sync_manager.update_auto_sync_schedule(
-            user_id=req.user_id,
+            user_id=authed_user_id(),
             tenant_id=x_tenant_id,
             sync_frequency=req.sync_frequency,
             interval_minutes=req.interval_minutes,
@@ -258,7 +262,7 @@ async def update_source_auto_sync(source: str, req: AutoSyncScheduleRequest, x_t
         )
     elif source.lower() in ("calendar", "googlecalendar", "google_calendar"):
         return calendar_sync_manager.update_auto_sync_schedule(
-            user_id=req.user_id,
+            user_id=authed_user_id(),
             tenant_id=x_tenant_id,
             sync_frequency=req.sync_frequency,
             interval_minutes=req.interval_minutes,
@@ -267,7 +271,7 @@ async def update_source_auto_sync(source: str, req: AutoSyncScheduleRequest, x_t
         )
     elif source.lower() == "slack":
         return slack_sync_manager.update_auto_sync_schedule(
-            user_id=req.user_id,
+            user_id=authed_user_id(),
             tenant_id=x_tenant_id,
             sync_frequency=req.sync_frequency,
             interval_minutes=req.interval_minutes,
@@ -276,7 +280,7 @@ async def update_source_auto_sync(source: str, req: AutoSyncScheduleRequest, x_t
         )
     elif source.lower() == "notion":
         return notion_sync_manager.update_auto_sync_schedule(
-            user_id=req.user_id,
+            user_id=authed_user_id(),
             tenant_id=x_tenant_id,
             sync_frequency=req.sync_frequency,
             interval_minutes=req.interval_minutes,
@@ -295,7 +299,7 @@ async def update_source_auto_sync(source: str, req: AutoSyncScheduleRequest, x_t
 
 @router.get("/connectors/gmail/status")
 def get_gmail_status(user_id: str = "usr_active", x_tenant_id: str = Header(default="tenant_default")):
-    conn_dict = gmail_sync_manager.get_connection_status(user_id=user_id, tenant_id=x_tenant_id)
+    conn_dict = gmail_sync_manager.get_connection_status(user_id=authed_user_id(), tenant_id=x_tenant_id)
     return {
         "status": "success",
         "connection": conn_dict,
@@ -303,7 +307,7 @@ def get_gmail_status(user_id: str = "usr_active", x_tenant_id: str = Header(defa
 
 @router.post("/connectors/gmail/sync-now")
 async def trigger_gmail_sync_now(req: GmailActionRequest, x_tenant_id: str = Header(default="tenant_default")):
-    res = await gmail_sync_manager.trigger_manual_sync(user_id=req.user_id, tenant_id=x_tenant_id)
+    res = await gmail_sync_manager.trigger_manual_sync(user_id=authed_user_id(), tenant_id=x_tenant_id)
     if res.get("status") == "locked":
         raise HTTPException(status_code=409, detail=res.get("message"))
     if res.get("status") == "error":
@@ -312,7 +316,7 @@ async def trigger_gmail_sync_now(req: GmailActionRequest, x_tenant_id: str = Hea
 
 @router.post("/connectors/gmail/resync")
 async def trigger_gmail_resync(req: GmailActionRequest, x_tenant_id: str = Header(default="tenant_default")):
-    res = await gmail_sync_manager.trigger_resync(user_id=req.user_id, tenant_id=x_tenant_id)
+    res = await gmail_sync_manager.trigger_resync(user_id=authed_user_id(), tenant_id=x_tenant_id)
     if res.get("status") == "locked":
         raise HTTPException(status_code=409, detail=res.get("message"))
     if res.get("status") == "error":
@@ -335,7 +339,7 @@ async def save_gdrive_config(req: GDriveConfigRequest, x_tenant_id: str = Header
         webhook_enabled=req.webhook_enabled,
     )
     return await gdrive_sync_manager.save_configuration_and_start_sync(
-        user_id=req.user_id,
+        user_id=authed_user_id(),
         tenant_id=x_tenant_id,
         config=cfg,
     )
@@ -343,7 +347,7 @@ async def save_gdrive_config(req: GDriveConfigRequest, x_tenant_id: str = Header
 @router.post("/connectors/gdrive/auto-sync")
 async def update_gdrive_auto_sync(req: AutoSyncScheduleRequest, x_tenant_id: str = Header(default="tenant_default")):
     return gdrive_sync_manager.update_auto_sync_schedule(
-        user_id=req.user_id,
+        user_id=authed_user_id(),
         tenant_id=x_tenant_id,
         sync_frequency=req.sync_frequency,
         interval_minutes=req.interval_minutes,
@@ -354,7 +358,7 @@ async def update_gdrive_auto_sync(req: AutoSyncScheduleRequest, x_tenant_id: str
 
 @router.get("/connectors/gdrive/status")
 def get_gdrive_status(user_id: str = "usr_active", x_tenant_id: str = Header(default="tenant_default")):
-    conn = gdrive_sync_manager.get_connection_status(user_id=user_id, tenant_id=x_tenant_id)
+    conn = gdrive_sync_manager.get_connection_status(user_id=authed_user_id(), tenant_id=x_tenant_id)
     return {
         "status": "success",
         "connection": conn.to_dict(),
@@ -362,7 +366,7 @@ def get_gdrive_status(user_id: str = "usr_active", x_tenant_id: str = Header(def
 
 @router.post("/connectors/gdrive/sync-now")
 async def trigger_gdrive_sync_now(req: GmailActionRequest, x_tenant_id: str = Header(default="tenant_default")):
-    conn = gdrive_sync_manager.store.get_or_create_connection(tenant_id=x_tenant_id, user_id=req.user_id)
+    conn = gdrive_sync_manager.store.get_or_create_connection(tenant_id=x_tenant_id, user_id=authed_user_id())
     if gdrive_sync_manager.store.is_locked(conn.connection_id):
         raise HTTPException(status_code=409, detail="A sync job is currently running for Google Drive. Please wait.")
     import asyncio
@@ -371,7 +375,7 @@ async def trigger_gdrive_sync_now(req: GmailActionRequest, x_tenant_id: str = He
 
 @router.post("/connectors/gdrive/resync")
 async def trigger_gdrive_resync(req: GmailActionRequest, x_tenant_id: str = Header(default="tenant_default")):
-    conn = gdrive_sync_manager.store.get_or_create_connection(tenant_id=x_tenant_id, user_id=req.user_id)
+    conn = gdrive_sync_manager.store.get_or_create_connection(tenant_id=x_tenant_id, user_id=authed_user_id())
     if gdrive_sync_manager.store.is_locked(conn.connection_id):
         raise HTTPException(status_code=409, detail="A sync job is currently running for Google Drive. Please wait.")
     import asyncio
@@ -384,7 +388,7 @@ def get_gdrive_activities(
     limit: int = Query(default=20, ge=1, le=100),
     x_tenant_id: str = Header(default="tenant_default"),
 ):
-    conn = gdrive_sync_manager.store.get_or_create_connection(tenant_id=x_tenant_id, user_id=user_id)
+    conn = gdrive_sync_manager.store.get_or_create_connection(tenant_id=x_tenant_id, user_id=authed_user_id())
     activities = gdrive_sync_manager.store.get_activities(connection_id=conn.connection_id, limit=limit)
     return {
         "status": "success",
@@ -410,7 +414,7 @@ async def save_calendar_config(req: CalendarConfigRequest, x_tenant_id: str = He
         webhook_enabled=req.webhook_enabled,
     )
     return await calendar_sync_manager.save_configuration_and_start_sync(
-        user_id=req.user_id,
+        user_id=authed_user_id(),
         tenant_id=x_tenant_id,
         config=cfg,
     )
@@ -418,7 +422,7 @@ async def save_calendar_config(req: CalendarConfigRequest, x_tenant_id: str = He
 @router.post("/connectors/calendar/auto-sync")
 async def update_calendar_auto_sync(req: AutoSyncScheduleRequest, x_tenant_id: str = Header(default="tenant_default")):
     return calendar_sync_manager.update_auto_sync_schedule(
-        user_id=req.user_id,
+        user_id=authed_user_id(),
         tenant_id=x_tenant_id,
         sync_frequency=req.sync_frequency,
         interval_minutes=req.interval_minutes,
@@ -428,7 +432,7 @@ async def update_calendar_auto_sync(req: AutoSyncScheduleRequest, x_tenant_id: s
 
 @router.get("/connectors/calendar/status")
 def get_calendar_status(user_id: str = "usr_active", x_tenant_id: str = Header(default="tenant_default")):
-    conn = calendar_sync_manager.get_connection_status(user_id=user_id, tenant_id=x_tenant_id)
+    conn = calendar_sync_manager.get_connection_status(user_id=authed_user_id(), tenant_id=x_tenant_id)
     return {
         "status": "success",
         "connection": conn.to_dict(),
@@ -436,7 +440,7 @@ def get_calendar_status(user_id: str = "usr_active", x_tenant_id: str = Header(d
 
 @router.post("/connectors/calendar/sync-now")
 async def trigger_calendar_sync_now(req: GmailActionRequest, x_tenant_id: str = Header(default="tenant_default")):
-    conn = calendar_sync_manager.store.get_or_create_connection(tenant_id=x_tenant_id, user_id=req.user_id)
+    conn = calendar_sync_manager.store.get_or_create_connection(tenant_id=x_tenant_id, user_id=authed_user_id())
     if calendar_sync_manager.store.is_locked(conn.connection_id):
         raise HTTPException(status_code=409, detail="A sync job is currently running for Google Calendar. Please wait.")
     import asyncio
@@ -445,7 +449,7 @@ async def trigger_calendar_sync_now(req: GmailActionRequest, x_tenant_id: str = 
 
 @router.post("/connectors/calendar/resync")
 async def trigger_calendar_resync(req: GmailActionRequest, x_tenant_id: str = Header(default="tenant_default")):
-    conn = calendar_sync_manager.store.get_or_create_connection(tenant_id=x_tenant_id, user_id=req.user_id)
+    conn = calendar_sync_manager.store.get_or_create_connection(tenant_id=x_tenant_id, user_id=authed_user_id())
     if calendar_sync_manager.store.is_locked(conn.connection_id):
         raise HTTPException(status_code=409, detail="A sync job is currently running for Google Calendar. Please wait.")
     import asyncio
@@ -458,7 +462,7 @@ def get_calendar_activities(
     limit: int = Query(default=20, ge=1, le=100),
     x_tenant_id: str = Header(default="tenant_default"),
 ):
-    conn = calendar_sync_manager.store.get_or_create_connection(tenant_id=x_tenant_id, user_id=user_id)
+    conn = calendar_sync_manager.store.get_or_create_connection(tenant_id=x_tenant_id, user_id=authed_user_id())
     activities = calendar_sync_manager.store.get_activities(connection_id=conn.connection_id, limit=limit)
     return {
         "status": "success",
@@ -469,7 +473,7 @@ def get_calendar_activities(
 
 @router.post("/connectors/calendar/disconnect")
 def disconnect_calendar(req: GmailActionRequest, x_tenant_id: str = Header(default="tenant_default")):
-    return calendar_sync_manager.disconnect_connection(user_id=req.user_id, tenant_id=x_tenant_id)
+    return calendar_sync_manager.disconnect_connection(user_id=authed_user_id(), tenant_id=x_tenant_id)
 
 @router.get("/connectors/gmail/activities")
 def get_gmail_activities(
@@ -477,7 +481,7 @@ def get_gmail_activities(
     limit: int = Query(default=20, ge=1, le=100),
     x_tenant_id: str = Header(default="tenant_default"),
 ):
-    conn = gmail_sync_manager.store.get_or_create_connection(tenant_id=x_tenant_id, user_id=user_id)
+    conn = gmail_sync_manager.store.get_or_create_connection(tenant_id=x_tenant_id, user_id=authed_user_id())
     activities = gmail_sync_manager.store.get_activities(connection_id=conn.connection_id, limit=limit)
     return {
         "status": "success",
@@ -488,7 +492,7 @@ def get_gmail_activities(
 
 @router.post("/connectors/gdrive/disconnect")
 def disconnect_gdrive(req: GmailActionRequest, x_tenant_id: str = Header(default="tenant_default")):
-    return gdrive_sync_manager.disconnect_connection(user_id=req.user_id, tenant_id=x_tenant_id)
+    return gdrive_sync_manager.disconnect_connection(user_id=authed_user_id(), tenant_id=x_tenant_id)
 
 @router.get("/connectors/slack/activities")
 def get_slack_activities(
@@ -496,7 +500,7 @@ def get_slack_activities(
     limit: int = Query(default=20, ge=1, le=100),
     x_tenant_id: str = Header(default="tenant_default"),
 ):
-    conn = slack_sync_manager.store.get_or_create_connection(tenant_id=x_tenant_id, user_id=user_id)
+    conn = slack_sync_manager.store.get_or_create_connection(tenant_id=x_tenant_id, user_id=authed_user_id())
     activities = slack_sync_manager.store.get_activities(connection_id=conn.connection_id, limit=limit)
     return {
         "status": "success",
@@ -511,7 +515,7 @@ def get_notion_activities(
     limit: int = Query(default=20, ge=1, le=100),
     x_tenant_id: str = Header(default="tenant_default"),
 ):
-    conn = notion_sync_manager.store.get_or_create_connection(tenant_id=x_tenant_id, user_id=user_id)
+    conn = notion_sync_manager.store.get_or_create_connection(tenant_id=x_tenant_id, user_id=authed_user_id())
     activities = notion_sync_manager.store.get_activities(connection_id=conn.connection_id, limit=limit)
     return {
         "status": "success",
@@ -529,15 +533,15 @@ def get_source_activities(
 ):
     src = source.lower()
     if src == "gmail":
-        return get_gmail_activities(user_id=user_id, limit=limit, x_tenant_id=x_tenant_id)
+        return get_gmail_activities(user_id=authed_user_id(), limit=limit, x_tenant_id=x_tenant_id)
     elif src in ("gdrive", "googledrive", "google_drive"):
-        return get_gdrive_activities(user_id=user_id, limit=limit, x_tenant_id=x_tenant_id)
+        return get_gdrive_activities(user_id=authed_user_id(), limit=limit, x_tenant_id=x_tenant_id)
     elif src in ("calendar", "googlecalendar", "google_calendar"):
-        return get_calendar_activities(user_id=user_id, limit=limit, x_tenant_id=x_tenant_id)
+        return get_calendar_activities(user_id=authed_user_id(), limit=limit, x_tenant_id=x_tenant_id)
     elif src == "slack":
-        return get_slack_activities(user_id=user_id, limit=limit, x_tenant_id=x_tenant_id)
+        return get_slack_activities(user_id=authed_user_id(), limit=limit, x_tenant_id=x_tenant_id)
     elif src == "notion":
-        return get_notion_activities(user_id=user_id, limit=limit, x_tenant_id=x_tenant_id)
+        return get_notion_activities(user_id=authed_user_id(), limit=limit, x_tenant_id=x_tenant_id)
     
     return {
         "status": "success",
@@ -562,7 +566,7 @@ async def save_slack_config(req: SlackConfigRequest, x_tenant_id: str = Header(d
         webhook_enabled=req.webhook_enabled,
     )
     return await slack_sync_manager.save_configuration_and_start_sync(
-        user_id=req.user_id,
+        user_id=authed_user_id(),
         tenant_id=x_tenant_id,
         config_data=cfg.to_dict(),
     )
@@ -570,7 +574,7 @@ async def save_slack_config(req: SlackConfigRequest, x_tenant_id: str = Header(d
 @router.post("/connectors/slack/auto-sync")
 async def update_slack_auto_sync(req: AutoSyncScheduleRequest, x_tenant_id: str = Header(default="tenant_default")):
     return slack_sync_manager.update_auto_sync_schedule(
-        user_id=req.user_id,
+        user_id=authed_user_id(),
         tenant_id=x_tenant_id,
         sync_frequency=req.sync_frequency,
         interval_minutes=req.interval_minutes,
@@ -580,7 +584,7 @@ async def update_slack_auto_sync(req: AutoSyncScheduleRequest, x_tenant_id: str 
 
 @router.get("/connectors/slack/status")
 def get_slack_status(user_id: str = "usr_active", x_tenant_id: str = Header(default="tenant_default")):
-    conn = slack_sync_manager.get_connection_status(user_id=user_id, tenant_id=x_tenant_id)
+    conn = slack_sync_manager.get_connection_status(user_id=authed_user_id(), tenant_id=x_tenant_id)
     return {
         "status": "success",
         "connection": conn.to_dict(),
@@ -588,7 +592,7 @@ def get_slack_status(user_id: str = "usr_active", x_tenant_id: str = Header(defa
 
 @router.post("/connectors/slack/sync-now")
 async def trigger_slack_sync_now(req: GmailActionRequest, x_tenant_id: str = Header(default="tenant_default")):
-    conn = slack_sync_manager.store.get_or_create_connection(tenant_id=x_tenant_id, user_id=req.user_id)
+    conn = slack_sync_manager.store.get_or_create_connection(tenant_id=x_tenant_id, user_id=authed_user_id())
     if slack_sync_manager.store.is_locked(conn.connection_id):
         raise HTTPException(status_code=409, detail="A sync job is currently running for Slack. Please wait.")
     import asyncio
@@ -597,7 +601,7 @@ async def trigger_slack_sync_now(req: GmailActionRequest, x_tenant_id: str = Hea
 
 @router.post("/connectors/slack/resync")
 async def trigger_slack_resync(req: GmailActionRequest, x_tenant_id: str = Header(default="tenant_default")):
-    conn = slack_sync_manager.store.get_or_create_connection(tenant_id=x_tenant_id, user_id=req.user_id)
+    conn = slack_sync_manager.store.get_or_create_connection(tenant_id=x_tenant_id, user_id=authed_user_id())
     if slack_sync_manager.store.is_locked(conn.connection_id):
         raise HTTPException(status_code=409, detail="A sync job is currently running for Slack. Please wait.")
     import asyncio
@@ -606,7 +610,7 @@ async def trigger_slack_resync(req: GmailActionRequest, x_tenant_id: str = Heade
 
 @router.post("/connectors/slack/disconnect")
 def disconnect_slack(req: GmailActionRequest, x_tenant_id: str = Header(default="tenant_default")):
-    return slack_sync_manager.disconnect_connection(user_id=req.user_id, tenant_id=x_tenant_id)
+    return slack_sync_manager.disconnect_connection(user_id=authed_user_id(), tenant_id=x_tenant_id)
 
 # =========================================================================
 # Notion Specific Endpoints
@@ -624,7 +628,7 @@ async def save_notion_config(req: NotionConfigRequest, x_tenant_id: str = Header
         webhook_enabled=req.webhook_enabled,
     )
     return await notion_sync_manager.save_configuration_and_start_sync(
-        user_id=req.user_id,
+        user_id=authed_user_id(),
         tenant_id=x_tenant_id,
         config_data=cfg.to_dict(),
     )
@@ -632,7 +636,7 @@ async def save_notion_config(req: NotionConfigRequest, x_tenant_id: str = Header
 @router.post("/connectors/notion/auto-sync")
 async def update_notion_auto_sync(req: AutoSyncScheduleRequest, x_tenant_id: str = Header(default="tenant_default")):
     return notion_sync_manager.update_auto_sync_schedule(
-        user_id=req.user_id,
+        user_id=authed_user_id(),
         tenant_id=x_tenant_id,
         sync_frequency=req.sync_frequency,
         interval_minutes=req.interval_minutes,
@@ -642,7 +646,7 @@ async def update_notion_auto_sync(req: AutoSyncScheduleRequest, x_tenant_id: str
 
 @router.get("/connectors/notion/status")
 def get_notion_status(user_id: str = "usr_active", x_tenant_id: str = Header(default="tenant_default")):
-    conn = notion_sync_manager.get_connection_status(user_id=user_id, tenant_id=x_tenant_id)
+    conn = notion_sync_manager.get_connection_status(user_id=authed_user_id(), tenant_id=x_tenant_id)
     return {
         "status": "success",
         "connection": conn.to_dict(),
@@ -650,7 +654,7 @@ def get_notion_status(user_id: str = "usr_active", x_tenant_id: str = Header(def
 
 @router.post("/connectors/notion/sync-now")
 async def trigger_notion_sync_now(req: GmailActionRequest, x_tenant_id: str = Header(default="tenant_default")):
-    conn = notion_sync_manager.store.get_or_create_connection(tenant_id=x_tenant_id, user_id=req.user_id)
+    conn = notion_sync_manager.store.get_or_create_connection(tenant_id=x_tenant_id, user_id=authed_user_id())
     if notion_sync_manager.store.is_locked(conn.connection_id):
         raise HTTPException(status_code=409, detail="A sync job is currently running for Notion. Please wait.")
     import asyncio
@@ -659,7 +663,7 @@ async def trigger_notion_sync_now(req: GmailActionRequest, x_tenant_id: str = He
 
 @router.post("/connectors/notion/resync")
 async def trigger_notion_resync(req: GmailActionRequest, x_tenant_id: str = Header(default="tenant_default")):
-    conn = notion_sync_manager.store.get_or_create_connection(tenant_id=x_tenant_id, user_id=req.user_id)
+    conn = notion_sync_manager.store.get_or_create_connection(tenant_id=x_tenant_id, user_id=authed_user_id())
     if notion_sync_manager.store.is_locked(conn.connection_id):
         raise HTTPException(status_code=409, detail="A sync job is currently running for Notion. Please wait.")
     import asyncio
@@ -668,11 +672,11 @@ async def trigger_notion_resync(req: GmailActionRequest, x_tenant_id: str = Head
 
 @router.post("/connectors/notion/disconnect")
 def disconnect_notion(req: GmailActionRequest, x_tenant_id: str = Header(default="tenant_default")):
-    return notion_sync_manager.disconnect_connection(user_id=req.user_id, tenant_id=x_tenant_id)
+    return notion_sync_manager.disconnect_connection(user_id=authed_user_id(), tenant_id=x_tenant_id)
 
 @router.post("/connectors/gmail/disconnect")
 def disconnect_gmail(req: GmailActionRequest, x_tenant_id: str = Header(default="tenant_default")):
-    res = gmail_sync_manager.disconnect_connection(user_id=req.user_id, tenant_id=x_tenant_id)
+    res = gmail_sync_manager.disconnect_connection(user_id=authed_user_id(), tenant_id=x_tenant_id)
     return res
 
 @router.get("/connectors/{source}/data-summary")
@@ -684,19 +688,19 @@ def get_connector_data_summary(
     """Returns pre-deletion calculation summary of raw records, vector memories, and activity logs."""
     src = source.lower()
     if src == "gmail":
-        summary = gmail_sync_manager.get_data_summary(user_id=user_id, tenant_id=x_tenant_id)
+        summary = gmail_sync_manager.get_data_summary(user_id=authed_user_id(), tenant_id=x_tenant_id)
         return {"status": "success", "source": "gmail", "summary": summary}
     elif src in ("gdrive", "googledrive", "google_drive"):
-        summary = gdrive_sync_manager.get_data_summary(user_id=user_id, tenant_id=x_tenant_id)
+        summary = gdrive_sync_manager.get_data_summary(user_id=authed_user_id(), tenant_id=x_tenant_id)
         return {"status": "success", "source": "gdrive", "summary": summary}
     elif src in ("calendar", "googlecalendar", "google_calendar"):
-        summary = calendar_sync_manager.get_data_summary(user_id=user_id, tenant_id=x_tenant_id)
+        summary = calendar_sync_manager.get_data_summary(user_id=authed_user_id(), tenant_id=x_tenant_id)
         return {"status": "success", "source": "google_calendar", "summary": summary}
     elif src == "slack":
-        summary = slack_sync_manager.get_data_summary(user_id=user_id, tenant_id=x_tenant_id)
+        summary = slack_sync_manager.get_data_summary(user_id=authed_user_id(), tenant_id=x_tenant_id)
         return {"status": "success", "source": "slack", "summary": summary}
     elif src == "notion":
-        summary = notion_sync_manager.get_data_summary(user_id=user_id, tenant_id=x_tenant_id)
+        summary = notion_sync_manager.get_data_summary(user_id=authed_user_id(), tenant_id=x_tenant_id)
         return {"status": "success", "source": "notion", "summary": summary}
 
     return {
@@ -704,7 +708,7 @@ def get_connector_data_summary(
         "source": src,
         "summary": {
             "tenant_id": x_tenant_id,
-            "connection_id": f"conn_{src}_{x_tenant_id}_{user_id}",
+            "connection_id": f"conn_{src}_{x_tenant_id}_{authed_user_id()}",
             "synced_messages_count": 0,
             "activities_count": 0,
             "vector_records_count": 0,
@@ -723,15 +727,15 @@ async def purge_connector_all_data(
     """Permanently purges all raw data, vector embeddings, deduplication state, and activity logs across MongoDB & VectorStore."""
     src = source.lower()
     if src == "gmail":
-        return await gmail_sync_manager.purge_all_connector_data(user_id=user_id, tenant_id=x_tenant_id)
+        return await gmail_sync_manager.purge_all_connector_data(user_id=authed_user_id(), tenant_id=x_tenant_id)
     elif src in ("gdrive", "googledrive", "google_drive"):
-        return await gdrive_sync_manager.purge_all_connector_data(user_id=user_id, tenant_id=x_tenant_id)
+        return await gdrive_sync_manager.purge_all_connector_data(user_id=authed_user_id(), tenant_id=x_tenant_id)
     elif src in ("calendar", "googlecalendar", "google_calendar"):
-        return await calendar_sync_manager.purge_all_connector_data(user_id=user_id, tenant_id=x_tenant_id)
+        return await calendar_sync_manager.purge_all_connector_data(user_id=authed_user_id(), tenant_id=x_tenant_id)
     elif src == "slack":
-        return await slack_sync_manager.purge_all_connector_data(user_id=user_id, tenant_id=x_tenant_id)
+        return await slack_sync_manager.purge_all_connector_data(user_id=authed_user_id(), tenant_id=x_tenant_id)
     elif src == "notion":
-        return await notion_sync_manager.purge_all_connector_data(user_id=user_id, tenant_id=x_tenant_id)
+        return await notion_sync_manager.purge_all_connector_data(user_id=authed_user_id(), tenant_id=x_tenant_id)
 
     return {
         "status": "success",
@@ -753,15 +757,15 @@ async def retry_failed_items_endpoint(
     """Retries previously failed items for the specified connector without wiping clean memories."""
     src = source.lower()
     if src == "gmail":
-        return await gmail_sync_manager.retry_failed_items(user_id=req.user_id, tenant_id=x_tenant_id)
+        return await gmail_sync_manager.retry_failed_items(user_id=authed_user_id(), tenant_id=x_tenant_id)
     elif src in ("gdrive", "googledrive", "google_drive"):
-        return await gdrive_sync_manager.retry_failed_items(user_id=req.user_id, tenant_id=x_tenant_id)
+        return await gdrive_sync_manager.retry_failed_items(user_id=authed_user_id(), tenant_id=x_tenant_id)
     elif src in ("calendar", "googlecalendar", "google_calendar"):
-        return await calendar_sync_manager.retry_failed_items(user_id=req.user_id, tenant_id=x_tenant_id)
+        return await calendar_sync_manager.retry_failed_items(user_id=authed_user_id(), tenant_id=x_tenant_id)
     elif src == "slack":
-        return await slack_sync_manager.retry_failed_items(user_id=req.user_id, tenant_id=x_tenant_id)
+        return await slack_sync_manager.retry_failed_items(user_id=authed_user_id(), tenant_id=x_tenant_id)
     elif src == "notion":
-        return await notion_sync_manager.retry_failed_items(user_id=req.user_id, tenant_id=x_tenant_id)
+        return await notion_sync_manager.retry_failed_items(user_id=authed_user_id(), tenant_id=x_tenant_id)
     raise HTTPException(status_code=400, detail=f"Unsupported source for retry: {source}")
 
 @router.post("/connectors/gmail/simulate-webhook")
@@ -779,17 +783,17 @@ async def simulate_gmail_webhook(
         event_type=EventType.CREATE,
         source="gmail",
         tenant_id=x_tenant_id,
-        user_id=req.user_id,
+        user_id=authed_user_id(),
         external_id=msg_id,
         raw_ref={"message_id": msg_id, "thread_id": msg_id},
-        acl=[req.user_id],
+        acl=[authed_user_id()],
         timestamp=datetime.now(timezone.utc),
         metadata={
             "message_id": msg_id,
             "thread_id": msg_id,
             "subject": req.subject,
             "sender": req.sender,
-            "to": req.user_id,
+            "to": authed_user_id(),
             "body": req.body,
             "snippet": req.snippet or req.body[:150],
             "label_ids": ["INBOX"],
@@ -815,10 +819,10 @@ async def simulate_gdrive_webhook(
         event_type=EventType.CREATE,
         source="gdrive",
         tenant_id=x_tenant_id,
-        user_id=req.user_id,
+        user_id=authed_user_id(),
         external_id=file_id,
         raw_ref={"file_id": file_id, "name": req.name, "mime_type": req.mime_type},
-        acl=[req.user_id],
+        acl=[authed_user_id()],
         timestamp=datetime.now(timezone.utc),
         metadata={
             "file_id": file_id,
@@ -851,7 +855,7 @@ async def simulate_slack_webhook(
         event_type=EventType.CREATE,
         source="slack",
         tenant_id=x_tenant_id,
-        user_id=req.user_id,
+        user_id=authed_user_id(),
         external_id=msg_id,
         raw_ref={
             "channel_id": req.channel_id,
@@ -860,13 +864,13 @@ async def simulate_slack_webhook(
             "thread_ts": req.thread_ts,
             "message_type": req.message_type,
         },
-        acl=[req.user_id, f"channel:{req.channel_id}"],
+        acl=[authed_user_id(), f"channel:{req.channel_id}"],
         timestamp=datetime.now(timezone.utc),
         metadata={
             "channel_id": req.channel_id,
             "channel_name": req.channel_name,
             "message_type": req.message_type,
-            "sender_id": req.user_id,
+            "sender_id": authed_user_id(),
             "sender_name": req.sender_name,
             "text": req.text,
             "body": req.text,
@@ -896,14 +900,14 @@ async def simulate_notion_webhook(
         event_type=EventType.CREATE,
         source="notion",
         tenant_id=x_tenant_id,
-        user_id=req.user_id,
+        user_id=authed_user_id(),
         external_id=rec_id,
         raw_ref={
             "record_id": rec_id,
             "object_type": req.object_type,
             "url": req.url,
         },
-        acl=[req.user_id],
+        acl=[authed_user_id()],
         timestamp=datetime.now(timezone.utc),
         metadata={
             "record_id": rec_id,
@@ -939,7 +943,7 @@ async def request_enterprise_sync(
         raise HTTPException(status_code=400, detail="Both target database system and requirements details are required.")
 
     record = enterprise_store.create_request(
-        user_id=req.user_id,
+        user_id=authed_user_id(),
         tenant_id=x_tenant_id,
         database_system=db_system,
         requirements=reqs,
@@ -959,7 +963,7 @@ async def get_enterprise_sync_requests(
     x_tenant_id: str = Header(default="tenant_default"),
 ):
     """Retrieves all submitted enterprise connector requests for the user/tenant."""
-    requests = enterprise_store.get_requests(user_id=user_id, tenant_id=x_tenant_id)
+    requests = enterprise_store.get_requests(user_id=authed_user_id(), tenant_id=x_tenant_id)
     return {
         "status": "success",
         "requests": requests,
@@ -972,7 +976,7 @@ async def cancel_enterprise_sync_request(
     user_id: str = Query(default="usr_active"),
 ):
     """Cancels or removes a submitted custom enterprise connector request."""
-    success = enterprise_store.cancel_request(request_id=request_id, user_id=user_id)
+    success = enterprise_store.cancel_request(request_id=request_id, user_id=authed_user_id())
     return {
         "status": "success",
         "message": f"Enterprise request '{request_id}' has been cancelled.",
