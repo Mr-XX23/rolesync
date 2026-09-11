@@ -7,12 +7,24 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.core.context import AgentContext
-from app.tools.types import ToolCategory, ToolInput, ToolInvocation, ToolKind, ToolOutput, ToolScope
+from app.tools.types import (
+    ToolCategory,
+    ToolInput,
+    ToolInvocation,
+    ToolKind,
+    ToolOutput,
+    ToolScope,
+    UndoInvocation,
+)
 
 ToolHandler = Callable[[ToolInvocation], Awaitable[ToolOutput]]
 AclCheck = Callable[[AgentContext, ToolInput], Awaitable[None]]  # raise ToolAccessDenied
-PreviewBuilder = Callable[[ToolInput], dict[str, Any]]
-UndoBuilder = Callable[[ToolInput], dict[str, Any] | None]
+# What the reviewer sees on the approval card. It may look things up (current prices, the
+# stock level before a change) and may reject unusable arguments with ToolInputError, so
+# the agent hears about them before anyone is asked to approve.
+PreviewBuilder = Callable[[AgentContext, ToolInput], Awaitable[dict[str, Any]]]
+# Reverses a completed write from the ``UndoPlan`` its handler returned; returns a summary.
+UndoHandler = Callable[[UndoInvocation], Awaitable[str]]
 
 # Which scopes each agent may use. The gate enforces this on every call, so e.g. the
 # research agent is rejected when it tries a COMMUNICATION tool, whatever the model asks.
@@ -38,22 +50,24 @@ class ToolDefinition:
     timeout_seconds: float | None = None
     acl: AclCheck | None = None
     preview: PreviewBuilder | None = None
-    undo: UndoBuilder | None = None
+    undo_handler: UndoHandler | None = None
+    # Attempts for transient failures. Default: reads retry, writes never do (a retry could
+    # repeat the side effect); a write that is safe to repeat may opt in.
+    max_attempts: int | None = None
 
     def __post_init__(self) -> None:
         if (self.kind is ToolKind.READ) != (self.scope is ToolScope.READ):
             raise ValueError(f"tool {self.name!r}: READ tools need scope READ and writes need a write scope")
+        if self.kind is ToolKind.READ and self.undo_handler is not None:
+            raise ValueError(f"tool {self.name!r}: a READ tool has nothing to undo")
 
     def parameters_schema(self) -> dict[str, Any]:
         return self.input_model.model_json_schema()
 
-    def build_preview(self, args: ToolInput) -> dict[str, Any]:
+    async def build_preview(self, ctx: AgentContext, args: ToolInput) -> dict[str, Any]:
         if self.preview is not None:
-            return self.preview(args)
+            return await self.preview(ctx, args)
         return {"tool": self.name, "args": args.model_dump(mode="json")}
-
-    def build_undo(self, args: ToolInput) -> dict[str, Any] | None:
-        return self.undo(args) if self.undo is not None else None
 
 
 class ToolRegistry:

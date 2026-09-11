@@ -1,5 +1,6 @@
 import React from 'react';
-import { AlertTriangle, CheckCircle2, CircleHelp, CircleSlash, ExternalLink, Loader2, Search, Wrench } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { AlertTriangle, CheckCircle2, CircleHelp, CircleSlash, ExternalLink, Loader2, Search, Undo2, Wrench } from 'lucide-react';
 import type { SourceLink, TranscriptItem } from '../../../api/salesAgentApi';
 
 const OUTCOME_TONE: Record<string, string> = {
@@ -24,13 +25,46 @@ const TOOL_LABEL: Record<string, string> = {
   check_inventory: 'Check stock',
   web_search: 'Search the web',
   research_prospect: 'Research prospect',
+  create_calendar_event: 'Create calendar event',
+  send_slack_message: 'Post to Slack',
+  create_notion_page: 'Create Notion page',
+  generate_document: 'Create document',
+  create_quote: 'Create quote',
+  create_catalog_item: 'Add catalog item',
+  update_catalog_item: 'Update catalog item',
+  retire_catalog_item: 'Retire catalog item',
+  set_stock: 'Set stock',
+  reserve_stock: 'Reserve stock',
+  release_stock: 'Release reservation',
+  undo_actions: 'Undo actions',
 };
-const WRITE_TOOLS = new Set(['send_email']);
+const WRITE_TOOLS = new Set([
+  'send_email',
+  'create_calendar_event',
+  'send_slack_message',
+  'create_notion_page',
+  'generate_document',
+  'create_quote',
+  'create_catalog_item',
+  'update_catalog_item',
+  'retire_catalog_item',
+  'set_stock',
+  'reserve_stock',
+  'release_stock',
+]);
+const WHERE_TO_CHECK: Record<string, string> = {
+  send_email: ' (check your Sent folder)',
+  create_calendar_event: ' (check your calendar)',
+  send_slack_message: ' (check the channel)',
+  create_notion_page: ' (check Notion)',
+  generate_document: ' (check Google Drive or the knowledge base)',
+  create_quote: ' (check Google Drive or the knowledge base)',
+};
 
 function describeResult(item: TranscriptItem): string | null | undefined {
   if (item.outcome === 'UNKNOWN') {
     // The engine's own message is written for the model; this one is for the rep.
-    const where = item.tool === 'send_email' ? ' (check your Sent folder)' : '';
+    const where = WHERE_TO_CHECK[item.tool ?? ''] ?? '';
     return `No confirmation came back, so this may have gone through. Check before trying again${where}.`;
   }
   return item.summary || item.error;
@@ -61,6 +95,25 @@ function describeCall(item: TranscriptItem): string {
       return [args.company, args.person].filter(Boolean).map(String).join(' · ');
     case 'check_inventory':
       return Array.isArray(args.skus) ? args.skus.join(', ') : '';
+    case 'create_calendar_event':
+    case 'create_notion_page':
+    case 'generate_document':
+      return args.title ? `“${String(args.title)}”` : '';
+    case 'send_slack_message':
+      return args.channel ? `#${String(args.channel).replace(/^#/, '')}` : '';
+    case 'create_quote':
+      return args.customer_company ? String(args.customer_company) : '';
+    case 'create_catalog_item':
+      return args.name ? String(args.name) : '';
+    case 'set_stock':
+    case 'reserve_stock':
+      return [args.sku, args.quantity].filter((part) => part !== undefined).map(String).join(' · ');
+    case 'undo_actions':
+      return Array.isArray(args.action_ids) ? `${args.action_ids.length} action${args.action_ids.length === 1 ? '' : 's'}` : '';
+    case 'update_catalog_item':
+    case 'retire_catalog_item':
+    case 'release_stock':
+      return '';
     default:
       if (typeof args.query === 'string') {
         return `“${args.query}”`;
@@ -69,9 +122,12 @@ function describeCall(item: TranscriptItem): string {
   }
 }
 
-/** Only web links: sources come from tool results, which include pages found on the internet. */
+/** Links inside this app (e.g. a document saved to the knowledge vault). */
+const isAppLink = (url: string): boolean => /^\/salesman\/[\w\-/?=&.]*$/.test(url);
+
+/** Web links and links inside the app only: sources come from tool results, which include pages found on the internet. */
 function safeSources(sources: SourceLink[] | null | undefined): SourceLink[] {
-  return (sources ?? []).filter((source) => /^https?:\/\//i.test(source.url)).slice(0, 5);
+  return (sources ?? []).filter((source) => /^https?:\/\//i.test(source.url) || isAppLink(source.url)).slice(0, 5);
 }
 
 function hostOf(url: string): string | null {
@@ -83,6 +139,9 @@ function hostOf(url: string): string | null {
 }
 
 function sourceLabel(source: SourceLink): string {
+  if (isAppLink(source.url)) {
+    return `${source.title} · knowledge base`;
+  }
   const host = hostOf(source.url);
   // Google Search grounding links are redirects whose title is already the site's domain.
   if (!host || host.endsWith('vertexaisearch.cloud.google.com') || host === source.title) {
@@ -90,6 +149,9 @@ function sourceLabel(source: SourceLink): string {
   }
   return `${source.title} · ${host}`;
 }
+
+const linkClass =
+  'inline-flex items-center gap-1 max-w-[16rem] text-foreground/70 hover:text-foreground underline-offset-2 hover:underline';
 
 const UserBubble: React.FC<{ text: string; sending?: boolean }> = ({ text, sending = false }) => (
   <div className="flex justify-end">
@@ -124,7 +186,7 @@ export const Transcript: React.FC<{
             </div>
           );
         case 'tool_call': {
-          const CallIcon = WRITE_TOOLS.has(item.tool ?? '') ? Wrench : Search;
+          const CallIcon = item.tool === 'undo_actions' ? Undo2 : WRITE_TOOLS.has(item.tool ?? '') ? Wrench : Search;
           return (
             <div key={index} className="flex items-center gap-2 text-xs text-muted-foreground pl-1">
               <CallIcon className="w-3.5 h-3.5 shrink-0" />
@@ -151,16 +213,17 @@ export const Transcript: React.FC<{
                 <ul className="mt-1.5 ml-[1.375rem] flex flex-wrap gap-x-3 gap-y-1">
                   {sources.map((source) => (
                     <li key={source.url} className="min-w-0 max-w-full">
-                      <a
-                        href={source.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        title={source.title}
-                        className="inline-flex items-center gap-1 max-w-[16rem] text-foreground/70 hover:text-foreground underline-offset-2 hover:underline"
-                      >
-                        <ExternalLink className="w-3 h-3 shrink-0" />
-                        <span className="truncate">{sourceLabel(source)}</span>
-                      </a>
+                      {isAppLink(source.url) ? (
+                        <Link to={source.url} title={source.title} className={linkClass}>
+                          <ExternalLink className="w-3 h-3 shrink-0" />
+                          <span className="truncate">{sourceLabel(source)}</span>
+                        </Link>
+                      ) : (
+                        <a href={source.url} target="_blank" rel="noopener noreferrer" title={source.title} className={linkClass}>
+                          <ExternalLink className="w-3 h-3 shrink-0" />
+                          <span className="truncate">{sourceLabel(source)}</span>
+                        </a>
+                      )}
                     </li>
                   ))}
                 </ul>

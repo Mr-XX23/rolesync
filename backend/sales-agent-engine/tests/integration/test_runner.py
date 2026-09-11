@@ -141,7 +141,7 @@ async def test_a_decision_that_was_never_resumed_is_picked_up_by_the_sweep(make_
     container = await make_container(registry=stub_registry(effects), graph_factory=_graph_for)
     ctx = await start_run(container, tenant_id, user_id, {"outcomes": []})
     await settle_runs(container)
-    assert await container.runner.sweep() == {"recovered": [], "resumed": []}  # still waiting on a human
+    assert await container.runner.sweep() == {"expired": [], "recovered": [], "resumed": []}  # still waiting on a human
 
     # The decision was saved, but the process died before it resumed the run.
     [pending] = await container.pending_actions.list_for_user(tenant_id=tenant_id, user_id=user_id)
@@ -151,10 +151,10 @@ async def test_a_decision_that_was_never_resumed_is_picked_up_by_the_sweep(make_
     swept = await container.runner.sweep()
     await settle_runs(container)
 
-    assert swept == {"recovered": [], "resumed": [ctx.session_id]}
+    assert swept == {"expired": [], "recovered": [], "resumed": [ctx.session_id]}
     assert (await container.sessions.get(ctx.session_id)).status == SessionStatus.DONE
     assert len(effects.sent) == 1
-    assert await container.runner.sweep() == {"recovered": [], "resumed": []}
+    assert await container.runner.sweep() == {"expired": [], "recovered": [], "resumed": []}
 
 
 async def test_an_orphan_that_never_reached_a_checkpoint_fails_with_a_clear_message(make_container, tenant_id, user_id):

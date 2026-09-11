@@ -12,9 +12,9 @@ from typing import Any
 from pydantic import Field
 
 from app.platform.data_pipeline import DataPipelineClient, DataPipelineError
-from app.tools.adapters.common import as_dict, as_list, clip, plural
+from app.tools.adapters.common import as_dict, as_list, clip, pipeline_failure, plural
 from app.tools.registry import ToolDefinition
-from app.tools.types import ToolCategory, ToolFailed, ToolInput, ToolInvocation, ToolKind, ToolOutput, ToolScope
+from app.tools.types import ToolCategory, ToolInput, ToolInvocation, ToolKind, ToolOutput, ToolScope
 
 
 class SearchCatalogArgs(ToolInput):
@@ -37,7 +37,7 @@ def catalog_tools(client: DataPipelineClient) -> list[ToolDefinition]:
             # Ask for extra matches: drafts and retired items are dropped below unless requested.
             found = await client.search_products(ctx.user_id, ctx.tenant_id, args.query, limit=args.max_results * 2)
         except DataPipelineError as exc:
-            raise ToolFailed(str(exc)) from exc
+            raise pipeline_failure(exc) from exc
         items = [
             _item(product, match, include_inactive=args.include_inactive)
             for product, match in found
@@ -53,7 +53,7 @@ def catalog_tools(client: DataPipelineClient) -> list[ToolDefinition]:
         try:
             stock = await asyncio.gather(*(client.availability(ctx.user_id, ctx.tenant_id, sku) for sku in skus))
         except DataPipelineError as exc:
-            raise ToolFailed(str(exc)) from exc
+            raise pipeline_failure(exc) from exc
         items = [_stock(sku, entry, args.quantity) for sku, entry in zip(skus, stock, strict=True)]
         return ToolOutput(data={"items": items}, summary=_stock_summary(items, args.quantity))
 

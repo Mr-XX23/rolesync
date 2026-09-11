@@ -222,3 +222,45 @@ async def test_simple_route_failure_is_raised_and_missing_providers_are_skipped(
     assert (await _run(only_openrouter, Complexity.HIGH))[-1].completion.provider == "openrouter"
     with pytest.raises(ProviderUnavailable):
         await _run(ModelRouter({}, RULES, NoopTracingClient()), Complexity.HIGH)
+
+
+async def test_a_task_that_may_not_call_tools_still_declares_them_but_forbids_calls():
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        chunks = _sse({"model": "m", "choices": [{"delta": {"content": "Here is what happened."}, "finish_reason": "stop"}]}, "[DONE]")
+        return httpx.Response(200, content=chunks, headers={"content-type": "text/event-stream"})
+
+    tools = (ToolSpec("send_email", "Send", {"type": "object", "properties": {}}),)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        provider = OpenRouterProvider(api_key="k", http=http)
+        task = TaskSpec(purpose="plan", messages=_history(), tools=tools, allow_tool_calls=False)
+        [e async for e in provider.stream(task, ["m"])]
+    assert captured["body"]["tools"][0]["function"]["name"] == "send_email"
+    assert captured["body"]["tool_choice"] == "none"
+
+    # Gemini: the same through its function-calling mode.
+    from google.genai import types
+
+    from app.models.providers import gemini_provider
+
+    seen: dict = {}
+
+    class Models:
+        async def generate_content_stream(self, *, model, contents, config):
+            seen["config"] = config
+
+            async def chunks():
+                yield types.GenerateContentResponse(
+                    candidates=[types.Candidate(content=types.Content(role="model", parts=[types.Part(text="Done.")]))]
+                )
+
+            return chunks()
+
+    provider = gemini_provider.GeminiProvider.__new__(gemini_provider.GeminiProvider)
+    provider._client = type("Client", (), {"aio": type("Aio", (), {"models": Models()})()})()
+    [e async for e in provider.stream(TaskSpec(purpose="plan", messages=_history(), tools=tools, allow_tool_calls=False), ["g"])]
+    assert seen["config"].tool_config.function_calling_config.mode == types.FunctionCallingConfigMode.NONE
+    [e async for e in provider.stream(TaskSpec(purpose="plan", messages=_history(), tools=tools), ["g"])]
+    assert seen["config"].tool_config is None

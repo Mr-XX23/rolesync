@@ -6,6 +6,7 @@ from typing import Annotated, Any
 
 from pydantic import Field, StringConstraints
 
+from app.core.context import AgentContext
 from app.platform.composio_client import ConnectorClient, ConnectorOutcomeUnknown
 from app.tools.adapters.common import as_dict, as_list, clip, connection_required, plural, run_connector
 from app.tools.registry import ToolDefinition
@@ -43,6 +44,19 @@ class SearchEmailsArgs(ToolInput):
 
 class ReadEmailThreadArgs(ToolInput):
     thread_id: str = Field(min_length=1, max_length=100, description="thread_id from search_emails")
+
+
+async def _email_preview(ctx: AgentContext, args: ToolInput) -> dict[str, Any]:
+    assert isinstance(args, SendEmailArgs)
+    return {
+        "kind": "email",
+        "to": args.to,
+        "cc": args.cc,
+        "bcc": args.bcc,
+        "subject": args.subject,
+        "body": args.body,
+        "is_html": args.is_html,
+    }
 
 
 def gmail_tools(connector: ConnectorClient) -> list[ToolDefinition]:
@@ -127,15 +141,7 @@ def gmail_tools(connector: ConnectorClient) -> list[ToolDefinition]:
             irreversible=True,  # a sent email cannot be recalled, so there is no undo action
             timeout_seconds=60,
             acl=require_gmail,
-            preview=lambda args: {
-                "kind": "email",
-                "to": args.to,
-                "cc": args.cc,
-                "bcc": args.bcc,
-                "subject": args.subject,
-                "body": args.body,
-                "is_html": args.is_html,
-            },
+            preview=_email_preview,
         ),
         ToolDefinition(
             name="search_emails",

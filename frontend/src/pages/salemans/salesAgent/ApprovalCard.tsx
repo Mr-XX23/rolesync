@@ -1,8 +1,10 @@
 import React, { useState } from 'react';
-import { Check, Clock, Mail, Pencil, ShieldCheck, X } from 'lucide-react';
+import { Check, Clock, Pencil, X } from 'lucide-react';
 import { Button } from '../../../components/common/Button';
 import type { Decision } from '../../../api/salesAgentApi';
 import type { ApprovalCardModel } from './chatState';
+import { describeKind, previewKind } from './approvalKinds';
+import { PreviewBody, UndoPreview } from './ApprovalPreview';
 
 interface ApprovalCardProps {
   card: ApprovalCardModel;
@@ -33,7 +35,10 @@ function expiresLabel(expiresAt: string): string {
 }
 
 export const ApprovalCard: React.FC<ApprovalCardProps> = ({ card, busy, onDecide }) => {
-  const isEmail = card.preview.kind === 'email' || card.tool === 'send_email';
+  const kind = previewKind(card);
+  const isEmail = kind === 'email';
+  const isUndo = kind === 'undo';
+  const { title, approve, icon: Icon } = describeKind(card);
   const [mode, setMode] = useState<'view' | 'edit' | 'reject'>('view');
   const [note, setNote] = useState('');
   const [to, setTo] = useState(asList(card.args.to).join(', '));
@@ -42,14 +47,30 @@ export const ApprovalCard: React.FC<ApprovalCardProps> = ({ card, busy, onDecide
   const [body, setBody] = useState(String(card.args.body ?? ''));
   const [json, setJson] = useState(JSON.stringify(card.args, null, 2));
   const [jsonError, setJsonError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(() => new Set(asList(card.args.action_ids)));
 
   const resolved = card.status !== 'PENDING' ? RESOLVED_LABEL[card.status] : null;
+
+  const toggle = (actionId: string) =>
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(actionId)) {
+        next.delete(actionId);
+      } else {
+        next.add(actionId);
+      }
+      return next;
+    });
 
   const submitEdit = () => {
     if (isEmail) {
       onDecide(card, 'edit', {
         args: { ...card.args, to: splitAddresses(to), cc: splitAddresses(cc), subject, body },
       });
+      return;
+    }
+    if (isUndo) {
+      onDecide(card, 'edit', { args: { ...card.args, action_ids: [...selected] } });
       return;
     }
     try {
@@ -65,20 +86,20 @@ export const ApprovalCard: React.FC<ApprovalCardProps> = ({ card, busy, onDecide
       <div className="flex items-center justify-between gap-3 px-5 py-3 border-b border-border/60 bg-primary/5">
         <div className="flex items-center gap-2.5 min-w-0">
           <div className="w-8 h-8 rounded-lg bg-primary/15 text-primary flex items-center justify-center shrink-0">
-            {isEmail ? <Mail className="w-4 h-4" /> : <ShieldCheck className="w-4 h-4" />}
+            <Icon className="w-4 h-4" />
           </div>
           <div className="min-w-0">
-            <p className="text-sm font-bold text-foreground truncate">
-              {isEmail ? 'Send this email?' : `Allow ${card.tool}?`}
-            </p>
+            <p className="text-sm font-bold text-foreground truncate">{title}</p>
             <p className="text-[11px] text-muted-foreground truncate">
-              {card.reason ?? 'The agent paused for your approval before acting.'}
+              {isUndo
+                ? 'An action didn’t go through. Nothing is undone unless you say so.'
+                : card.reason ?? 'The agent paused for your approval before acting.'}
             </p>
           </div>
         </div>
         {resolved ? (
           <span className={`text-[10px] font-mono font-bold uppercase tracking-wider border px-2.5 py-0.5 rounded-full ${resolved.tone}`}>
-            {resolved.label}
+            {isUndo && card.status === 'REJECTED' ? 'Kept' : resolved.label}
           </span>
         ) : (
           <span className="flex items-center gap-1 text-[11px] text-muted-foreground font-mono shrink-0">
@@ -104,28 +125,18 @@ export const ApprovalCard: React.FC<ApprovalCardProps> = ({ card, busy, onDecide
               <textarea className={`${inputClass} min-h-40 resize-y`} value={body} onChange={(e) => setBody(e.target.value)} />
             </Field>
           </div>
+        ) : mode === 'edit' && isUndo ? (
+          <UndoPreview preview={card.preview} selected={selected} onToggle={toggle} />
         ) : mode === 'edit' ? (
           <Field label="Arguments (JSON)">
             <textarea className={`${inputClass} min-h-40 font-mono text-xs`} value={json} onChange={(e) => setJson(e.target.value)} />
             {jsonError && <p className="text-xs text-destructive mt-1">{jsonError}</p>}
           </Field>
-        ) : isEmail ? (
-          <div className="space-y-2 text-sm">
-            <PreviewRow label="To" value={asList(card.preview.to).join(', ')} />
-            {asList(card.preview.cc).length > 0 && <PreviewRow label="Cc" value={asList(card.preview.cc).join(', ')} />}
-            {asList(card.preview.bcc).length > 0 && <PreviewRow label="Bcc" value={asList(card.preview.bcc).join(', ')} />}
-            <PreviewRow label="Subject" value={String(card.preview.subject ?? '')} />
-            <div className="mt-2 rounded-xl border border-border/60 bg-background/60 px-4 py-3 text-sm text-foreground whitespace-pre-wrap max-h-72 overflow-y-auto leading-relaxed">
-              {String(card.preview.body ?? '')}
-            </div>
-          </div>
         ) : (
-          <pre className="rounded-xl border border-border/60 bg-background/60 p-3 text-xs overflow-x-auto">
-            {JSON.stringify(card.preview, null, 2)}
-          </pre>
+          <PreviewBody card={card} />
         )}
 
-        {mode === 'reject' && (
+        {mode === 'reject' && !isUndo && (
           <Field label="What should change? (optional)">
             <input
               className={inputClass}
@@ -141,14 +152,20 @@ export const ApprovalCard: React.FC<ApprovalCardProps> = ({ card, busy, onDecide
         <div className="flex flex-wrap items-center justify-end gap-2 px-5 py-3 border-t border-border/60 bg-muted/20">
           {mode === 'view' && (
             <>
-              <Button variant="outline" className="px-3.5 py-2 text-xs" disabled={busy} onClick={() => setMode('reject')} icon={<X className="w-3.5 h-3.5" />}>
-                Reject
+              <Button
+                variant="outline"
+                className="px-3.5 py-2 text-xs"
+                disabled={busy}
+                onClick={() => (isUndo ? onDecide(card, 'reject') : setMode('reject'))}
+                icon={<X className="w-3.5 h-3.5" />}
+              >
+                {isUndo ? 'Keep them' : 'Reject'}
               </Button>
               <Button variant="outline" className="px-3.5 py-2 text-xs" disabled={busy} onClick={() => setMode('edit')} icon={<Pencil className="w-3.5 h-3.5" />}>
-                Edit
+                {isUndo ? 'Choose' : 'Edit'}
               </Button>
               <Button className="px-4 py-2 text-xs w-auto" isLoading={busy} loadingText="Approving" onClick={() => onDecide(card, 'approve')} icon={<Check className="w-3.5 h-3.5" />}>
-                {isEmail ? 'Approve & send' : 'Approve'}
+                {approve}
               </Button>
             </>
           )}
@@ -157,8 +174,15 @@ export const ApprovalCard: React.FC<ApprovalCardProps> = ({ card, busy, onDecide
               <Button variant="outline" className="px-3.5 py-2 text-xs" disabled={busy} onClick={() => setMode('view')}>
                 Cancel
               </Button>
-              <Button className="px-4 py-2 text-xs w-auto" isLoading={busy} loadingText="Sending" onClick={submitEdit} icon={<Check className="w-3.5 h-3.5" />}>
-                {isEmail ? 'Send edited email' : 'Approve edited'}
+              <Button
+                className="px-4 py-2 text-xs w-auto"
+                isLoading={busy}
+                loadingText="Sending"
+                disabled={isUndo && selected.size === 0}
+                onClick={submitEdit}
+                icon={<Check className="w-3.5 h-3.5" />}
+              >
+                {isEmail ? 'Send edited email' : isUndo ? `Undo ${selected.size} selected` : 'Approve edited'}
               </Button>
             </>
           )}
@@ -186,11 +210,4 @@ const Field: React.FC<{ label: string; children: React.ReactNode }> = ({ label, 
     <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-muted-foreground">{label}</span>
     {children}
   </label>
-);
-
-const PreviewRow: React.FC<{ label: string; value: string }> = ({ label, value }) => (
-  <div className="flex gap-3">
-    <span className="w-16 shrink-0 text-[10px] font-mono font-bold uppercase tracking-wider text-muted-foreground pt-0.5">{label}</span>
-    <span className="text-foreground break-words min-w-0">{value}</span>
-  </div>
 );

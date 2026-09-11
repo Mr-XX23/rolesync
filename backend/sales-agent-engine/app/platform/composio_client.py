@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import tempfile
 import time
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -67,3 +69,26 @@ class ConnectorClient:
         if not response.get("successful"):
             raise ConnectorError(f"{slug} failed: {str(response.get('error') or 'unknown error')[:300]}")
         return dict(response.get("data") or {})
+
+    async def stage_file(self, *, slug: str, filename: str, content: bytes, mimetype: str) -> dict[str, str]:
+        """Upload file bytes for a tool's file input (e.g. ``GOOGLEDRIVE_UPLOAD_FILE``) and return the
+        ``{name, mimetype, s3key}`` descriptor to pass as that argument. Nothing reaches the
+        user's account until the tool itself runs."""
+        toolkit = slug.split("_", 1)[0].lower()
+
+        def stage() -> dict[str, str]:
+            from composio.core.models._files import FileUploadable
+
+            # Only this private folder may be read by the SDK's uploader.
+            with tempfile.TemporaryDirectory(prefix="rolesync-upload-") as folder:
+                path = Path(folder) / filename
+                path.write_bytes(content)
+                staged = FileUploadable.from_path(
+                    self._sdk.client, path, slug, toolkit, file_upload_allowlist=[Path(folder)]
+                )
+                return {"name": staged.name, "mimetype": mimetype or staged.mimetype, "s3key": staged.s3key}
+
+        try:
+            return await asyncio.to_thread(stage)
+        except Exception as exc:
+            raise ConnectorError(f"could not prepare {filename} for upload: {type(exc).__name__}: {str(exc)[:200]}") from exc

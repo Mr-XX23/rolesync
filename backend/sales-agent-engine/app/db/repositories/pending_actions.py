@@ -109,6 +109,25 @@ class PendingActionRepository:
         async with self._sm.begin() as db:
             return (await db.scalars(stmt)).one_or_none()
 
+    async def expire_due(self, *, limit: int = 200) -> list[PendingAction]:
+        """Mark PENDING actions whose TTL has passed as EXPIRED (across tenants: this is the
+        maintenance worker). Returns the rows it expired; a concurrent decision wins the race."""
+        due = (
+            select(PendingAction.id)
+            .where(PendingAction.status == PendingActionStatus.PENDING, PendingAction.expires_at <= func.now())
+            .order_by(PendingAction.expires_at)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+        stmt = (
+            update(PendingAction)
+            .where(PendingAction.id.in_(due.scalar_subquery()), PendingAction.status == PendingActionStatus.PENDING)
+            .values(status=PendingActionStatus.EXPIRED, resolved_at=func.now())
+            .returning(PendingAction)
+        )
+        async with self._sm.begin() as db:
+            return list((await db.scalars(stmt)).all())
+
     async def latest_decision_if_settled(self, *, tenant_id: UUID, session_id: UUID) -> PendingAction | None:
         """The most recently decided action of a session, but only if none is still PENDING:
         a paused session in that state was decided and never resumed."""

@@ -98,6 +98,9 @@ class TaskSpec:
     # Answer from a live web search (Google Search grounding). Only some providers can;
     # such a task cannot also declare tools.
     web_grounded: bool = False
+    # False: the tools stay declared (the history may contain calls to them) but the model must
+    # answer in text. Providers pass it on as a "no function calls" tool choice.
+    allow_tool_calls: bool = True
 
     def __post_init__(self) -> None:
         if self.web_grounded and self.tools:

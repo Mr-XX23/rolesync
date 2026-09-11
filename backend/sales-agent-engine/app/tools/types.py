@@ -24,6 +24,7 @@ class ToolScope(StrEnum):
     CATALOG = "CATALOG"  # catalog + inventory writes, reservations
     DOCUMENT = "DOCUMENT"  # document generation, drive / KB storage, quotes
     CRM = "CRM"  # deal records
+    COMPENSATION = "COMPENSATION"  # undoing completed actions (the coordinator only)
 
 
 class ToolCategory(StrEnum):
@@ -46,6 +47,22 @@ class ToolInvocation:
     agent_name: str
     call_id: str
     args: ToolInput
+    pending_action_id: UUID | None = None  # the approval this write runs under, if any
+
+
+@dataclass(frozen=True, slots=True)
+class UndoPlan:
+    """How to reverse a completed write, decided by its handler from what actually happened
+    (the created event's id, the stock level before the change, ...)."""
+
+    args: dict[str, Any]  # JSON-serializable input for the tool's undo handler
+    label: str  # what undoing does, for the rep: "Delete the calendar event 'Demo with Acme'"
+
+
+@dataclass(frozen=True, slots=True)
+class UndoInvocation:
+    ctx: AgentContext
+    args: dict[str, Any]  # an ``UndoPlan.args`` recorded by this tool's handler, never model input
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,7 +72,8 @@ class ToolOutput:
     data: Any
     summary: str
     ref_id: str | None = None  # id of the created side effect, kept on the saga step
-    sources: tuple[SourceLink, ...] = ()  # where a read's facts came from, for citations and the UI
+    sources: tuple[SourceLink, ...] = ()  # where a read's facts came from, or links to what a write created
+    undo: UndoPlan | None = None  # writes that can be reversed
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +102,8 @@ class ToolResult:
     # the model proposed, and records of the action must reflect what really happened.
     executed_args: dict[str, Any] | None = None
     sources: tuple[SourceLink, ...] = ()
+    action_id: UUID | None = None  # the saga step of an executed write (what ``undo_actions`` takes)
+    undoable: bool = False
 
     def for_model(self) -> dict[str, Any]:
         """The payload an LLM sees as the tool response."""
@@ -94,6 +114,9 @@ class ToolResult:
             payload["data"] = self.data
         if self.sources:
             payload["sources"] = [source.to_dict() for source in self.sources]
+        if self.action_id is not None:
+            payload["action_id"] = str(self.action_id)
+            payload["undoable"] = self.undoable
         if self.error:
             payload["error"] = self.error
         return payload
@@ -109,7 +132,12 @@ class ToolInputError(Exception):
 
 class ToolFailed(Exception):
     """Raised by a handler for an expected failure (e.g. an upstream service said no); the
-    message is safe to show to the agent and the user."""
+    message is safe to show to the agent and the user. ``retryable`` marks transient failures
+    (no answer, 5xx, rate limits): the executor retries those for reads and undo steps."""
+
+    def __init__(self, message: str = "", *, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 class ToolOutcomeUnknown(Exception):

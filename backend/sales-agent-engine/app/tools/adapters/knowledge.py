@@ -16,9 +16,9 @@ from typing import Any
 from pydantic import Field
 
 from app.platform.data_pipeline import DataPipelineClient, DataPipelineError
-from app.tools.adapters.common import clip, plural
+from app.tools.adapters.common import clip, pipeline_failure, plural
 from app.tools.registry import ToolDefinition
-from app.tools.types import ToolCategory, ToolFailed, ToolInput, ToolInputError, ToolInvocation, ToolKind, ToolOutput, ToolScope
+from app.tools.types import ToolCategory, ToolInput, ToolInputError, ToolInvocation, ToolKind, ToolOutput, ToolScope
 
 CATEGORIES = (
     "BATTLECARD",
@@ -76,7 +76,7 @@ def knowledge_tools(client: DataPipelineClient) -> list[ToolDefinition]:
         try:
             documents = await client.list_documents(ctx.user_id, ctx.tenant_id, category=category)
         except DataPipelineError as exc:
-            raise ToolFailed(str(exc)) from exc
+            raise pipeline_failure(exc) from exc
 
         # Newest first when nothing in the metadata matches: their text may still.
         ranked = sorted(
@@ -103,7 +103,7 @@ def knowledge_tools(client: DataPipelineClient) -> list[ToolDefinition]:
         try:
             body = await client.document_text(ctx.user_id, ctx.tenant_id, args.doc_id)
         except DataPipelineError as exc:
-            raise ToolFailed(str(exc)) from exc
+            raise pipeline_failure(exc) from exc
         if body is None:
             raise ToolInputError(f"the workspace's knowledge base has no document '{args.doc_id}'")
         text = body.get("full_text") if isinstance(body.get("full_text"), str) else ""

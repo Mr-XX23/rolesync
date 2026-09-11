@@ -443,13 +443,13 @@ async def upload_document(
     target_competitor: Optional[str] = Form(default=None),
     access: WorkspaceAccess = Depends(require_workspace_member),
 ):
-    """Uploads a single file (PDF, CSV, TXT, DOCX, MD, JSON), validates <=25MB, runs SalesClassifier, and processes chunks via ParserService and BatchIngestionPipeline."""
+    """Uploads a single file (PDF, CSV, TXT, DOCX, PPTX, XLSX, MD, JSON), validates <=25MB, runs SalesClassifier, and processes chunks via ParserService and BatchIngestionPipeline."""
     require_writer(access)
     filename = file.filename or "uploaded_file"
     file_ext = filename.split(".")[-1].upper() if "." in filename else "FILE"
 
     # Enforce supported extensions
-    allowed_exts = {"PDF", "CSV", "TXT", "DOCX", "MD", "JSON", "TSV", "YAML", "YML"}
+    allowed_exts = {"PDF", "CSV", "TXT", "DOCX", "PPTX", "XLSX", "MD", "JSON", "TSV", "YAML", "YML"}
     if file_ext not in allowed_exts:
         raise HTTPException(
             status_code=400,

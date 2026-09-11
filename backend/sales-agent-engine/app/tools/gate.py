@@ -6,15 +6,17 @@ Pipeline (implementation-plan §4):
  3. argument validation, then the tool's resource ACL
  4. WRITE only:
     - already executed under this idempotency key → return the prior result
-    - INTERACTIVE → ``pending_action`` + ``awaiting_approval`` event + durable pause
+    - INTERACTIVE → preview + ``pending_action`` + ``awaiting_approval`` event + durable pause
     - AUTONOMOUS  → autonomy policy: inside the envelope → act; outside → the same human path
-    - saga step recorded *before* the side effect
- 5. execute under the executor (timeout; retry/circuit breaker join in Phase 3)
+    - saga step recorded *before* the side effect (with the request's turn); how to undo it is
+      recorded with the result, since only the handler knows what it created
+ 5. execute under the executor (timeout, retries for transient read failures, circuit breaker)
  6. an ``agent.audit`` row for every outcome, including refusals
  7. the result goes back to the calling agent
 
 Re-execution: a graph node that resumes after an approval runs again from the top, so
-everything before the pause is a lookup keyed by ``{session_id}:{call_id}``.
+everything before the pause is a lookup keyed by ``{session_id}:{call_id}``. What runs after
+an approval is exactly what was approved: the stored arguments, or the reviewer's edit.
 """
 
 from __future__ import annotations
@@ -174,6 +176,7 @@ class ToolGate:
 
         prior = await self._ledger.find_executed(tenant_id=ctx.tenant_id, idempotency_key=key)
         if prior is not None:
+            step = await self._ledger.find_step(tenant_id=ctx.tenant_id, idempotency_key=key)
             return ToolResult(
                 ok=True,
                 tool=definition.name,
@@ -184,6 +187,8 @@ class ToolGate:
                 pending_action_id=prior.pending_action_id,
                 duplicate=True,
                 executed_args=prior.args,
+                action_id=step.id if step is not None else None,
+                undoable=step is not None and step.undo_action is not None,
             )
 
         pending = await self._pending.get_by_key(tenant_id=ctx.tenant_id, idempotency_key=key)
@@ -203,6 +208,16 @@ class ToolGate:
             reason = decision.reason
 
         if pending is None:
+            try:
+                preview = await definition.build_preview(ctx, parsed)
+            except Exception as exc:
+                if is_control_flow_signal(exc):
+                    raise
+                outcome, message = _classify_failure(exc, definition)
+                if outcome is ToolOutcome.UNKNOWN or isinstance(exc, TimeoutError):
+                    outcome = ToolOutcome.FAILED  # nothing has run yet
+                message = f"could not prepare '{definition.name}' for approval: {message}"
+                return await self._refuse(ctx, agent_name, definition.name, parsed.model_dump(mode="json"), call_id, outcome, message)
             pending, created = await self._pending.get_or_create(
                 tenant_id=ctx.tenant_id,
                 session_id=ctx.session_id,
@@ -210,7 +225,7 @@ class ToolGate:
                 agent=agent_name,
                 tool=definition.name,
                 args=parsed.model_dump(mode="json"),
-                preview=definition.build_preview(parsed),
+                preview=to_jsonable_python(preview, fallback=str),
                 expires_at=utcnow() + self._approval_ttl,
             )
             if created:
@@ -255,15 +270,15 @@ class ToolGate:
             return await self._refuse(
                 ctx, agent_name, definition.name, decided.args, call_id, ToolOutcome.EXPIRED, message, decided.id
             )
-        if status is PendingActionStatus.EDITED:
-            try:
-                parsed = definition.input_model.model_validate(decided.edited_args or {})
-            except ValidationError as exc:
-                message = f"edited arguments are invalid: {describe_validation_error(exc)}"
-                return await self._refuse(
-                    ctx, agent_name, definition.name, decided.edited_args or {}, call_id, ToolOutcome.INVALID,
-                    message, decided.id,
-                )
+        approved_args = (decided.edited_args or {}) if status is PendingActionStatus.EDITED else decided.args
+        try:
+            parsed = definition.input_model.model_validate(approved_args)
+        except ValidationError as exc:
+            what = "edited arguments" if status is PendingActionStatus.EDITED else "approved arguments"
+            message = f"{what} are invalid: {describe_validation_error(exc)}"
+            return await self._refuse(
+                ctx, agent_name, definition.name, approved_args, call_id, ToolOutcome.INVALID, message, decided.id
+            )
         return await self._execute_write(ctx, agent_name, definition, parsed, call_id, key, decided.id)
 
     async def _execute_write(
@@ -281,8 +296,8 @@ class ToolGate:
             tenant_id=ctx.tenant_id,
             session_id=ctx.session_id,
             action=definition.name,
-            undo_action=definition.build_undo(parsed),
             idempotency_key=key,
+            turn=ctx.turn,
         )
         if not created:
             if step.status == SagaStatus.PENDING:
@@ -300,7 +315,9 @@ class ToolGate:
 
         started = time.monotonic()
         try:
-            output = await self._executor.run(definition, ToolInvocation(ctx, agent_name, call_id, parsed))
+            output = await self._executor.run(
+                definition, ToolInvocation(ctx, agent_name, call_id, parsed, pending_action_id=pending_action_id)
+            )
         except Exception as exc:
             if is_control_flow_signal(exc):
                 raise
@@ -331,6 +348,16 @@ class ToolGate:
             )
 
         data = to_jsonable_python(output.data, fallback=str)
+        undo_action = None
+        if output.undo is not None:
+            if definition.undo_handler is None:
+                logger.warning("tool %s returned an undo plan but has no undo handler; ignoring it", definition.name)
+            else:
+                undo_action = {
+                    "tool": definition.name,
+                    "args": to_jsonable_python(output.undo.args, fallback=str),
+                    "label": output.undo.label,
+                }
         await self._ledger.complete_write(
             AuditFields(
                 tenant_id=ctx.tenant_id,
@@ -348,11 +375,16 @@ class ToolGate:
             ),
             step_id=step.id,
             ref_id=output.ref_id,
+            undo_action=undo_action,
         )
-        await self._emit_result(ctx, call_id, agent_name, definition.name, ToolOutcome.EXECUTED, summary=output.summary)
+        await self._emit_result(
+            ctx, call_id, agent_name, definition.name, ToolOutcome.EXECUTED, summary=output.summary,
+            sources=output.sources,
+        )
         return ToolResult(
             ok=True, tool=definition.name, call_id=call_id, outcome=ToolOutcome.EXECUTED, data=data,
             summary=output.summary, pending_action_id=pending_action_id, executed_args=args_json,
+            sources=output.sources, action_id=step.id, undoable=undo_action is not None,
         )
 
     # ------------------------------------------------------------------ reads

@@ -1,12 +1,21 @@
-"""The orchestrator: sole coordinator of a session (implementation-plan §0.4, §10 Phase 1).
+"""The orchestrator: sole coordinator of a session (implementation-plan §0.4, §10 Phases 1–3).
 
     plan ──(tool calls?)──► act ──(more calls?)──► act ─ … ─► plan ─ … ─► END
+                             │
+                             └─(a write failed after others succeeded)──► compensate ──► plan
 
 - ``plan`` asks the model router for the next step and streams its tokens to the session.
 - ``act`` runs pending tool calls through the Tool Gate: ONE write per super-step, so a
   run that pauses for approval resumes by re-running only that call (the gate turns the
   re-run into a lookup, see ``langgraph_runtime``). Consecutive reads can't pause and have
-  no side effects, so they run together in one step.
+  no side effects, so they run together in one step. When a write doesn't go through, the
+  rest of that step's calls are skipped so the model re-plans with what actually happened.
+- ``compensate`` runs when a write FAILED, gave no answer, or its approval expired while
+  earlier actions of the same request had completed: it proposes ``undo_actions`` for those
+  actions, which pauses for the rep like any write (nothing is undone without their OK).
+- Guardrails: per-turn limits on model steps, tool calls and tokens, and loop detection,
+  checked before each model call and before running what the model asked for. A breach
+  ends the turn HALTED with an explanation instead of spinning.
 """
 
 from __future__ import annotations
@@ -16,13 +25,18 @@ import json
 import logging
 import operator
 import time
+from datetime import datetime
 from typing import Annotated, Any, TypedDict
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.core.clock import utcnow
 from app.core.context import AgentContext
 from app.core.enums import ToolOutcome
 from app.engine.events import EventEmitter, EventType, emit_best_effort
-from app.engine.workspace_record import WorkspaceRecorder
+from app.engine.guardrails.budgets import TenantBudgets
+from app.engine.guardrails.limits import Halt, TurnLimits, check_before_step, check_calls
+from app.engine.guardrails.saga import UNDO_TOOL, Compensator
+from app.engine.workspace_record import WorkspaceRecorder, describe_action
 from app.models.router import ModelRouter
 from app.models.types import (
     Completion,
@@ -34,6 +48,7 @@ from app.models.types import (
     StreamRestart,
     TaskSpec,
     TextDelta,
+    ToolCall,
     ToolSpec,
 )
 from app.platform.langgraph_runtime import END, GraphSpec, current_context, is_control_flow_signal
@@ -49,12 +64,18 @@ SYSTEM_PROMPT = """You are RoleSync's sales assistant. You work for one sales re
 
 How to work:
 - Use the tools to take action. Never say an action happened unless its tool result has outcome EXECUTED.
-- Actions that affect the outside world (such as sending email) automatically pause for the rep's approval.
-  Call the tool directly with complete, final content; do not ask for permission in chat first.
+- Actions that change anything outside this chat (email, calendar invites, Slack messages, Notion pages, documents,
+  quotes, catalog and stock changes) automatically pause for the rep's approval. Call the tool directly with
+  complete, final content; do not ask for permission in chat first. Run such actions one at a time.
 - If an action is REJECTED, do not retry it unchanged: ask what the rep wants changed.
   If it FAILED or was DENIED, say so briefly and suggest a next step (for example, connecting an app).
 - If an action's outcome is UNKNOWN it may already have happened: never retry it. Tell the rep and ask
   them to check (for email, their Sent folder).
+- When an action fails after others in the same request succeeded, the rep is automatically asked whether to
+  undo the completed ones; the undo_actions result shows what they decided. After that, stop: report what
+  failed and what was undone or kept, and let the rep decide what happens next.
+- Every completed action's result has an action_id. If the rep asks to take something back, call undo_actions
+  with those ids. Sent emails can't be undone.
 
 Research and answers:
 - Reading never needs approval. Before answering questions about prospects, customers, products or the rep's
@@ -64,31 +85,55 @@ Research and answers:
   you used. If something wasn't found, say so instead of guessing.
 - When a source finds nothing, try at most one differently worded search there, then report it as not found.
   Don't retry sources that were DENIED (for example, an app that isn't connected).
-- Prices, discounts and stock come only from the catalog tools.
+- Prices, discounts and stock come only from the catalog tools. Quotes are priced by create_quote from the
+  catalog, within each item's discount limit.
+- Documents and quotes are saved to the rep's Google Drive, or to the workspace knowledge base when Drive isn't
+  available. Share the link from the result.
 
 Write in clear, professional, friendly language. Keep chat replies short unless the rep asks for detail.
 
-Today is {today} (UTC)."""
+{time_context}"""
+
+WRAP_UP_NOTE = """This request stopped because an action didn't go through, and the rep has decided whether to undo
+the actions it had completed (see the undo_actions result). Take no further action in this request: briefly tell
+the rep what failed and what was undone or kept, then ask how they'd like to continue."""
 
 _TOKEN_FLUSH_CHARS = 64
 _TOKEN_FLUSH_SECONDS = 0.1
+_COMPENSATE_ON = frozenset({ToolOutcome.FAILED, ToolOutcome.UNKNOWN, ToolOutcome.EXPIRED})
 
 
 class OrchestratorState(TypedDict, total=False):
     messages: Annotated[list[dict[str, Any]], operator.add]
     pending_calls: list[dict[str, Any]]
-    steps: int
+    steps: int  # model calls this turn
+    tokens: int  # model tokens this turn
+    tool_calls: int  # tool calls requested this turn
+    call_counts: dict[str, int]  # identical-call fingerprints this turn (loop detection)
+    time_zone: str | None  # the rep's IANA time zone, from their browser
     final_answer: str | None
+    halt: dict[str, str] | None  # set when a guardrail stopped the turn
+    rollback: dict[str, Any] | None  # completed actions to offer undoing, set by `act`
+    wrap_up: bool  # after an undo decision: the model may only report back, not act again this turn
 
 
-def turn_input(user_message: str) -> dict[str, Any]:
+def turn_input(user_message: str, *, time_zone: str | None = None) -> dict[str, Any]:
     """Graph input for a new user turn (also resets per-turn bookkeeping)."""
-    return {
+    update: dict[str, Any] = {
         "messages": [Message(role=Role.USER, content=user_message).to_dict()],
         "pending_calls": [],
         "steps": 0,
+        "tokens": 0,
+        "tool_calls": 0,
+        "call_counts": {},
         "final_answer": None,
+        "halt": None,
+        "rollback": None,
+        "wrap_up": False,
     }
+    if time_zone:
+        update["time_zone"] = time_zone
+    return update
 
 
 class Orchestrator:
@@ -101,7 +146,9 @@ class Orchestrator:
         scopes: AgentScopes,
         events: EventEmitter,
         recorder: WorkspaceRecorder,
-        max_steps: int,
+        limits: TurnLimits,
+        compensator: Compensator | None = None,
+        budgets: TenantBudgets | None = None,
     ) -> None:
         self._router = router
         self._gate = gate
@@ -109,45 +156,53 @@ class Orchestrator:
         self._scopes = scopes
         self._events = events
         self._recorder = recorder
-        self._max_steps = max_steps
+        self._limits = limits
+        self._compensator = compensator
+        self._budgets = budgets
 
     def graph_spec(self) -> GraphSpec:
         return GraphSpec(
             state_schema=OrchestratorState,
-            nodes={"plan": self.plan, "act": self.act},
+            nodes={"plan": self.plan, "act": self.act, "compensate": self.compensate},
             entry="plan",
+            edges=[("compensate", "plan")],
             routers=[
                 ("plan", _after_plan, {"act": "act", "end": END}),
-                ("act", _after_act, {"act": "act", "plan": "plan"}),
+                ("act", _after_act, {"act": "act", "plan": "plan", "compensate": "compensate"}),
             ],
         )
 
     async def plan(self, state: dict[str, Any]) -> dict[str, Any]:
         ctx = current_context()
-        steps = int(state.get("steps") or 0) + 1
+        steps_taken = int(state.get("steps") or 0)
+        tokens = int(state.get("tokens") or 0)
         history = state.get("messages") or []
-        if steps > self._max_steps:
-            text = (
-                f"I stopped after {self._max_steps} steps without finishing this request. "
-                "Tell me how you'd like to continue."
-            )
-            return {
-                "messages": [Message(role=Role.ASSISTANT, content=text).to_dict()],
-                "pending_calls": [],
-                "steps": steps,
-                "final_answer": text,
-            }
 
+        halt = check_before_step(self._limits, steps_taken=steps_taken, tokens_used=tokens)
+        if halt is not None:
+            return _halted(halt, steps=steps_taken)
+
+        steps = steps_taken + 1
+        wrap_up = bool(state.get("wrap_up"))
         await emit_best_effort(self._events, ctx.session_id, EventType.STEP_STARTED, {"step": "planning", "number": steps})
+        system = SYSTEM_PROMPT.format(time_context=_time_context(state.get("time_zone")))
         task = TaskSpec(
             purpose="plan",
-            system=SYSTEM_PROMPT.format(today=utcnow().date().isoformat()),
+            system=f"{system}\n\n{WRAP_UP_NOTE}" if wrap_up else system,
             messages=repair_history([Message.from_dict(item) for item in history]),
             tools=self._tool_specs(),
             complexity=Complexity.HIGH,
+            allow_tool_calls=not wrap_up,
         )
         completion = await self._stream(ctx.session_id, task)
+        used = completion.usage.input_tokens + completion.usage.output_tokens
+        if self._budgets is not None:
+            await self._budgets.record_tokens(ctx.tenant_id, used)
         message = completion.message
+        if wrap_up and message.tool_calls:
+            # A model that ignores the "no calls" instruction still can't act again in this request.
+            logger.info("dropping %d tool call(s) after an undo decision in session %s", len(message.tool_calls), ctx.session_id)
+            message = Message(role=Role.ASSISTANT, content=message.content.strip() or _wrap_up_text(history))
         # The gate's idempotency key must be unique per session even if a model reuses its
         # own call ids across turns, so prefix it with the history position (stable on replay).
         position = len(history)
@@ -155,26 +210,89 @@ class Orchestrator:
             {**call.to_dict(), "gate_call_id": f"{position}-{index}-{call.id}"}
             for index, call in enumerate(message.tool_calls)
         ]
-        return {
+        update: dict[str, Any] = {
             "messages": [message.to_dict()],
             "pending_calls": calls,
             "steps": steps,
+            "tokens": tokens + used,
             "final_answer": None if calls else message.content,
         }
+        if not calls:
+            return update
+
+        halt, counts = check_calls(
+            self._limits,
+            calls_made=int(state.get("tool_calls") or 0),
+            seen=state.get("call_counts") or {},
+            calls=[(call["name"], call.get("arguments")) for call in calls],
+        )
+        update |= {"tool_calls": int(state.get("tool_calls") or 0) + len(calls), "call_counts": counts}
+        if halt is not None:
+            # Answer every requested call so the history stays well-formed for the next turn.
+            skipped = [_skipped_reply(call, "not run: the request was stopped by a safety limit").to_dict() for call in calls]
+            stopped = _halted(halt, steps=steps)
+            return update | stopped | {"messages": [message.to_dict(), *skipped, *stopped["messages"]]}
+        return update
 
     async def act(self, state: dict[str, Any]) -> dict[str, Any]:
         ctx = current_context()
         pending = state["pending_calls"]
         batch = self._next_batch(pending)
-        replies = await asyncio.gather(*(self._run_call(ctx, call) for call in batch))
-        return {"messages": [reply.to_dict() for reply in replies], "pending_calls": pending[len(batch) :]}
+        outcomes = await asyncio.gather(*(self._run_call(ctx, call) for call in batch))
+        update: dict[str, Any] = {
+            "messages": [reply.to_dict() for reply, _ in outcomes],
+            "pending_calls": pending[len(batch) :],
+        }
+
+        failed = next(
+            (
+                (call, result)
+                for call, (_, result) in zip(batch, outcomes, strict=True)
+                if self._is_write(call["name"]) and result.outcome is not ToolOutcome.EXECUTED
+            ),
+            None,
+        )
+        if failed is None:
+            return update
+
+        call, result = failed
+        remaining = pending[len(batch) :]
+        if remaining:
+            reason = f"not run: '{call['name']}' did not go through ({result.outcome.value}), so the plan needs another look"
+            update["messages"] += [_skipped_reply(item, reason).to_dict() for item in remaining]
+            update["pending_calls"] = []
+        if result.outcome in _COMPENSATE_ON and call["name"] != UNDO_TOOL and self._compensator is not None:
+            completed = await self._compensator.undoable_in_turn(ctx)
+            if completed:
+                detail = result.error or result.outcome.value.lower()
+                action, _ = describe_action(call["name"], result.executed_args or call.get("arguments"))
+                update["rollback"] = {
+                    "action_ids": [str(step.id) for step in completed],
+                    "reason": f"{action} didn't go through: {detail}"[:500],
+                }
+        return update
+
+    async def compensate(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Offer to undo the request's completed actions. The arguments come from checkpointed
+        state, so a run resumed after the rep's decision executes exactly what they approved."""
+        ctx = current_context()
+        rollback = state.get("rollback") or {}
+        history = state.get("messages") or []
+        position = len(history)
+        arguments = {"action_ids": list(rollback.get("action_ids") or []), "reason": str(rollback.get("reason") or "")}
+        model_call_id = f"undo_{position}"
+        await emit_best_effort(self._events, ctx.session_id, EventType.STEP_STARTED, {"step": "offering to undo"})
+        call = {"id": model_call_id, "name": UNDO_TOOL, "arguments": arguments, "gate_call_id": f"{position}-0-undo"}
+        reply, _ = await self._run_call(ctx, call)
+        proposal = Message(role=Role.ASSISTANT, content="", tool_calls=(ToolCall(id=model_call_id, name=UNDO_TOOL, arguments=arguments),))
+        # Whatever the rep decided, this request is over: the model reports back and they choose what's next.
+        return {"messages": [proposal.to_dict(), reply.to_dict()], "rollback": None, "wrap_up": True}
 
     def _next_batch(self, pending: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """The next call alone, or, if it is a read, it and the reads directly after it."""
         batch: list[dict[str, Any]] = []
         for call in pending:
-            definition = self._registry.get(call["name"])
-            is_read = definition is not None and definition.kind is ToolKind.READ
+            is_read = not self._is_write(call["name"])
             if batch and not is_read:
                 break
             batch.append(call)
@@ -182,7 +300,11 @@ class Orchestrator:
                 break
         return batch
 
-    async def _run_call(self, ctx: AgentContext, call: dict[str, Any]) -> Message:
+    def _is_write(self, name: str) -> bool:
+        definition = self._registry.get(name)
+        return definition is not None and definition.kind is ToolKind.WRITE
+
+    async def _run_call(self, ctx: AgentContext, call: dict[str, Any]) -> tuple[Message, ToolResult]:
         arguments = call.get("arguments") or {}
         try:
             result = await self._gate.call_tool(ctx, AGENT_NAME, call["name"], arguments, call_id=call["gate_call_id"])
@@ -199,8 +321,7 @@ class Orchestrator:
                 error=f"internal error while running '{call.get('name')}'; it may not have completed",
             )
 
-        definition = self._registry.get(call["name"])
-        if definition is not None and definition.kind is ToolKind.WRITE:
+        if self._is_write(call["name"]):
             await self._recorder.action_finished(
                 ctx,
                 idempotency_key=f"{ctx.session_id}:{call['gate_call_id']}",
@@ -209,7 +330,8 @@ class Orchestrator:
                 args=result.executed_args or arguments,  # a reviewer may have edited them
                 result=result,
             )
-        return Message(role=Role.TOOL, content=json.dumps(result.for_model()), tool_call_id=call["id"], name=call["name"])
+        reply = Message(role=Role.TOOL, content=json.dumps(result.for_model()), tool_call_id=call["id"], name=call["name"])
+        return reply, result
 
     def _tool_specs(self) -> tuple[ToolSpec, ...]:
         return tuple(
@@ -279,23 +401,90 @@ def repair_history(messages: list[Message]) -> tuple[Message, ...]:
     return tuple(repaired)
 
 
+def valid_time_zone(name: str | None) -> str | None:
+    """The IANA zone name if it is one this process knows, else ``None``."""
+    if not name:
+        return None
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return None
+    return name
+
+
+def _time_context(time_zone: str | None) -> str:
+    now = utcnow()
+    zone = valid_time_zone(time_zone)
+    if zone is None:
+        return f"Today is {now.date().isoformat()} (UTC). The rep's time zone is unknown: ask before scheduling at a clock time."
+    local: datetime = now.astimezone(ZoneInfo(zone))
+    return (
+        f"It is {local.strftime('%A %Y-%m-%d %H:%M')} in the rep's time zone ({zone}). "
+        "Use that zone for dates and meeting times unless the rep says otherwise."
+    )
+
+
+def _wrap_up_text(history: list[dict[str, Any]]) -> str:
+    """A plain report of the undo decision, for a model that answered with calls instead of words."""
+    for item in reversed(history):
+        if item.get("role") == "tool" and item.get("name") == UNDO_TOOL:
+            try:
+                result = json.loads(item.get("content") or "{}")
+            except json.JSONDecodeError:
+                result = {}
+            detail = result.get("summary") or result.get("error") or str(result.get("outcome", "")).lower()
+            return f"An action didn't go through, so I stopped this request. Undo: {detail}. How would you like to continue?"
+    return "An action didn't go through, so I stopped this request. How would you like to continue?"
+
+
+def _halted(halt: Halt, *, steps: int) -> dict[str, Any]:
+    return {
+        "messages": [Message(role=Role.ASSISTANT, content=halt.message).to_dict()],
+        "pending_calls": [],
+        "steps": steps,
+        "final_answer": halt.message,
+        "halt": halt.to_dict(),
+    }
+
+
+def _skipped_reply(call: dict[str, Any], reason: str) -> Message:
+    return Message(
+        role=Role.TOOL,
+        content=json.dumps({"ok": False, "outcome": "FAILED", "error": reason}),
+        tool_call_id=call["id"],
+        name=call["name"],
+    )
+
+
 def _after_plan(state: dict[str, Any]) -> str:
-    return "act" if state.get("pending_calls") else "end"
+    return "act" if state.get("pending_calls") and not state.get("halt") else "end"
 
 
 def _after_act(state: dict[str, Any]) -> str:
+    if state.get("rollback"):
+        return "compensate"
     return "act" if state.get("pending_calls") else "plan"
 
 
 def _clean_schema(schema: Any) -> Any:
-    """Drop Pydantic's cosmetic ``title`` annotations; models only need the structure.
+    """Drop Pydantic's cosmetic ``title`` annotations and inline its ``$defs`` references:
+    models only need the structure, and not every provider resolves ``$ref``.
     (A *property* named ``title`` maps to a dict, not a string, so it is kept.)"""
-    if isinstance(schema, dict):
-        return {
-            key: _clean_schema(value)
-            for key, value in schema.items()
-            if not (key == "title" and isinstance(value, str))
-        }
-    if isinstance(schema, list):
-        return [_clean_schema(value) for value in schema]
-    return schema
+    definitions = (schema.get("$defs") or {}) if isinstance(schema, dict) else {}
+
+    def clean(node: Any, depth: int) -> Any:
+        if isinstance(node, dict):
+            reference = node.get("$ref")
+            if isinstance(reference, str) and reference.startswith("#/$defs/") and depth < 32:
+                target = definitions.get(reference.removeprefix("#/$defs/"), {})
+                return clean({**target, **{k: v for k, v in node.items() if k != "$ref"}}, depth + 1)
+            return {
+                key: clean(value, depth)
+                for key, value in node.items()
+                if key != "$defs" and not (key == "title" and isinstance(value, str))
+            }
+        if isinstance(node, list):
+            return [clean(value, depth) for value in node]
+        return node
+
+    return clean(schema, 0)

@@ -159,14 +159,16 @@ function applyEvent(state: ChatState, event: AgentEvent): ChatState {
           },
         ],
       };
-    case 'done': {
+    case 'done':
+    case 'halted': {
+      // A halted turn (a safety limit stopped it) ends like a finished one; its answer explains why.
       const answer = String(data.final_answer ?? '').trim();
       const withDraft = next.draft.trim() ? flushDraft(next) : next;
       const lastItem = withDraft.items[withDraft.items.length - 1];
       const needsAnswer = answer && !(lastItem?.kind === 'assistant' && lastItem.text === answer);
       return {
         ...withDraft,
-        status: 'DONE',
+        status: event.type === 'halted' ? 'HALTED' : 'DONE',
         step: null,
         items: needsAnswer ? [...withDraft.items, { kind: 'assistant', text: answer }] : withDraft.items,
         approvals: withDraft.approvals.filter((card) => card.status === 'PENDING'),

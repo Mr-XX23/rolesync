@@ -42,22 +42,31 @@ class WorkspaceDirectory:
         self._ttl = cache_seconds
 
     async def require_member(self, user_id: UUID, tenant_id: UUID) -> None:
-        if tenant_id in await self.workspace_ids(user_id):
-            return
-        if tenant_id not in await self.workspace_ids(user_id, fresh=True):
+        if await self.role_in(user_id, tenant_id) is None:
             raise TenantAccessDenied("you are not a member of this workspace")
 
+    async def role_in(self, user_id: UUID, tenant_id: UUID) -> str | None:
+        """The user's role in the workspace (``OWNER``, ``ADMIN``, ``MEMBER``, ``VIEWER``; ``""`` if
+        workspace-service didn't say), or ``None`` if they are not a member."""
+        roles = await self.roles(user_id)
+        if tenant_id not in roles:
+            roles = await self.roles(user_id, fresh=True)
+        return roles.get(tenant_id)
+
     async def workspace_ids(self, user_id: UUID, *, fresh: bool = False) -> frozenset[UUID]:
-        key = f"{self._prefix}:workspaces:{user_id}"
+        return frozenset(await self.roles(user_id, fresh=fresh))
+
+    async def roles(self, user_id: UUID, *, fresh: bool = False) -> dict[UUID, str]:
+        key = f"{self._prefix}:workspace-roles:{user_id}"
         if not fresh:
             cached = await self._redis.get(key)
             if cached is not None:
-                return frozenset(UUID(value) for value in json.loads(cached))
-        ids = await self._fetch(user_id)
-        await self._redis.set(key, json.dumps(sorted(str(value) for value in ids)), ex=self._ttl)
-        return ids
+                return {UUID(workspace): role for workspace, role in json.loads(cached).items()}
+        roles = await self._fetch(user_id)
+        await self._redis.set(key, json.dumps({str(workspace): role for workspace, role in roles.items()}), ex=self._ttl)
+        return roles
 
-    async def _fetch(self, user_id: UUID) -> frozenset[UUID]:
+    async def _fetch(self, user_id: UUID) -> dict[UUID, str]:
         try:
             response = await self._http.get(
                 f"{self._base_url}/api/v1/workspaces",
@@ -67,15 +76,15 @@ class WorkspaceDirectory:
         except httpx.HTTPError as exc:
             raise UpstreamUnavailable("workspace-service is unreachable") from exc
         if response.status_code == 404:  # no workspace profile yet
-            return frozenset()
+            return {}
         if response.status_code != 200:
             raise UpstreamUnavailable(f"workspace-service returned {response.status_code}")
-        ids: set[UUID] = set()
+        roles: dict[UUID, str] = {}
         for workspace in response.json():
             raw_id = workspace.get("workspaceId")
             if raw_id and workspace.get("isActive") is not False:
-                ids.add(UUID(raw_id))
-        return frozenset(ids)
+                roles[UUID(raw_id)] = str(workspace.get("role") or "").upper()
+        return roles
 
 
 class DeliveryResult(StrEnum):

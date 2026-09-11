@@ -77,9 +77,28 @@ def describe_action(tool: str, args: Any) -> tuple[str, str]:
     """(task name, output type) for the workspace timeline. ``args`` may be whatever the
     model sent (including arguments the gate rejected), so nothing about its shape is assumed."""
     fields = args if isinstance(args, dict) else {}
-    if tool == "send_email":
-        recipients = ", ".join(_addresses(fields.get("to")))
-        return _clip(f"Email to {recipients}: {_text(fields.get('subject'))}", 150), "EMAIL"
+
+    def text(key: str) -> str:
+        return _text(fields.get(key))
+
+    described: dict[str, tuple[str, str]] = {
+        "send_email": (f"Email to {', '.join(_addresses(fields.get('to')))}: {text('subject')}", "EMAIL"),
+        "create_calendar_event": (f"Calendar event: {text('title')}", "CALENDAR_EVENT"),
+        "send_slack_message": (f"Slack message to #{text('channel').lstrip('#')}", "SLACK_MESSAGE"),
+        "create_notion_page": (f"Notion page: {text('title')}", "NOTION_PAGE"),
+        "generate_document": (f"Document: {text('title')} ({text('format')})", "DOCUMENT"),
+        "create_quote": (f"Quote for {text('customer_company')}", "QUOTE"),
+        "create_catalog_item": (f"Add catalog item: {text('name')}", "CATALOG_CHANGE"),
+        "update_catalog_item": ("Update catalog item", "CATALOG_CHANGE"),
+        "retire_catalog_item": ("Retire catalog item", "CATALOG_CHANGE"),
+        "set_stock": (f"Set stock of {text('sku')} to {fields.get('quantity')}", "INVENTORY_CHANGE"),
+        "reserve_stock": (f"Reserve {fields.get('quantity')} × {text('sku')}", "INVENTORY_CHANGE"),
+        "release_stock": ("Release a stock reservation", "INVENTORY_CHANGE"),
+        "undo_actions": (f"Undo {len(fields.get('action_ids') or [])} completed action(s)", "UNDO"),
+    }
+    if tool in described:
+        name, output_type = described[tool]
+        return _clip(name, 150), output_type
     return _clip(str(tool).replace("_", " ").capitalize(), 150), _clip(str(tool).upper(), 50)
 
 
@@ -143,6 +162,24 @@ class WorkspaceRecorder:
                     OutboxKind.NOTE,
                     note_id_for(ctx.session_id, f"sent:{idempotency_key}"),
                     {"note_title": _clip(f"Sent: {_text(args.get('subject')) or 'email'}", 150), "note_body": "\n".join(lines)},
+                )
+            )
+        if tool in ("generate_document", "create_quote") and result.outcome is ToolOutcome.EXECUTED:
+            data = result.data if isinstance(result.data, dict) else {}
+            lines = [result.summary or ""]
+            lines += [f"{source.title}: {source.url}" for source in result.sources]
+            for line in data.get("lines") or []:
+                if isinstance(line, dict):
+                    lines.append(f"- {line.get('quantity')} × {line.get('name')} ({line.get('sku')}): {line.get('total')}")
+            if data.get("total"):
+                lines.append(f"Total: {data.get('currency')} {data.get('total')} (valid until {data.get('valid_until')})")
+            title = f"Quote {data.get('quote_number')}" if tool == "create_quote" else f"Document: {data.get('file_name') or 'file'}"
+            items.append(
+                self._item(
+                    ctx,
+                    OutboxKind.NOTE,
+                    note_id_for(ctx.session_id, f"file:{idempotency_key}"),
+                    {"note_title": _clip(title, 150), "note_body": "\n".join(line for line in lines if line)},
                 )
             )
         await self._enqueue(ctx, items)

@@ -26,12 +26,15 @@ from app.tools.registry import ToolDefinition, ToolRegistry
 from app.tools.types import (
     ToolAccessDenied,
     ToolCategory,
+    ToolFailed,
     ToolInput,
     ToolInvocation,
     ToolKind,
     ToolOutcomeUnknown,
     ToolOutput,
     ToolScope,
+    UndoInvocation,
+    UndoPlan,
 )
 
 # --------------------------------------------------------------------------- tokens
@@ -88,6 +91,7 @@ class FakeWorkspaceService:
     context / task / note upserts the engine uses to record agent work."""
 
     memberships: dict[UUID, set[UUID]] = field(default_factory=dict)
+    roles: dict[tuple[UUID, UUID], str] = field(default_factory=dict)  # (user, workspace) → role; default MEMBER
     calls: int = 0
     contexts: dict[str, dict[str, Any]] = field(default_factory=dict)
     tasks: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -111,7 +115,10 @@ class FakeWorkspaceService:
             user_id = UUID(request.headers["X-User-Id"])
             if user_id not in self.memberships:
                 return httpx.Response(404, json={"message": "Workspace profile not found"})
-            body = [{"workspaceId": str(ws), "name": "WS", "isActive": True} for ws in self.memberships[user_id]]
+            body = [
+                {"workspaceId": str(ws), "name": "WS", "isActive": True, "role": self.roles.get((user_id, ws), "MEMBER")}
+                for ws in self.memberships[user_id]
+            ]
             return httpx.Response(200, json=body)
 
         return httpx.MockTransport(handler)
@@ -233,7 +240,9 @@ class FakeConnector:
     connected: bool | set[str] = True  # or the set of connected toolkits
     executions: list[dict[str, Any]] = field(default_factory=list)
     fail_with: Exception | None = None  # raised after the call is recorded (the provider may have acted)
+    failures: dict[str, Exception] = field(default_factory=dict)  # per action slug, raised after recording
     responses: dict[str, dict[str, Any]] = field(default_factory=dict)  # canned `data` per action slug
+    staged: list[dict[str, Any]] = field(default_factory=list)
 
     async def has_active_connection(self, user_id: UUID, toolkit: str) -> bool:
         return toolkit in self.connected if isinstance(self.connected, set) else self.connected
@@ -242,9 +251,18 @@ class FakeConnector:
         self.executions.append({"user_id": user_id, "slug": slug, "arguments": arguments})
         if self.fail_with is not None:
             raise self.fail_with
+        if slug in self.failures:
+            raise self.failures[slug]
         if slug in self.responses:
             return self.responses[slug]
         return {"response_data": {"id": f"gmail-msg-{len(self.executions)}", "threadId": "thread-1"}}
+
+    async def stage_file(self, *, slug: str, filename: str, content: bytes, mimetype: str) -> dict[str, str]:
+        self.staged.append({"slug": slug, "filename": filename, "content": content, "mimetype": mimetype})
+        return {"name": filename, "mimetype": mimetype, "s3key": f"staged/{len(self.staged)}/{filename}"}
+
+    def slugs(self) -> list[str]:
+        return [execution["slug"] for execution in self.executions]
 
 
 # --------------------------------------------------------------------------- stub tools
@@ -255,6 +273,8 @@ class SideEffects:
     """Records what stub write tools 'did' in the outside world."""
 
     sent: list[dict[str, Any]] = field(default_factory=list)
+    recalled: list[str] = field(default_factory=list)  # refs of notes an undo took back
+    fail_recall: bool = False
 
 
 class LookupArgs(ToolInput):
@@ -288,7 +308,22 @@ def stub_registry(
         effects.sent.append({"to": args.to, "text": args.text, "tenant": str(inv.ctx.tenant_id), "ref": ref})
         if write_delay:
             await asyncio.sleep(write_delay)  # sent, but the confirmation is slow
-        return ToolOutput(data={"message_id": ref}, summary=f"note sent to {args.to}", ref_id=ref)
+        return ToolOutput(
+            data={"message_id": ref},
+            summary=f"note sent to {args.to}",
+            ref_id=ref,
+            undo=UndoPlan(args={"ref": ref}, label=f"Recall the note to {args.to}"),
+        )
+
+    async def recall_note(inv: UndoInvocation) -> str:
+        if effects.fail_recall:
+            raise ToolFailed("the relay no longer has that note")
+        effects.recalled.append(str(inv.args["ref"]))
+        return f"note {inv.args['ref']} recalled"
+
+    async def note_preview(ctx: AgentContext, args: ToolInput) -> dict[str, Any]:
+        assert isinstance(args, NoteArgs)
+        return {"to": args.to, "body": args.text}
 
     async def broken_send(inv: ToolInvocation) -> ToolOutput:
         raise RuntimeError("smtp relay unavailable")
@@ -325,8 +360,8 @@ def stub_registry(
                 input_model=NoteArgs,
                 handler=send_note,
                 acl=acl,
-                preview=lambda args: {"to": args.to, "body": args.text},
-                undo=lambda args: {"action": "recall_note", "to": args.to},
+                preview=note_preview,
+                undo_handler=recall_note,
             ),
             ToolDefinition(
                 name="broken_send",

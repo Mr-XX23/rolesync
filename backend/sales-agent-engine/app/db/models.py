@@ -14,6 +14,9 @@ Deliberate additions to the plan's column lists (each needed for correctness):
   ``idempotency_key``, ``error``.
 - ``session.title``: the first prompt, for session lists; ``session.settled_event_id``: see the column.
 - ``audit.outcome`` includes ``UNKNOWN``: a write that gave no answer may still have happened.
+- ``session.turn`` + ``saga_step.turn``: the request (user turn) an action belongs to, so a failure
+  offers to undo only what that request did. ``saga_step.undo_action`` is filled in when the
+  action completes (``{"tool", "args", "label"}``): how to reverse it is only known afterwards.
 - ``workspace_outbox``: goals, tasks and notes live in workspace-service; the engine
   records them here first and a worker delivers them, so the agent never waits on (or
   fails because of) that service.
@@ -68,6 +71,8 @@ class AgentSession(TimestampMixin, Base):
     # Event-stream position when the session last settled (paused / done). A snapshot built
     # from ``checkpoint_ref`` plus the events after this id shows every step exactly once.
     settled_event_id: Mapped[str | None] = mapped_column(Text)
+    # 1 for the request that started the session, +1 for every follow-up message.
+    turn: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -141,11 +146,13 @@ class SagaStep(TimestampMixin, Base):
         CheckConstraint(check_in("status", SagaStatus), name="status"),
         UniqueConstraint("session_id", "step_no", name="uq_saga_step_session_step"),
         UniqueConstraint("tenant_id", "idempotency_key", name="uq_saga_step_tenant_key"),
+        Index("ix_saga_step_session_id_turn", "session_id", "turn"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     tenant_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
     session_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agent.session.id", ondelete="CASCADE"), nullable=False)
+    turn: Mapped[int | None] = mapped_column(Integer)
     step_no: Mapped[int] = mapped_column(Integer, nullable=False)
     action: Mapped[str] = mapped_column(Text, nullable=False)
     undo_action: Mapped[dict[str, Any] | None] = mapped_column(JSONB)

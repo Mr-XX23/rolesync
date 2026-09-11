@@ -1,16 +1,41 @@
-"""Slack reads over Composio."""
+"""Slack over Composio: search messages, post a message (undo: delete it)."""
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import Field
 
+from app.core.context import AgentContext
 from app.platform.composio_client import ConnectorClient
-from app.tools.adapters.common import as_dict, as_list, clip, connection_required, plural, run_connector
+from app.tools.adapters.common import (
+    as_dict,
+    as_list,
+    clip,
+    connection_required,
+    first_dict,
+    plural,
+    run_connector,
+    run_connector_undo,
+    run_connector_write,
+)
 from app.tools.registry import ToolDefinition
-from app.tools.types import SourceLink, ToolCategory, ToolInput, ToolInvocation, ToolKind, ToolOutput, ToolScope
+from app.tools.types import (
+    SourceLink,
+    ToolCategory,
+    ToolFailed,
+    ToolInput,
+    ToolInvocation,
+    ToolKind,
+    ToolOutput,
+    ToolScope,
+    UndoInvocation,
+    UndoPlan,
+)
+
+_CHANNEL_ID = re.compile(r"^[CDG][A-Z0-9]{8,}$")
 
 
 class SearchSlackArgs(ToolInput):
@@ -22,7 +47,19 @@ class SearchSlackArgs(ToolInput):
     max_results: int = Field(default=10, ge=1, le=25)
 
 
+class SendSlackMessageArgs(ToolInput):
+    channel: str = Field(
+        min_length=1, max_length=100, description="Channel name without '#' (e.g. 'sales'), or a channel or DM id"
+    )
+    text: str = Field(min_length=1, max_length=12_000, description="The message, in Markdown")
+    thread_ts: str | None = Field(
+        default=None, pattern=r"^\d+\.\d+$", description="Reply in the thread of this message (its ts)"
+    )
+
+
 def slack_tools(connector: ConnectorClient) -> list[ToolDefinition]:
+    require_slack = connection_required(connector, "slack", "Slack")
+
     async def search_slack_messages(invocation: ToolInvocation) -> ToolOutput:
         args = invocation.args
         assert isinstance(args, SearchSlackArgs)
@@ -44,6 +81,51 @@ def slack_tools(connector: ConnectorClient) -> list[ToolDefinition]:
             ),
         )
 
+    async def send_slack_message(invocation: ToolInvocation) -> ToolOutput:
+        args = invocation.args
+        assert isinstance(args, SendSlackMessageArgs)
+        channel = args.channel.strip().lstrip("#")
+        arguments: dict[str, Any] = {"channel": channel, "markdown_text": args.text}
+        if args.thread_ts:
+            arguments["thread_ts"] = args.thread_ts
+        data = await run_connector_write(
+            connector, user_id=invocation.ctx.user_id, slug="SLACK_SEND_MESSAGE", arguments=arguments
+        )
+        body = first_dict(data, "response_data", "data")
+        message = as_dict(body.get("message"))
+        channel_id = str(body.get("channel") or message.get("channel") or "") or None
+        ts = str(body.get("ts") or message.get("ts") or "") or None
+        where = channel if _CHANNEL_ID.match(channel) else f"#{channel}"
+        return ToolOutput(
+            data={"channel": channel_id or channel, "ts": ts, "thread_ts": args.thread_ts},
+            summary=f"Slack message posted to {where}" + (" (in a thread)" if args.thread_ts else ""),
+            ref_id=ts,
+            undo=UndoPlan(
+                args={"channel": channel_id, "ts": ts},
+                label=f"Delete the Slack message in {where} (people may already have read it)",
+            )
+            if channel_id and ts
+            else None,
+        )
+
+    async def delete_message(invocation: UndoInvocation) -> str:
+        try:
+            await run_connector_undo(
+                connector,
+                user_id=invocation.ctx.user_id,
+                slug="SLACK_DELETES_A_MESSAGE_FROM_A_CHAT",
+                arguments={"channel": invocation.args["channel"], "ts": invocation.args["ts"]},
+            )
+        except ToolFailed as exc:
+            if not exc.retryable and "message_not_found" in str(exc):
+                return "the Slack message was already deleted"
+            raise
+        return "Slack message deleted"
+
+    async def send_preview(ctx: AgentContext, args: ToolInput) -> dict[str, Any]:
+        assert isinstance(args, SendSlackMessageArgs)
+        return {"kind": "slack_message", "channel": args.channel.strip().lstrip("#"), "text": args.text, "thread_ts": args.thread_ts}
+
     return [
         ToolDefinition(
             name="search_slack_messages",
@@ -54,8 +136,24 @@ def slack_tools(connector: ConnectorClient) -> list[ToolDefinition]:
             input_model=SearchSlackArgs,
             handler=search_slack_messages,
             timeout_seconds=45,
-            acl=connection_required(connector, "slack", "Slack"),
-        )
+            acl=require_slack,
+        ),
+        ToolDefinition(
+            name="send_slack_message",
+            description=(
+                "Post a message to a Slack channel or DM as the rep (optionally as a thread reply). The rep approves "
+                "the exact message first, so write complete, final text."
+            ),
+            kind=ToolKind.WRITE,
+            scope=ToolScope.COMMUNICATION,
+            category=ToolCategory.COMMUNICATION,
+            input_model=SendSlackMessageArgs,
+            handler=send_slack_message,
+            timeout_seconds=45,
+            acl=require_slack,
+            preview=send_preview,
+            undo_handler=delete_message,
+        ),
     ]
 
 

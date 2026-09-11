@@ -57,6 +57,8 @@ class OpenRouterProvider:
                 {"type": "function", "function": {"name": t.name, "description": t.description, "parameters": t.parameters}}
                 for t in task.tools
             ]
+            if not task.allow_tool_calls:
+                body["tool_choice"] = "none"
         if task.temperature is not None:
             body["temperature"] = task.temperature
         if task.max_output_tokens:
