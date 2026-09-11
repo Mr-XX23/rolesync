@@ -1,10 +1,10 @@
-"""Knowledge-base tools over data-pipeline's knowledge vault.
+"""Knowledge-base tools over data-pipeline's knowledge vault (shared by the workspace).
 
 data-pipeline has no retrieval endpoint yet (its vector search is a placeholder and its
 document search only matches metadata), so this adapter does keyword retrieval itself:
-rank the user's documents by their sales metadata, read the best candidates' text, and
-return the passages that match. When real retrieval lands in data-pipeline, only this
-file changes.
+rank the workspace's documents by their sales metadata, read the best candidates' text,
+and return the passages that match. When real retrieval lands in data-pipeline, only this
+file changes. data-pipeline enforces workspace membership on every call.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from pydantic import Field
 from app.platform.data_pipeline import DataPipelineClient, DataPipelineError
 from app.tools.adapters.common import clip, plural
 from app.tools.registry import ToolDefinition
-from app.tools.types import ToolAccessDenied, ToolCategory, ToolFailed, ToolInput, ToolInvocation, ToolKind, ToolOutput, ToolScope
+from app.tools.types import ToolCategory, ToolFailed, ToolInput, ToolInputError, ToolInvocation, ToolKind, ToolOutput, ToolScope
 
 CATEGORIES = (
     "BATTLECARD",
@@ -68,13 +68,13 @@ def knowledge_tools(client: DataPipelineClient) -> list[ToolDefinition]:
     async def search_knowledge_base(invocation: ToolInvocation) -> ToolOutput:
         args = invocation.args
         assert isinstance(args, SearchKnowledgeArgs)
-        user_id = invocation.ctx.user_id
+        ctx = invocation.ctx
         category = args.category.strip().upper() if args.category else None
         if category and category not in CATEGORIES:
             category = None  # an unknown category would only hide documents
         query_terms = terms(args.query)
         try:
-            documents = await client.list_documents(user_id, category=category)
+            documents = await client.list_documents(ctx.user_id, ctx.tenant_id, category=category)
         except DataPipelineError as exc:
             raise ToolFailed(str(exc)) from exc
 
@@ -82,7 +82,7 @@ def knowledge_tools(client: DataPipelineClient) -> list[ToolDefinition]:
         ranked = sorted(
             (doc for doc in documents if doc.get("doc_id")), key=lambda doc: metadata_score(doc, query_terms), reverse=True
         )[:_CANDIDATES]
-        texts = await asyncio.gather(*(_text(client, user_id, doc["doc_id"]) for doc in ranked))
+        texts = await asyncio.gather(*(_text(client, ctx.user_id, ctx.tenant_id, doc["doc_id"]) for doc in ranked))
         results = []
         for doc, text in zip(ranked, texts, strict=True):
             passages = best_passages(text, query_terms, limit=2)
@@ -99,31 +99,30 @@ def knowledge_tools(client: DataPipelineClient) -> list[ToolDefinition]:
     async def read_knowledge_document(invocation: ToolInvocation) -> ToolOutput:
         args = invocation.args
         assert isinstance(args, ReadKnowledgeDocumentArgs)
-        user_id = invocation.ctx.user_id
+        ctx = invocation.ctx
         try:
-            # data-pipeline doesn't check who owns a document id, so check it here.
-            owned = {doc.get("doc_id"): doc for doc in await client.list_documents(user_id)}
+            body = await client.document_text(ctx.user_id, ctx.tenant_id, args.doc_id)
         except DataPipelineError as exc:
             raise ToolFailed(str(exc)) from exc
-        doc = owned.get(args.doc_id)
-        if doc is None:
-            raise ToolAccessDenied(f"no knowledge-base document '{args.doc_id}' for this user")
-        text = await _text(client, user_id, args.doc_id)
+        if body is None:
+            raise ToolInputError(f"the workspace's knowledge base has no document '{args.doc_id}'")
+        text = body.get("full_text") if isinstance(body.get("full_text"), str) else ""
         if len(text) <= _DOCUMENT_CHARS or not args.question:
             content = {"text": clip(text, _DOCUMENT_CHARS), "truncated": len(text) > _DOCUMENT_CHARS}
         else:
             content = {"passages": best_passages(text, terms(args.question), limit=8), "truncated": True}
+        name = body.get("filename") or args.doc_id
         return ToolOutput(
-            data={**_document(doc, []), **content},
-            summary=f"Read '{doc.get('name') or args.doc_id}' ({plural(len(text), 'character')})",
+            data={"doc_id": args.doc_id, "name": name, "category": body.get("category"), **content},
+            summary=f"Read '{name}' ({plural(len(text), 'character')})",
         )
 
     return [
         ToolDefinition(
             name="search_knowledge_base",
             description=(
-                "Search the rep's sales knowledge base (battlecards, pricing, case studies, security, product specs, "
-                "contracts). Returns matching documents with relevant passages."
+                "Search the workspace's sales knowledge base (battlecards, pricing, case studies, security, product "
+                "specs, contracts). Returns matching documents with relevant passages."
             ),
             kind=ToolKind.READ,
             scope=ToolScope.READ,
@@ -145,9 +144,9 @@ def knowledge_tools(client: DataPipelineClient) -> list[ToolDefinition]:
     ]
 
 
-async def _text(client: DataPipelineClient, user_id: Any, doc_id: str) -> str:
+async def _text(client: DataPipelineClient, user_id: Any, tenant_id: Any, doc_id: str) -> str:
     try:
-        body = await client.document_text(user_id, doc_id)
+        body = await client.document_text(user_id, tenant_id, doc_id)
     except DataPipelineError:
         return ""  # one unreadable document shouldn't fail the whole search
     text = (body or {}).get("full_text")

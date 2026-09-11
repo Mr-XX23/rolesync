@@ -42,7 +42,10 @@ export interface WorkspaceItem {
   isActive: boolean;
   createdAt?: string;
   updatedAt?: string;
+  role?: string | null; // the signed-in user's role: OWNER, ADMIN, MEMBER or VIEWER
 }
+
+export type WorkspaceStatus = 'idle' | 'loading' | 'ready' | 'failed';
 
 export interface WorkspacePreferences {
   preferenceId: string;
@@ -64,6 +67,10 @@ interface WorkspaceState {
   onboarding: OnboardingStateSchema | null;
   workspaces: WorkspaceItem[];
   currentWorkspace: WorkspaceItem | null;
+  // Whether the active workspace is known yet (see ensureWorkspace), and for which user.
+  workspaceStatus: WorkspaceStatus;
+  workspaceLoadedFor: string | null;
+  workspaceError: string | null;
   isLoading: boolean;
   error: string | null;
 }
@@ -74,9 +81,56 @@ const initialState: WorkspaceState = {
   onboarding: null,
   workspaces: [],
   currentWorkspace: null,
+  workspaceStatus: 'idle',
+  workspaceLoadedFor: null,
+  workspaceError: null,
   isLoading: false,
   error: null,
 };
+
+const ACTIVE_WORKSPACE_KEY = 'rolesync_active_workspace_id';
+
+function readRememberedWorkspace(): string | null {
+  try {
+    return localStorage.getItem(ACTIVE_WORKSPACE_KEY);
+  } catch {
+    return null; // storage unavailable (private mode, blocked site data)
+  }
+}
+
+function rememberWorkspace(workspaceId: string): void {
+  try {
+    localStorage.setItem(ACTIVE_WORKSPACE_KEY, workspaceId);
+  } catch {
+    // not remembered across reloads; the first workspace is picked again
+  }
+}
+
+/**
+ * Makes sure the signed-in user has a workspace and picks the active one. The first call
+ * for a new account creates their personal workspace; the last workspace they used stays
+ * active if they still belong to it. Every workspace-scoped page waits for this.
+ */
+export const ensureWorkspace = createAsyncThunk(
+  'workspace/ensureWorkspace',
+  async (userId: string, { rejectWithValue }) => {
+    try {
+      const ensured = (await api.post<WorkspaceItem>('/workspaces/default')).data;
+      const listed = (await api.get<WorkspaceItem[]>('/workspaces')).data;
+      const workspaces = listed.length > 0 ? listed : [ensured];
+      const remembered = readRememberedWorkspace();
+      const current =
+        workspaces.find((ws) => ws.workspaceId === remembered) ??
+        workspaces.find((ws) => ws.workspaceId === ensured.workspaceId) ??
+        workspaces[0];
+      rememberWorkspace(current.workspaceId);
+      return { userId, workspaces, current };
+    } catch (error) {
+      const message = (error as { response?: { data?: { message?: string } } }).response?.data?.message;
+      return rejectWithValue(message || 'Could not load your workspace');
+    }
+  }
+);
 
 export const fetchProfile = createAsyncThunk(
   'workspace/fetchProfile',
@@ -279,6 +333,9 @@ const workspaceSlice = createSlice({
       state.onboarding = null;
       state.workspaces = [];
       state.currentWorkspace = null;
+      state.workspaceStatus = 'idle';
+      state.workspaceLoadedFor = null;
+      state.workspaceError = null;
       state.error = null;
     },
     setCurrentWorkspace: (state, action: PayloadAction<WorkspaceItem>) => {
@@ -287,6 +344,21 @@ const workspaceSlice = createSlice({
   },
   extraReducers: (builder) => {
     builder
+      // ensureWorkspace
+      .addCase(ensureWorkspace.pending, (state) => {
+        state.workspaceStatus = 'loading';
+        state.workspaceError = null;
+      })
+      .addCase(ensureWorkspace.fulfilled, (state, action) => {
+        state.workspaces = action.payload.workspaces;
+        state.currentWorkspace = action.payload.current;
+        state.workspaceLoadedFor = action.payload.userId;
+        state.workspaceStatus = 'ready';
+      })
+      .addCase(ensureWorkspace.rejected, (state, action) => {
+        state.workspaceStatus = 'failed';
+        state.workspaceError = (action.payload as string) || 'Could not load your workspace';
+      })
       // fetchProfile
       .addCase(fetchProfile.pending, (state) => {
         state.isLoading = true;
@@ -352,9 +424,11 @@ const workspaceSlice = createSlice({
       })
       // updateWorkspaceDetails
       .addCase(updateWorkspaceDetails.fulfilled, (state, action: PayloadAction<WorkspaceItem>) => {
-        state.currentWorkspace = action.payload;
+        // The update response doesn't include the caller's role; keep the one we know.
+        const updated = { ...action.payload, role: action.payload.role ?? state.currentWorkspace?.role };
+        state.currentWorkspace = updated;
         state.workspaces = state.workspaces.map((ws) =>
-          ws.workspaceId === action.payload.workspaceId ? action.payload : ws
+          ws.workspaceId === updated.workspaceId ? updated : ws
         );
       })
       // fetchPreferences

@@ -30,6 +30,11 @@ public interface WorkspaceMembershipRepository extends JpaRepository<WorkspaceMe
            "WHERE wm.workspace.workspaceId = :workspaceId AND wm.profile.profileId = :profileId AND wm.isActive = true")
     Optional<String> findActiveRoleName(@Param("workspaceId") UUID workspaceId, @Param("profileId") UUID profileId);
 
+    /** Rows of (workspace id, role name) for the profile's active memberships. */
+    @Query("SELECT wm.workspace.workspaceId, wm.role.roleName FROM WorkspaceMembership wm " +
+           "WHERE wm.profile.profileId = :profileId AND wm.isActive = true")
+    List<Object[]> findActiveRolesByProfileId(@Param("profileId") UUID profileId);
+
     @Query("SELECT wm.workspace.workspaceId FROM WorkspaceMembership wm WHERE wm.membershipId = :membershipId")
     Optional<UUID> findWorkspaceIdByMembershipId(@Param("membershipId") UUID membershipId);
 

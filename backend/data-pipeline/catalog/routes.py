@@ -94,11 +94,12 @@ def semantic_search_catalog(
     ctx: CatalogContext = Depends(get_catalog_context),
     service: ProductService = Depends(get_service),
 ):
-    """AI semantic search using OpenRouter with intelligent local fallback."""
+    """Relevance-ranked catalog search, optionally widened by LLM query expansion."""
     return service.semantic_search(
         tenant_id=ctx.tenant_id,
         query=data.query,
         limit=data.limit,
+        expand=data.expand,
     )
 
 

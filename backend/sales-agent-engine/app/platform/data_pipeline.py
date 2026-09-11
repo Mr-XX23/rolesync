@@ -2,13 +2,9 @@
 
 The engine calls it inside the platform network, where data-pipeline trusts ``X-User-Id``
 (outside, the gateway sets it from a verified token), so every call carries the verified
-user of the run and nothing from a model. Scoping, as data-pipeline implements it today:
-
-- Knowledge vault: documents are filtered by a ``user_id`` parameter. Uploads from the UI
-  are all stored under the tenant ``"tenant_default"`` (the UI sends no workspace), so no
-  ``X-Tenant-Id`` is sent. Reads by document id don't check the user; callers must confirm
-  the document is in the user's own list first.
-- Catalog: scoped by ``X-Tenant-Id`` = the workspace UUID (required).
+user of the run and nothing from a model. Both the vault and the catalog are shared per
+workspace: every call names the session's workspace in ``X-Tenant-Id``, and data-pipeline
+checks the user is a member of it before answering.
 """
 
 from __future__ import annotations
@@ -32,16 +28,19 @@ class DataPipelineClient:
         self._timeout = timeout_seconds
 
     # ------------------------------------------------------------------ knowledge vault
-    async def list_documents(self, user_id: UUID, *, category: str | None = None) -> list[dict[str, Any]]:
-        """The user's indexed documents, newest first (data-pipeline has no pagination)."""
-        params = {"user_id": str(user_id), "status": "Indexed"}
+    async def list_documents(self, user_id: UUID, tenant_id: UUID, *, category: str | None = None) -> list[dict[str, Any]]:
+        """The workspace's indexed documents, newest first (data-pipeline has no pagination)."""
+        params = {"status": "Indexed"}
         if category:
             params["category"] = category
-        body = await self._get("/api/v1/knowledge-vault/documents", user_id, params=params)
+        body = await self._get("/api/v1/knowledge-vault/documents", user_id, tenant_id=tenant_id, params=params)
         return [doc for doc in body.get("documents") or [] if isinstance(doc, dict)]
 
-    async def document_text(self, user_id: UUID, doc_id: str) -> dict[str, Any] | None:
-        return await self._get(f"/api/v1/knowledge-vault/documents/{doc_id}/content", user_id, missing_ok=True)
+    async def document_text(self, user_id: UUID, tenant_id: UUID, doc_id: str) -> dict[str, Any] | None:
+        """A document's full text, or ``None`` if the workspace has no such document."""
+        return await self._get(
+            f"/api/v1/knowledge-vault/documents/{quote(doc_id, safe='')}/content", user_id, tenant_id=tenant_id, missing_ok=True
+        )
 
     # ------------------------------------------------------------------ catalog
     async def search_products(
@@ -54,7 +53,8 @@ class DataPipelineClient:
             "/api/v1/catalog/ai/semantic-search",
             user_id,
             tenant_id=tenant_id,
-            json={"query": query, "limit": limit},
+            # No LLM query expansion: the agent already writes precise queries, and it costs seconds.
+            json={"query": query, "limit": limit, "expand": False},
             missing_ok=True,
         )
         if ranked is None:

@@ -114,6 +114,18 @@ async def test_openrouter_streams_text_and_assembles_tool_call_deltas():
     assert completion.message.tool_calls == (ToolCall(id="call-9", name="send_email", arguments={"to": ["jane@acme.test"]}),)
 
 
+def test_citation_markers_are_removed_from_streamed_text():
+    from app.models.providers.openrouter_provider import CitationMarkerFilter
+
+    markers = CitationMarkerFilter()
+    pieces = ["The plan costs $49 per seat", "【{\"id\": \"doc_3d24\", ", "\"name\": \"pricing.md\"}】", ". Also 【4:0†source】 done 【"]
+    streamed = "".join(markers.feed(piece) for piece in pieces) + markers.flush()
+    assert streamed == "The plan costs $49 per seat. Also  done 【"  # an unclosed bracket at the end is kept
+
+    long_text = "【" + "x" * 400
+    assert CitationMarkerFilter().feed(long_text) == long_text  # not a marker: nothing is swallowed
+
+
 async def test_openrouter_low_complexity_tasks_turn_reasoning_off():
     captured: dict = {}
 

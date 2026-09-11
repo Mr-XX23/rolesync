@@ -562,6 +562,9 @@ class GenerateFindabilityResponse(BaseModel):
 class SemanticSearchRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=500)
     limit: int = Field(20, ge=1, le=100)
+    # Ask an LLM for synonyms first. Improves recall for conversational queries at the cost of
+    # a few seconds; callers that already write precise queries (e.g. an agent) can skip it.
+    expand: bool = True
 
 
 class SemanticMatchItem(BaseModel):

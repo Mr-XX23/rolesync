@@ -3,16 +3,19 @@ from typing import Optional
 from uuid import UUID
 from fastapi import HTTPException, Request, status
 
+from module_1_document_processing.workspace_access import resolve_workspace_access
+
 logger = logging.getLogger("catalog.auth")
 
 
 class CatalogContext:
-    def __init__(self, tenant_id: UUID, user_id: str):
+    def __init__(self, tenant_id: UUID, user_id: str, role: Optional[str] = None):
         self.tenant_id = tenant_id
         self.user_id = user_id
+        self.role = role  # the caller's role in the workspace, as reported by workspace-service
 
     def __repr__(self):
-        return f"CatalogContext(tenant_id={self.tenant_id}, user_id={self.user_id})"
+        return f"CatalogContext(tenant_id={self.tenant_id}, user_id={self.user_id}, role={self.role})"
 
 
 def get_catalog_context(request: Request) -> CatalogContext:
@@ -25,10 +28,9 @@ def get_catalog_context(request: Request) -> CatalogContext:
     value, and there is no ``system`` fallback. ``X-Tenant-Id`` (the workspace the
     caller is acting in) is required and must be a UUID.
 
-    NOTE: this establishes *who* the caller is and *which* tenant they claim.
-    Verifying that the caller is a MEMBER of that tenant is a separate
-    workspace-service check (tracked as a follow-up); catalog queries are already
-    scoped by this tenant id in the service layer.
+    The caller must also be an active member of that workspace (checked with
+    workspace-service, see ``workspace_access``); catalog queries are then scoped
+    by this tenant id in the service layer.
     """
     user_id_str: Optional[str] = (
         request.headers.get("X-User-Id")
@@ -58,4 +60,5 @@ def get_catalog_context(request: Request) -> CatalogContext:
             detail=f"Invalid tenant_id format '{tenant_id_str}': must be a valid UUID",
         )
 
-    return CatalogContext(tenant_id=tenant_uuid, user_id=user_id_str.strip())
+    access = resolve_workspace_access(user_id_str.strip(), str(tenant_uuid))
+    return CatalogContext(tenant_id=tenant_uuid, user_id=access.user_id, role=access.role)

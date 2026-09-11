@@ -17,6 +17,7 @@ import { Header } from './Header';
 import { useAppSelector, useAppDispatch } from '../../store';
 import { setModalOpen } from '../../store/taskSlice';
 import { NewInstanceModal } from '../common/NewInstanceModal';
+import { WorkspaceGate } from '../guards/WorkspaceGate';
 
 export const DashboardLayout: React.FC = () => {
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -123,7 +124,9 @@ export const DashboardLayout: React.FC = () => {
         {/* Scrollable Viewport Outlet */}
         <main className="flex-1 overflow-y-auto relative p-4 md:p-8 bg-background/50">
           <div className="max-w-[87rem] mx-auto w-full h-full">
-            <Outlet />
+            <WorkspaceGate>
+              <Outlet />
+            </WorkspaceGate>
           </div>
         </main>
       </div>
