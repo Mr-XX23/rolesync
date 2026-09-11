@@ -11,6 +11,21 @@
 The Sales Agent Engine is a new async Python microservice. A user gives it either a **single task** ("draft a follow-up to Acme") or a **long-running goal** ("sell 200 shirts this month"). An **autonomy layer** turns long goals into scheduled/triggered wake-ups that repeatedly drive a **reactive engine** (LangGraph orchestrator + scoped sub-agents). Every LLM call goes through a **model router** (Gemini primary, OpenRouter fallback). Every tool call goes through a single **tool gate** (tenant + ACL + per-agent scope + audit + human approval). The agent **streams its reasoning live** (SSE) and **pauses for human approval** before any real-world action. It reuses existing platform services (Composio, knowledge base, catalog) as tools rather than reimplementing them.
  
 ---
+
+## As built: where the platform differs from this document
+
+Verified against the code on 2026-09-11. The diagram below is the target, but these `[EXISTS]` pieces are missing or partial, so the engine works around them:
+
+- **Identity.** The gateway now verifies the RS256 `access_token` (via auth-service JWKS) and injects `X-User-Id`, but it resolves no tenant and the engine's port can be reached without it. So the engine still verifies the token itself (JWKS, PEM fallback), using the `userId` claim, and never trusts `X-User-Id`. The tenant is the workspace UUID in `X-Tenant-Id`, and the engine checks membership with workspace-service. SSE takes the tenant from the session row instead.
+- **Composio.** data-pipeline only runs read syncs. The engine calls the Composio SDK directly for read and write tools, using the same project and connections (Composio `user_id` = auth `userId`).
+- **Knowledge base.** No retrieval endpoint exists: vector search is a placeholder and there is no pgvector. The KB tool adapter uses document keyword search plus content fetch until real retrieval lands.
+- **Triggers.** Nothing publishes reply, order or stock-out events (the only Kafka topic is `auth-user-events`). The trigger listener polls (Gmail threads via Composio, catalog stock) behind one adapter interface.
+- **Where data lives (decided 2026-09-11).** User-facing work meant for later retrieval (goals, tasks, notes) lives in **workspace-service**: a chat session is a workspace context (`AGENT_SESSION`, private to its starter), each write action is a task on its timeline, and sent emails and final answers are notes. Everything the agent needs in order to run lives in the **engine**: checkpoints, the approval queue, audit, saga, leases and the outbox. The engine records workspace items in `agent.workspace_outbox` first, and a worker delivers them as idempotent upserts, so workspace-service being slow or down never blocks or fails a run.
+- **Deals.** No order or deal data exists anywhere. Where deals live (engine or workspace-service) is still open; decide before building the deal tool.
+- **Storage.** The engine uses database `rolesync-micro-sales-agent`: schema `agent` (Alembic) and schema `agent_checkpoint` (LangGraph checkpointer tables).
+- **Models.** Gemini's free tier serves Flash but not Pro, so `SALES_AGENT_MODEL_COMPLEX` defaults to `gemini-3.5-flash`; OpenRouter routes default to free `:free` models. All routes are set in `config.py`.
+
+---
  
 ## The layers (top to bottom)
  

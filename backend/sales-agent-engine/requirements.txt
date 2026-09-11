@@ -1,0 +1,33 @@
+# Web / API
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+sse-starlette==3.4.11
+httpx==0.28.1
+
+# Settings / validation
+pydantic==2.13.5
+pydantic-settings==2.15.0
+
+# Persistence (schema `agent`)
+sqlalchemy[asyncio]==2.0.52
+asyncpg==0.31.0
+alembic==1.19.2
+
+# Durable agent execution (LangGraph + Postgres checkpointer, psycopg 3)
+langgraph==1.2.11
+langgraph-checkpoint-postgres==3.1.2
+psycopg[binary,pool]==3.3.5
+
+# Wake queue, event channel, caches
+redis==8.1.0
+
+# Identity (verify auth-service RS256 access tokens)
+pyjwt[crypto]==2.13.0
+
+# Vendors, each wrapped by an adapter in app/platform or app/models/providers
+google-genai==2.23.0
+composio==0.21.1
+langsmith==0.12.4
+
+# Service discovery (same client as data-pipeline)
+py-eureka-client==0.13.3

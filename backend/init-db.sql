@@ -3,3 +3,4 @@
 CREATE DATABASE "rolesync-micro-authservice";
 CREATE DATABASE "rolesync-micro-workspace";
 CREATE DATABASE "rolesync-micro-catalog";
+CREATE DATABASE "rolesync-micro-sales-agent";

@@ -1,8 +1,13 @@
 package com.role_sync.workspace.controllers;
 
+import com.role_sync.workspace.dto.ContextUpsertRequest;
 import com.role_sync.workspace.dto.NoteRequest;
+import com.role_sync.workspace.dto.NoteResponse;
+import com.role_sync.workspace.dto.NoteUpsertRequest;
 import com.role_sync.workspace.dto.TaskResponse;
+import com.role_sync.workspace.dto.TaskUpsertRequest;
 import com.role_sync.workspace.dto.WorkspaceContextRequest;
+import com.role_sync.workspace.dto.WorkspaceContextResponse;
 import com.role_sync.workspace.services.WorkspaceContextService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -47,10 +52,13 @@ public class WorkspaceContextController {
         UUID authUserId = resolveAuthUserId(userIdHeader, authUserIdHeader);
         return workspaceContextService.getTasksTimeline(contextId, authUserId)
                 .map(view -> TaskResponse.builder()
+                        .viewId(view.getViewId())
                         .taskName(view.getTaskName())
                         .agentName(view.getAgentName())
                         .taskStatus(view.getTaskStatus())
                         .outputType(view.getOutputType())
+                        .sortOrder(view.getSortOrder())
+                        .updatedAt(view.getUpdatedAt())
                         .build());
     }
 
@@ -68,6 +76,66 @@ public class WorkspaceContextController {
                                 "note_id", note.getNoteId(),
                                 "message", "Note saved to context successfully"
                         )));
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Idempotent upserts with caller-chosen ids. The sales agent engine records its work here
+    // (a session as a context, its actions as tasks, its outputs as notes) and retries safely.
+    // ---------------------------------------------------------------------------------------
+
+    @PutMapping("/{workspaceId}/contexts/{contextId}")
+    public Mono<Map<String, Object>> upsertContext(
+            @PathVariable UUID workspaceId,
+            @PathVariable UUID contextId,
+            @RequestHeader(value = "X-User-Id", required = false) String userIdHeader,
+            @RequestHeader(value = "X-Auth-User-Id", required = false) String authUserIdHeader,
+            @Valid @RequestBody ContextUpsertRequest request) {
+        UUID authUserId = resolveAuthUserId(userIdHeader, authUserIdHeader);
+        return workspaceContextService.upsertContext(workspaceId, contextId, authUserId, request)
+                .map(id -> Map.of("context_id", id));
+    }
+
+    @GetMapping("/{workspaceId}/contexts")
+    public Flux<WorkspaceContextResponse> listMyContexts(
+            @PathVariable UUID workspaceId,
+            @RequestParam(value = "type", required = false) String contextType,
+            @RequestHeader(value = "X-User-Id", required = false) String userIdHeader,
+            @RequestHeader(value = "X-Auth-User-Id", required = false) String authUserIdHeader) {
+        UUID authUserId = resolveAuthUserId(userIdHeader, authUserIdHeader);
+        return workspaceContextService.listMyContexts(workspaceId, authUserId, contextType);
+    }
+
+    @PutMapping("/contexts/{contextId}/tasks/{viewId}")
+    public Mono<Map<String, Object>> upsertTask(
+            @PathVariable UUID contextId,
+            @PathVariable UUID viewId,
+            @RequestHeader(value = "X-User-Id", required = false) String userIdHeader,
+            @RequestHeader(value = "X-Auth-User-Id", required = false) String authUserIdHeader,
+            @Valid @RequestBody TaskUpsertRequest request) {
+        UUID authUserId = resolveAuthUserId(userIdHeader, authUserIdHeader);
+        return workspaceContextService.upsertTask(contextId, viewId, authUserId, request)
+                .map(id -> Map.of("view_id", id));
+    }
+
+    @PutMapping("/contexts/{contextId}/notes/{noteId}")
+    public Mono<Map<String, Object>> upsertNote(
+            @PathVariable UUID contextId,
+            @PathVariable UUID noteId,
+            @RequestHeader(value = "X-User-Id", required = false) String userIdHeader,
+            @RequestHeader(value = "X-Auth-User-Id", required = false) String authUserIdHeader,
+            @Valid @RequestBody NoteUpsertRequest request) {
+        UUID authUserId = resolveAuthUserId(userIdHeader, authUserIdHeader);
+        return workspaceContextService.upsertNote(contextId, noteId, authUserId, request)
+                .map(id -> Map.of("note_id", id));
+    }
+
+    @GetMapping("/contexts/{contextId}/notes")
+    public Flux<NoteResponse> listNotes(
+            @PathVariable UUID contextId,
+            @RequestHeader(value = "X-User-Id", required = false) String userIdHeader,
+            @RequestHeader(value = "X-Auth-User-Id", required = false) String authUserIdHeader) {
+        UUID authUserId = resolveAuthUserId(userIdHeader, authUserIdHeader);
+        return workspaceContextService.listNotes(contextId, authUserId);
     }
 
     private UUID resolveAuthUserId(String userIdHeader, String authUserIdHeader) {

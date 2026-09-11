@@ -23,6 +23,7 @@ import { Settings } from './pages/salemans/Settings';
 import { Support } from './pages/salemans/Support';
 import { Profile } from './pages/salemans/Profile';
 import { ProductManagement } from './pages/salemans/productManagement/ProductManagement';
+import { SalesAgent } from './pages/salemans/salesAgent/SalesAgent';
 
 export const router = createBrowserRouter([
   {
@@ -126,6 +127,10 @@ export const router = createBrowserRouter([
       {
         path: 'products',
         element: <ProductManagement />,
+      },
+      {
+        path: 'sales-agent',
+        element: <SalesAgent />,
       },
       {
         path: 'knowledge-vault',
