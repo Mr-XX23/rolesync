@@ -26,6 +26,7 @@ class ToolOutcome(StrEnum):
 
     EXECUTED = "EXECUTED"
     FAILED = "FAILED"
+    UNKNOWN = "UNKNOWN"  # a write gave no answer (timeout, lost connection): it may have happened
     DENIED = "DENIED"  # unknown tool/agent, scope or ACL violation
     INVALID = "INVALID"  # arguments failed validation
     REJECTED = "REJECTED"  # human said no

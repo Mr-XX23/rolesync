@@ -3,19 +3,24 @@
     plan ──(tool calls?)──► act ──(more calls?)──► act ─ … ─► plan ─ … ─► END
 
 - ``plan`` asks the model router for the next step and streams its tokens to the session.
-- ``act`` runs exactly ONE pending tool call through the Tool Gate per super-step. A run
-  that pauses for approval therefore resumes by re-running only that call, and the
-  gate turns the re-run into a lookup (see ``langgraph_runtime``).
+- ``act`` runs pending tool calls through the Tool Gate: ONE write per super-step, so a
+  run that pauses for approval resumes by re-running only that call (the gate turns the
+  re-run into a lookup, see ``langgraph_runtime``). Consecutive reads can't pause and have
+  no side effects, so they run together in one step.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import operator
 import time
 from typing import Annotated, Any, TypedDict
 
 from app.core.clock import utcnow
+from app.core.context import AgentContext
+from app.core.enums import ToolOutcome
 from app.engine.events import EventEmitter, EventType, emit_best_effort
 from app.engine.workspace_record import WorkspaceRecorder
 from app.models.router import ModelRouter
@@ -31,10 +36,12 @@ from app.models.types import (
     TextDelta,
     ToolSpec,
 )
-from app.platform.langgraph_runtime import END, GraphSpec, current_context
+from app.platform.langgraph_runtime import END, GraphSpec, current_context, is_control_flow_signal
 from app.tools.gate import ToolGate
 from app.tools.registry import AgentScopes, ToolRegistry
-from app.tools.types import ToolKind
+from app.tools.types import ToolKind, ToolResult
+
+logger = logging.getLogger(__name__)
 
 AGENT_NAME = "orchestrator"
 
@@ -45,8 +52,21 @@ How to work:
 - Actions that affect the outside world (such as sending email) automatically pause for the rep's approval.
   Call the tool directly with complete, final content; do not ask for permission in chat first.
 - If an action is REJECTED, do not retry it unchanged: ask what the rep wants changed.
-  If it FAILED or was DENIED, say so briefly and suggest a next step.
-- Write in clear, professional, friendly language. Keep chat replies short.
+  If it FAILED or was DENIED, say so briefly and suggest a next step (for example, connecting an app).
+- If an action's outcome is UNKNOWN it may already have happened: never retry it. Tell the rep and ask
+  them to check (for email, their Sent folder).
+
+Research and answers:
+- Reading never needs approval. Before answering questions about prospects, customers, products or the rep's
+  own history, gather facts with the read tools, and use every source the question spans (web, emails,
+  calendar, Slack, Notion, knowledge base, catalog). Request independent reads together in one step.
+- Base answers only on tool results. Cite web facts with their URLs and name the documents, emails or messages
+  you used. If something wasn't found, say so instead of guessing.
+- When a source finds nothing, try at most one differently worded search there, then report it as not found.
+  Don't retry sources that were DENIED (for example, an app that isn't connected).
+- Prices, discounts and stock come only from the catalog tools.
+
+Write in clear, professional, friendly language. Keep chat replies short unless the rep asks for detail.
 
 Today is {today} (UTC)."""
 
@@ -122,7 +142,7 @@ class Orchestrator:
         task = TaskSpec(
             purpose="plan",
             system=SYSTEM_PROMPT.format(today=utcnow().date().isoformat()),
-            messages=tuple(Message.from_dict(item) for item in history),
+            messages=repair_history([Message.from_dict(item) for item in history]),
             tools=self._tool_specs(),
             complexity=Complexity.HIGH,
         )
@@ -144,9 +164,40 @@ class Orchestrator:
 
     async def act(self, state: dict[str, Any]) -> dict[str, Any]:
         ctx = current_context()
-        call, *remaining = state["pending_calls"]
+        pending = state["pending_calls"]
+        batch = self._next_batch(pending)
+        replies = await asyncio.gather(*(self._run_call(ctx, call) for call in batch))
+        return {"messages": [reply.to_dict() for reply in replies], "pending_calls": pending[len(batch) :]}
+
+    def _next_batch(self, pending: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """The next call alone, or, if it is a read, it and the reads directly after it."""
+        batch: list[dict[str, Any]] = []
+        for call in pending:
+            definition = self._registry.get(call["name"])
+            is_read = definition is not None and definition.kind is ToolKind.READ
+            if batch and not is_read:
+                break
+            batch.append(call)
+            if not is_read:
+                break
+        return batch
+
+    async def _run_call(self, ctx: AgentContext, call: dict[str, Any]) -> Message:
         arguments = call.get("arguments") or {}
-        result = await self._gate.call_tool(ctx, AGENT_NAME, call["name"], arguments, call_id=call["gate_call_id"])
+        try:
+            result = await self._gate.call_tool(ctx, AGENT_NAME, call["name"], arguments, call_id=call["gate_call_id"])
+        except Exception as exc:
+            if is_control_flow_signal(exc):
+                raise  # an approval pause
+            # Keep the conversation well-formed (every call gets a reply) instead of failing the run.
+            logger.exception("tool call %s crashed in session %s", call.get("name"), ctx.session_id)
+            result = ToolResult(
+                ok=False,
+                tool=str(call.get("name")),
+                call_id=call["gate_call_id"],
+                outcome=ToolOutcome.FAILED,
+                error=f"internal error while running '{call.get('name')}'; it may not have completed",
+            )
 
         definition = self._registry.get(call["name"])
         if definition is not None and definition.kind is ToolKind.WRITE:
@@ -158,10 +209,7 @@ class Orchestrator:
                 args=result.executed_args or arguments,  # a reviewer may have edited them
                 result=result,
             )
-        reply = Message(
-            role=Role.TOOL, content=json.dumps(result.for_model()), tool_call_id=call["id"], name=call["name"]
-        )
-        return {"messages": [reply.to_dict()], "pending_calls": remaining}
+        return Message(role=Role.TOOL, content=json.dumps(result.for_model()), tool_call_id=call["id"], name=call["name"])
 
     def _tool_specs(self) -> tuple[ToolSpec, ...]:
         return tuple(
@@ -192,6 +240,43 @@ class Orchestrator:
                 await flush()
                 return event.completion
         raise ProviderError("model stream ended without a completion")
+
+
+def repair_history(messages: list[Message]) -> tuple[Message, ...]:
+    """Give every tool call a reply before the history reaches a model.
+
+    A run that crashed mid-step leaves an assistant message whose calls were never answered;
+    providers reject such a history (OpenAI-compatible APIs with a 400). The missing replies
+    are filled in with an explicit "did not complete" result; the stored state is unchanged.
+    """
+    repaired: list[Message] = []
+    open_calls: dict[str, str] = {}
+
+    def close_open_calls() -> None:
+        for call_id, name in open_calls.items():
+            repaired.append(
+                Message(
+                    role=Role.TOOL,
+                    content=json.dumps(
+                        {"ok": False, "outcome": "FAILED", "error": "this action did not complete (the run was interrupted)"}
+                    ),
+                    tool_call_id=call_id,
+                    name=name,
+                )
+            )
+        open_calls.clear()
+
+    for message in messages:
+        if message.role is Role.TOOL:
+            open_calls.pop(message.tool_call_id or "", None)
+            repaired.append(message)
+            continue
+        close_open_calls()
+        repaired.append(message)
+        if message.role is Role.ASSISTANT:
+            open_calls.update({call.id: call.name for call in message.tool_calls})
+    # Calls at the very end are still pending (the next step executes them); leave them open.
+    return tuple(repaired)
 
 
 def _after_plan(state: dict[str, Any]) -> str:

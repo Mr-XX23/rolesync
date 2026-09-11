@@ -10,14 +10,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.deps import ContainerDep, TenantDep
 from app.config import API_PREFIX
-from app.core.context import AgentContext, RunMode
+from app.core.context import RunMode
 from app.core.enums import SessionStatus
 from app.core.errors import Conflict, NotFound, TooManyRequests
 from app.engine.orchestrator import turn_input
 
 router = APIRouter(tags=["chat"])
-
-_CONTINUABLE = {SessionStatus.DONE, SessionStatus.FAILED, SessionStatus.HALTED}
 
 
 class ChatRequest(BaseModel):
@@ -41,8 +39,13 @@ async def chat(body: ChatRequest, tenant: TenantDep, container: ContainerDep) ->
         raise TooManyRequests(f"this workspace already has {limit} agent runs in progress; try again shortly")
 
     if body.session_id is None:
-        session = await container.sessions.create(
-            tenant_id=tenant.tenant_id, user_id=tenant.user_id, mode=RunMode.INTERACTIVE, title=_title(text)
+        session = await container.runner.start_new(
+            tenant_id=tenant.tenant_id,
+            user_id=tenant.user_id,
+            mode=RunMode.INTERACTIVE,
+            title=_title(text),
+            graph_input=turn_input(text),
+            user_message=text,
         )
     else:
         owned = await container.sessions.get_owned(
@@ -50,15 +53,11 @@ async def chat(body: ChatRequest, tenant: TenantDep, container: ContainerDep) ->
         )
         if owned is None:
             raise NotFound("session not found")
-        claimed = await container.sessions.transition(owned.id, to=SessionStatus.RUNNING, expected=_CONTINUABLE)
+        claimed = await container.runner.continue_session(owned, turn_input(text), user_message=text)
         if claimed is None:
             raise Conflict("this session is still working or waiting for an approval")
         session = claimed
 
-    ctx = AgentContext(
-        tenant_id=session.tenant_id, user_id=session.user_id, session_id=session.id, mode=RunMode.INTERACTIVE
-    )
-    container.runner.start(ctx, turn_input(text))
     return ChatAccepted(
         session_id=session.id, status=SessionStatus.RUNNING, events_url=f"{API_PREFIX}/sessions/{session.id}/events"
     )

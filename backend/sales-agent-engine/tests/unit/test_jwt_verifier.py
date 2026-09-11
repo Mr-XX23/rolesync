@@ -95,3 +95,45 @@ async def test_jwks_keys_pick_up_a_rotated_key_pair():
         assert fetches == 2
         with pytest.raises(AuthenticationFailed):
             await verifier.verify(make_token(generate_rsa_keys(), user, issuer=ISSUER))
+
+
+async def test_pem_is_only_a_fallback_while_jwks_is_unavailable():
+    configured, served = generate_rsa_keys(), generate_rsa_keys()
+    jwks_up = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_jwks(served)) if jwks_up else httpx.Response(500)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        keys = SigningKeys(
+            jwks_url="http://auth.test/jwks", http=http, pem=configured.public_pem, cache_seconds=0, min_refresh_seconds=0
+        )
+        verifier = AccessTokenVerifier(keys=keys, issuer=ISSUER)
+        user = uuid4()
+        # auth-service's JWKS is down: tokens signed with the configured key still work.
+        assert (await verifier.verify(make_token(configured, user, issuer=ISSUER))).user_id == user
+
+        jwks_up = True  # once JWKS answers, it alone decides which keys are valid
+        assert (await verifier.verify(make_token(served, user, issuer=ISSUER))).user_id == user
+        with pytest.raises(AuthenticationFailed):
+            await verifier.verify(make_token(configured, user, issuer=ISSUER))
+
+
+async def test_bad_tokens_cannot_turn_every_request_into_a_jwks_fetch():
+    fetches = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal fetches
+        fetches += 1
+        return httpx.Response(503)
+
+    signer = generate_rsa_keys()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        keys = SigningKeys(jwks_url="http://auth.test/jwks", http=http, pem=signer.public_pem, min_refresh_seconds=30)
+        verifier = AccessTokenVerifier(keys=keys, issuer=ISSUER)
+        for _ in range(5):
+            with pytest.raises(AuthenticationFailed):
+                await verifier.verify(make_token(generate_rsa_keys(), uuid4(), issuer=ISSUER))  # unknown signer
+        assert (await verifier.verify(make_token(signer, uuid4(), issuer=ISSUER))).email == "rep@example.com"
+
+    assert fetches == 1

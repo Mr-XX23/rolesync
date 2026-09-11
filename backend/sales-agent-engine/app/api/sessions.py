@@ -55,6 +55,7 @@ class TranscriptItem(BaseModel):
     outcome: str | None = None
     summary: str | None = None
     error: str | None = None
+    sources: list[dict[str, str]] | None = None  # web pages / documents a read's facts came from
 
 
 class SessionDetail(SessionView):
@@ -76,17 +77,29 @@ async def get_session(session_id: UUID, tenant: TenantDep, container: ContainerD
     row = await container.sessions.get_owned(tenant_id=tenant.tenant_id, user_id=tenant.user_id, session_id=session_id)
     if row is None:
         raise NotFound("session not found")
-    # Read the event cursor before the snapshot: anything newer is replayed, nothing is lost.
-    last_event_id = await container.events.latest_id(row.id)
-    snapshot = await container.runner.snapshot(context_for(row))
+    # The transcript is the state at the last settle point (pause / done) and the cursor is the
+    # event position at that same moment, so the client replays exactly the steps after it:
+    # no half-streamed answers, no step shown twice, even while a run is in progress.
+    messages: list[dict[str, Any]] = []
+    if row.checkpoint_ref:
+        snapshot = await container.runner.snapshot(context_for(row), checkpoint_id=row.checkpoint_ref)
+        messages = snapshot.values.get("messages") or []
     approvals = await container.pending_actions.list_for_user(
         tenant_id=tenant.tenant_id, user_id=tenant.user_id, status=PendingActionStatus.PENDING, session_id=row.id
     )
+    if row.settled_event_id:
+        cursor = row.settled_event_id
+    elif row.checkpoint_ref:
+        # Settled before settle positions were recorded: replaying from the start would show
+        # its steps twice, so only newer events are sent.
+        cursor = await container.events.latest_id(row.id)
+    else:
+        cursor = "0-0"  # never settled: the stream holds the whole conversation
     return SessionDetail(
         **SessionView.of(row).model_dump(),
-        transcript=transcript_from(snapshot.values.get("messages") or []),
+        transcript=transcript_from(messages),
         pending_approvals=[PendingActionView.model_validate(item) for item in approvals],
-        last_event_id=last_event_id,
+        last_event_id=cursor,
     )
 
 
@@ -108,6 +121,11 @@ def transcript_from(messages: list[dict[str, Any]]) -> list[TranscriptItem]:
                 result = json.loads(message.get("content") or "{}")
             except json.JSONDecodeError:
                 result = {}
+            sources = [
+                {"title": str(source.get("title") or source["url"]), "url": str(source["url"])}
+                for source in result.get("sources") or []
+                if isinstance(source, dict) and source.get("url")
+            ]
             items.append(
                 TranscriptItem(
                     kind="tool_result",
@@ -116,6 +134,7 @@ def transcript_from(messages: list[dict[str, Any]]) -> list[TranscriptItem]:
                     outcome=result.get("outcome"),
                     summary=result.get("summary"),
                     error=result.get("error"),
+                    sources=sources or None,
                 )
             )
     return items

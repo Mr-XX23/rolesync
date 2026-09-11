@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID
@@ -17,6 +18,7 @@ from app.engine.events import EventType, emit_best_effort
 from app.tools.types import describe_validation_error
 
 router = APIRouter(tags=["approvals"])
+logger = logging.getLogger(__name__)
 
 _STATUS_FOR_DECISION = {
     "approve": PendingActionStatus.APPROVED,
@@ -102,13 +104,16 @@ async def decide(action_id: UUID, body: DecisionRequest, tenant: TenantDep, cont
         EventType.APPROVAL_RESOLVED,
         {"pending_action_id": resolved.id, "status": resolved.status, "resolved_by": tenant.user_id},
     )
-    if container.runner is not None:
-        ctx = AgentContext(
-            tenant_id=session.tenant_id,
-            user_id=session.user_id,
-            session_id=session.id,
-            mode=RunMode(session.mode),
-            goal_id=session.goal_id,
-        )
+    ctx = AgentContext(
+        tenant_id=session.tenant_id,
+        user_id=session.user_id,
+        session_id=session.id,
+        mode=RunMode(session.mode),
+        goal_id=session.goal_id,
+    )
+    try:
         await container.runner.resume(ctx, {"pending_action_id": str(resolved.id), "status": resolved.status})
+    except Exception:
+        # The decision is saved; the maintenance sweep resumes decided-but-paused sessions.
+        logger.exception("could not resume session %s after a decision", session.id)
     return resolved

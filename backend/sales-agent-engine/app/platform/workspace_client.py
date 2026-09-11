@@ -88,6 +88,7 @@ class DeliveryResult(StrEnum):
 class Delivery:
     result: DeliveryResult
     detail: str | None = None
+    not_found: bool = False  # 404: the parent record isn't there (yet)
 
 
 class WorkspaceRecordsClient:
@@ -119,6 +120,8 @@ class WorkspaceRecordsClient:
         if 200 <= status < 300:
             return Delivery(DeliveryResult.DELIVERED)
         detail = f"workspace-service {status}: {response.text[:300]}"
-        if status in (404, 408, 425, 429) or status >= 500:
+        if status == 404:
+            return Delivery(DeliveryResult.RETRY, detail, not_found=True)
+        if status in (408, 425, 429) or status >= 500:
             return Delivery(DeliveryResult.RETRY, detail)
         return Delivery(DeliveryResult.REJECTED, detail)

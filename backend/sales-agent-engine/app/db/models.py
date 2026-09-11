@@ -12,7 +12,8 @@ Deliberate additions to the plan's column lists (each needed for correctness):
   result instead of running twice), ``pending_action_id``, ``duration_ms``.
 - ``saga_step``: ``PENDING`` status (the step is recorded before the side effect),
   ``idempotency_key``, ``error``.
-- ``session.title``: the first prompt, for session lists.
+- ``session.title``: the first prompt, for session lists; ``session.settled_event_id``: see the column.
+- ``audit.outcome`` includes ``UNKNOWN``: a write that gave no answer may still have happened.
 - ``workspace_outbox``: goals, tasks and notes live in workspace-service; the engine
   records them here first and a worker delivers them, so the agent never waits on (or
   fails because of) that service.
@@ -64,6 +65,9 @@ class AgentSession(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(Text, nullable=False)
     title: Mapped[str | None] = mapped_column(Text)
     checkpoint_ref: Mapped[str | None] = mapped_column(Text)
+    # Event-stream position when the session last settled (paused / done). A snapshot built
+    # from ``checkpoint_ref`` plus the events after this id shows every step exactly once.
+    settled_event_id: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 

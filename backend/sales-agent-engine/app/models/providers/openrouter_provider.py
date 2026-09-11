@@ -13,6 +13,7 @@ import httpx
 
 from app.models.types import (
     Completion,
+    Complexity,
     Message,
     ProviderError,
     ProviderUnavailable,
@@ -60,6 +61,10 @@ class OpenRouterProvider:
             body["temperature"] = task.temperature
         if task.max_output_tokens:
             body["max_tokens"] = task.max_output_tokens
+        if task.complexity is Complexity.LOW:
+            # Summaries don't need thinking. On the free reasoning models it used the whole token
+            # budget (27s, answer cut off) versus 8s for a complete answer without it (measured).
+            body["reasoning"] = {"enabled": False}
 
         text: list[str] = []
         slots: dict[int, dict[str, Any]] = {}

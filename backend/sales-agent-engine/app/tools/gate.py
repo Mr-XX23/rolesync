@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Protocol
@@ -42,11 +42,14 @@ from app.platform.langgraph_runtime import is_control_flow_signal
 from app.tools.executor import ToolExecutor
 from app.tools.registry import AgentScopes, ToolDefinition, ToolRegistry
 from app.tools.types import (
+    SourceLink,
     ToolAccessDenied,
+    ToolFailed,
     ToolInput,
     ToolInputError,
     ToolInvocation,
     ToolKind,
+    ToolOutcomeUnknown,
     ToolResult,
     describe_validation_error,
 )
@@ -283,14 +286,16 @@ class ToolGate:
         )
         if not created:
             if step.status == SagaStatus.PENDING:
+                outcome = ToolOutcome.UNKNOWN
                 message = (
-                    f"a previous attempt at '{definition.name}' stopped mid-execution, so it may already have "
-                    "taken effect; verify before retrying"
+                    f"a previous attempt at '{definition.name}' stopped before confirming, so it MAY HAVE HAPPENED. "
+                    "Do not retry it; ask the user to check."
                 )
             else:
+                outcome = ToolOutcome.FAILED
                 message = step.error or f"'{definition.name}' already failed"
             return await self._refuse(
-                ctx, agent_name, definition.name, args_json, call_id, ToolOutcome.FAILED, message, pending_action_id
+                ctx, agent_name, definition.name, args_json, call_id, outcome, message, pending_action_id
             )
 
         started = time.monotonic()
@@ -300,23 +305,25 @@ class ToolGate:
             if is_control_flow_signal(exc):
                 raise
             outcome, message = _classify_failure(exc, definition)
-            await self._ledger.fail_write(
-                AuditFields(
-                    tenant_id=ctx.tenant_id,
-                    session_id=ctx.session_id,
-                    user_id=ctx.user_id,
-                    agent=agent_name,
-                    tool=definition.name,
-                    args=args_json,
-                    outcome=outcome,
-                    result_summary=message,
-                    idempotency_key=key,
-                    pending_action_id=pending_action_id,
-                    duration_ms=_elapsed_ms(started),
-                ),
-                step_id=step.id,
-                error=message,
+            audit = AuditFields(
+                tenant_id=ctx.tenant_id,
+                session_id=ctx.session_id,
+                user_id=ctx.user_id,
+                agent=agent_name,
+                tool=definition.name,
+                args=args_json,
+                outcome=outcome,
+                result_summary=message,
+                idempotency_key=key,
+                pending_action_id=pending_action_id,
+                duration_ms=_elapsed_ms(started),
             )
+            if outcome is ToolOutcome.UNKNOWN:
+                # The side effect may have happened: the saga step stays PENDING, so a replay
+                # of this call is refused instead of acting twice.
+                await self._ledger.record(audit)
+            else:
+                await self._ledger.fail_write(audit, step_id=step.id, error=message)
             await self._emit_result(ctx, call_id, agent_name, definition.name, outcome, error=message)
             return ToolResult(
                 ok=False, tool=definition.name, call_id=call_id, outcome=outcome, error=message,
@@ -368,10 +375,13 @@ class ToolGate:
             ctx, agent_name, definition.name, args_json, ToolOutcome.EXECUTED, output.summary,
             duration_ms=_elapsed_ms(started),
         )
-        await self._emit_result(ctx, call_id, agent_name, definition.name, ToolOutcome.EXECUTED, summary=output.summary)
+        await self._emit_result(
+            ctx, call_id, agent_name, definition.name, ToolOutcome.EXECUTED, summary=output.summary,
+            sources=output.sources,
+        )
         return ToolResult(
             ok=True, tool=definition.name, call_id=call_id, outcome=ToolOutcome.EXECUTED,
-            data=to_jsonable_python(output.data, fallback=str), summary=output.summary,
+            data=to_jsonable_python(output.data, fallback=str), summary=output.summary, sources=output.sources,
         )
 
     # ------------------------------------------------------------------ helpers
@@ -446,20 +456,20 @@ class ToolGate:
         *,
         summary: str | None = None,
         error: str | None = None,
+        sources: Sequence[SourceLink] = (),
     ) -> None:
-        await self._emit(
-            ctx.session_id,
-            EventType.TOOL_RESULT,
-            {
-                "call_id": call_id,
-                "agent": agent_name,
-                "tool": tool,
-                "ok": outcome is ToolOutcome.EXECUTED,
-                "outcome": outcome.value,
-                "summary": summary,
-                "error": error,
-            },
-        )
+        data: dict[str, Any] = {
+            "call_id": call_id,
+            "agent": agent_name,
+            "tool": tool,
+            "ok": outcome is ToolOutcome.EXECUTED,
+            "outcome": outcome.value,
+            "summary": summary,
+            "error": error,
+        }
+        if sources:
+            data["sources"] = [source.to_dict() for source in sources]
+        await self._emit(ctx.session_id, EventType.TOOL_RESULT, data)
 
     async def _emit(self, session_id: UUID, type: EventType, data: Mapping[str, Any]) -> None:
         await emit_best_effort(self._events, session_id, type, data)
@@ -470,8 +480,18 @@ def _classify_failure(exc: Exception, definition: ToolDefinition) -> tuple[ToolO
         return ToolOutcome.DENIED, str(exc) or f"access to '{definition.name}' denied"
     if isinstance(exc, ToolInputError):
         return ToolOutcome.INVALID, str(exc) or f"invalid input for '{definition.name}'"
+    unknown = isinstance(exc, ToolOutcomeUnknown) or (isinstance(exc, TimeoutError) and definition.kind is ToolKind.WRITE)
+    if unknown:
+        # A timed-out write keeps running in the connector: it is not a failure we can report as one.
+        return ToolOutcome.UNKNOWN, (
+            f"'{definition.name}' did not confirm whether it completed, so it MAY HAVE HAPPENED. "
+            "Do not retry it; ask the user to check (for email, their Sent folder)."
+        )
     if isinstance(exc, TimeoutError):
         return ToolOutcome.FAILED, f"'{definition.name}' timed out"
+    if isinstance(exc, ToolFailed):
+        logger.warning("tool %s failed: %s", definition.name, exc)
+        return ToolOutcome.FAILED, str(exc) or f"'{definition.name}' failed"
     logger.exception("tool %s raised", definition.name)
     return ToolOutcome.FAILED, f"'{definition.name}' failed: {type(exc).__name__}: {str(exc)[:300]}"
 

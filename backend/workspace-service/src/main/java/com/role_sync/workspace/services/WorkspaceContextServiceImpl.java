@@ -103,6 +103,7 @@ public class WorkspaceContextServiceImpl implements WorkspaceContextService {
     public Mono<UUID> upsertContext(UUID workspaceId, UUID contextId, UUID authUserId, ContextUpsertRequest request) {
         return Mono.fromCallable(() -> {
             CallerContext caller = authorizationService.requireActiveMembership(authUserId, workspaceId);
+            AgentContextAccess.requireWriter(caller.roleName());
             int changed = workspaceContextRepository.upsert(contextId, workspaceId, caller.profileId(),
                     request.getTitle(), request.getContextType(), request.getSummary(), request.getStatus());
             if (changed == 0) {
@@ -115,7 +116,7 @@ public class WorkspaceContextServiceImpl implements WorkspaceContextService {
     @Override
     public Mono<UUID> upsertTask(UUID contextId, UUID viewId, UUID authUserId, TaskUpsertRequest request) {
         return Mono.fromCallable(() -> {
-            WorkspaceContextRepository.AccessView context = requireContextAccess(contextId, authUserId);
+            WorkspaceContextRepository.AccessView context = requireContextWrite(contextId, authUserId, true);
             int changed = workspaceTaskViewRepository.upsert(viewId, context.getWorkspaceId(), contextId,
                     request.getTaskName(), request.getAgentName(), request.getOutputType(), request.getTaskStatus(),
                     request.getSortOrder() == null ? 0 : request.getSortOrder());
@@ -129,7 +130,7 @@ public class WorkspaceContextServiceImpl implements WorkspaceContextService {
     @Override
     public Mono<UUID> upsertNote(UUID contextId, UUID noteId, UUID authUserId, NoteUpsertRequest request) {
         return Mono.fromCallable(() -> {
-            WorkspaceContextRepository.AccessView context = requireContextAccess(contextId, authUserId);
+            WorkspaceContextRepository.AccessView context = requireContextWrite(contextId, authUserId, false);
             UUID authorId = authorizationService.requireProfile(authUserId).getProfileId();
             int changed = workspaceNoteRepository.upsert(noteId, context.getWorkspaceId(), contextId, authorId,
                     request.getNoteTitle(), request.getNoteBody());
@@ -180,6 +181,17 @@ public class WorkspaceContextServiceImpl implements WorkspaceContextService {
         })
         .subscribeOn(Schedulers.boundedElastic())
         .flatMapMany(Flux::fromIterable);
+    }
+
+    /** Active membership of the context's workspace, plus the write rules in {@link AgentContextAccess}. */
+    private WorkspaceContextRepository.AccessView requireContextWrite(UUID contextId, UUID authUserId,
+                                                                      boolean creatorOrAdminOnShared) {
+        WorkspaceContextRepository.AccessView context = workspaceContextRepository.findAccessView(contextId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Workspace context not found"));
+        CallerContext caller = authorizationService.requireActiveMembership(authUserId, context.getWorkspaceId());
+        AgentContextAccess.requireWriteAccess(context.getContextType(), context.getCreatedBy(), caller.profileId(),
+                caller.roleName(), creatorOrAdminOnShared);
+        return context;
     }
 
     /** Active membership of the context's workspace, plus the agent-context visibility rule. */

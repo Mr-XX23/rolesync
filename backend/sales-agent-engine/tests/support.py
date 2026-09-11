@@ -29,6 +29,7 @@ from app.tools.types import (
     ToolInput,
     ToolInvocation,
     ToolKind,
+    ToolOutcomeUnknown,
     ToolOutput,
     ToolScope,
 )
@@ -165,12 +166,38 @@ class ScriptedBrain:
             text = {
                 "EXECUTED": "Done: the email to Jane was sent.",
                 "REJECTED": "Understood, I did not send it. What should I change?",
+                "UNKNOWN": "I could not confirm the email went out; please check your Sent folder.",
             }.get(outcome, f"The email was not sent ({outcome}).")
             calls = ()
         for word in text.split(" "):
             yield TextDelta(word + " ")
         message = Message(role=Role.ASSISTANT, content=text, tool_calls=calls)
         yield StreamDone(Completion(message=message, provider=self.name, model=f"scripted-{self.name}"))
+
+
+class PlanningBrain:
+    """A model double for research turns: on the rep's message it requests every call in
+    ``plan`` in one step; once results are back it answers with their summaries."""
+
+    def __init__(self, plan: list[tuple[str, dict[str, Any]]], name: str = "gemini") -> None:
+        self.name = name
+        self.plan = plan
+        self.tasks: list[Any] = []
+
+    async def stream(self, task: Any, models: Any):
+        from app.models.types import Completion, Message, Role, StreamDone, TextDelta, ToolCall
+
+        self.tasks.append(task)
+        if task.messages[-1].role is Role.USER:
+            text = "Looking into it."
+            calls = tuple(ToolCall(id=f"call_{i}", name=name, arguments=args) for i, (name, args) in enumerate(self.plan))
+        else:
+            results = [json.loads(m.content) for m in task.messages if m.role is Role.TOOL]
+            text = "Findings: " + " | ".join(str(r.get("summary") or r.get("error") or r["outcome"]) for r in results)
+            calls = ()
+        for word in text.split(" "):
+            yield TextDelta(word + " ")
+        yield StreamDone(Completion(message=Message(role=Role.ASSISTANT, content=text, tool_calls=calls), provider=self.name, model="scripted"))
 
 
 class BlockingBrain:
@@ -203,14 +230,20 @@ class FailingBrain:
 class FakeConnector:
     """Composio stand-in: records executions instead of sending anything."""
 
-    connected: bool = True
+    connected: bool | set[str] = True  # or the set of connected toolkits
     executions: list[dict[str, Any]] = field(default_factory=list)
+    fail_with: Exception | None = None  # raised after the call is recorded (the provider may have acted)
+    responses: dict[str, dict[str, Any]] = field(default_factory=dict)  # canned `data` per action slug
 
     async def has_active_connection(self, user_id: UUID, toolkit: str) -> bool:
-        return self.connected
+        return toolkit in self.connected if isinstance(self.connected, set) else self.connected
 
     async def execute(self, *, user_id: UUID, slug: str, arguments: dict[str, Any]) -> dict[str, Any]:
         self.executions.append({"user_id": user_id, "slug": slug, "arguments": arguments})
+        if self.fail_with is not None:
+            raise self.fail_with
+        if slug in self.responses:
+            return self.responses[slug]
         return {"response_data": {"id": f"gmail-msg-{len(self.executions)}", "threadId": "thread-1"}}
 
 
@@ -234,7 +267,12 @@ class NoteArgs(ToolInput):
 
 
 def stub_registry(
-    effects: SideEffects, *, acl_denies: bool = False, acl_breaks: bool = False, read_delay: float = 0.0
+    effects: SideEffects,
+    *,
+    acl_denies: bool = False,
+    acl_breaks: bool = False,
+    read_delay: float = 0.0,
+    write_delay: float = 0.0,
 ) -> ToolRegistry:
     async def lookup(inv: ToolInvocation) -> ToolOutput:
         if read_delay:
@@ -248,10 +286,18 @@ def stub_registry(
         assert isinstance(args, NoteArgs)
         ref = f"msg-{len(effects.sent) + 1}"
         effects.sent.append({"to": args.to, "text": args.text, "tenant": str(inv.ctx.tenant_id), "ref": ref})
+        if write_delay:
+            await asyncio.sleep(write_delay)  # sent, but the confirmation is slow
         return ToolOutput(data={"message_id": ref}, summary=f"note sent to {args.to}", ref_id=ref)
 
     async def broken_send(inv: ToolInvocation) -> ToolOutput:
         raise RuntimeError("smtp relay unavailable")
+
+    async def unconfirmed_send(inv: ToolInvocation) -> ToolOutput:
+        args = inv.args
+        assert isinstance(args, NoteArgs)
+        effects.sent.append({"to": args.to, "text": args.text, "tenant": str(inv.ctx.tenant_id), "ref": None})
+        raise ToolOutcomeUnknown("the relay dropped the connection before answering")
 
     async def acl(ctx: AgentContext, args: ToolInput) -> None:
         if acl_denies:
@@ -290,6 +336,15 @@ def stub_registry(
                 category=ToolCategory.COMMUNICATION,
                 input_model=NoteArgs,
                 handler=broken_send,
+            ),
+            ToolDefinition(
+                name="unconfirmed_send",
+                description="Sends, then loses the answer",
+                kind=ToolKind.WRITE,
+                scope=ToolScope.COMMUNICATION,
+                category=ToolCategory.COMMUNICATION,
+                input_model=NoteArgs,
+                handler=unconfirmed_send,
             ),
         ]
     )

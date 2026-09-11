@@ -22,6 +22,10 @@ class ConnectorError(Exception):
     """A connector call failed; the message is safe to show to the agent and the user."""
 
 
+class ConnectorOutcomeUnknown(ConnectorError):
+    """The call raised before a response arrived, so whether it took effect is unknown."""
+
+
 class ConnectorClient:
     def __init__(self, *, api_key: str, toolkit_versions: Mapping[str, str], connection_cache_seconds: int = 60) -> None:
         from composio import Composio
@@ -58,7 +62,8 @@ class ConnectorClient:
         try:
             response = await asyncio.to_thread(self._sdk.tools.execute, slug, arguments, **options)
         except Exception as exc:
-            raise ConnectorError(f"{slug} could not be executed: {type(exc).__name__}: {str(exc)[:200]}") from exc
+            # No answer came back: the call may or may not have reached the provider.
+            raise ConnectorOutcomeUnknown(f"{slug} gave no answer: {type(exc).__name__}: {str(exc)[:200]}") from exc
         if not response.get("successful"):
             raise ConnectorError(f"{slug} failed: {str(response.get('error') or 'unknown error')[:300]}")
         return dict(response.get("data") or {})

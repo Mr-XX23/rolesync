@@ -95,6 +95,13 @@ class TaskSpec:
     complexity: Complexity = Complexity.HIGH  # when unsure, the plan says default to high
     temperature: float | None = None
     max_output_tokens: int | None = None
+    # Answer from a live web search (Google Search grounding). Only some providers can;
+    # such a task cannot also declare tools.
+    web_grounded: bool = False
+
+    def __post_init__(self) -> None:
+        if self.web_grounded and self.tools:
+            raise ValueError("a web-grounded task cannot declare tools")
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,12 +111,21 @@ class Usage:
 
 
 @dataclass(frozen=True, slots=True)
+class Source:
+    """A web page a grounded answer was based on."""
+
+    title: str
+    url: str
+
+
+@dataclass(frozen=True, slots=True)
 class Completion:
     message: Message
     provider: str
     model: str
     usage: Usage = field(default_factory=Usage)
     finish_reason: str | None = None
+    sources: tuple[Source, ...] = ()  # web-grounded tasks only
 
 
 # --- streaming -----------------------------------------------------------

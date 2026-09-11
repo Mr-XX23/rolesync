@@ -27,13 +27,22 @@ from app.models.providers.base import LLMProvider
 from app.models.providers.gemini_provider import GeminiProvider
 from app.models.providers.openrouter_provider import OpenRouterProvider
 from app.models.router import ModelRouter, Route, RoutingRules
+from app.models.types import TaskSpec
 from app.observability.tracing import LangSmithTracingClient, NoopTracingClient, TracingClient
 from app.platform.composio_client import ConnectorClient
+from app.platform.data_pipeline import DataPipelineClient
 from app.platform.jwt_verifier import AccessTokenVerifier, SigningKeys
 from app.platform.langgraph_runtime import GraphApprovalPort, GraphRuntime, GraphSpec, open_checkpointer
 from app.platform.redis import create_redis
+from app.platform.web_search import TavilySearch
 from app.platform.workspace_client import WorkspaceDirectory, WorkspaceRecordsClient
+from app.tools.adapters.catalog import catalog_tools
 from app.tools.adapters.gmail import gmail_tools
+from app.tools.adapters.google_calendar import calendar_tools
+from app.tools.adapters.knowledge import knowledge_tools
+from app.tools.adapters.notion import notion_tools
+from app.tools.adapters.slack import slack_tools
+from app.tools.adapters.web import WebResearch, web_tools
 from app.tools.executor import ToolExecutor
 from app.tools.gate import ToolGate
 from app.tools.registry import AgentScopes, ToolRegistry
@@ -99,6 +108,7 @@ def routing_rules(settings: Settings) -> RoutingRules:
         complex=Route("gemini", (settings.model_complex,)),
         simple=Route("openrouter", settings.split_list(settings.models_simple)),
         failover=Route("openrouter", settings.split_list(settings.models_failover)),
+        web_grounded=Route("gemini", (settings.model_web_grounding,)),
     )
 
 
@@ -112,14 +122,29 @@ def build_tracer(settings: Settings) -> TracingClient:
     return NoopTracingClient()
 
 
-def default_registry(connector: ConnectorClient | None) -> ToolRegistry:
-    registry = ToolRegistry()
+def default_registry(
+    settings: Settings, *, connector: ConnectorClient | None, router: ModelRouter, http: httpx.AsyncClient
+) -> ToolRegistry:
+    definitions = []
     if connector is None:
-        logger.warning("COMPOSIO_API_KEY not set; Gmail tools are unavailable")
-        return registry
-    for definition in gmail_tools(connector):
-        registry.register(definition)
-    return registry
+        logger.warning("COMPOSIO_API_KEY not set; Gmail, Calendar, Slack and Notion tools are unavailable")
+    else:
+        definitions += [*gmail_tools(connector), *calendar_tools(connector), *slack_tools(connector), *notion_tools(connector)]
+
+    data_pipeline = DataPipelineClient(base_url=settings.data_pipeline_url, http=http)
+    definitions += [*knowledge_tools(data_pipeline), *catalog_tools(data_pipeline)]
+
+    tavily = None
+    if settings.tavily_api_key and settings.tavily_api_key.get_secret_value():
+        tavily = TavilySearch(api_key=settings.tavily_api_key.get_secret_value(), http=http, base_url=settings.tavily_base_url)
+    grounding = router.can_serve(TaskSpec(purpose="web_search", messages=(), web_grounded=True))
+    if tavily is None and not grounding:
+        logger.warning("no web search backend (TAVILY_API_KEY or GEMINI_API_KEY); web tools are unavailable")
+    else:
+        if tavily is None:
+            logger.warning("TAVILY_API_KEY not set; web search uses Google Search grounding only")
+        definitions += web_tools(WebResearch(router=router, tavily=tavily, grounding=grounding), router)
+    return ToolRegistry(definitions)
 
 
 async def build_container(
@@ -151,18 +176,23 @@ async def build_container(
         )
 
         tracer = tracer or build_tracer(settings)
+        model_router = ModelRouter(
+            providers if providers is not None else build_providers(settings, http_client),
+            routing_rules(settings),
+            tracer,
+        )
         if registry is None:
             if connector is None and settings.composio_api_key and settings.composio_api_key.get_secret_value():
                 connector = ConnectorClient(
                     api_key=settings.composio_api_key.get_secret_value(),
                     toolkit_versions=settings.composio_versions(),
                 )
-            registry = default_registry(connector)
+            registry = default_registry(settings, connector=connector, router=model_router, http=http_client)
         scopes = AgentScopes()
         sessions = SessionRepository(sessionmaker)
         pending_actions = PendingActionRepository(sessionmaker)
         ledger = LedgerRepository(sessionmaker)
-        outbox = OutboxRepository(sessionmaker)
+        outbox = OutboxRepository(sessionmaker, engine)
         events = RedisEventChannel(
             redis,
             key_prefix=settings.redis_key_prefix,
@@ -180,11 +210,6 @@ async def build_container(
             events=events,
             tracer=tracer,
             approval_ttl=timedelta(seconds=settings.approval_ttl_seconds),
-        )
-        model_router = ModelRouter(
-            providers if providers is not None else build_providers(settings, http_client),
-            routing_rules(settings),
-            tracer,
         )
         sync_worker = WorkspaceSyncWorker(
             outbox,
@@ -244,6 +269,7 @@ async def build_container(
             leases=leases,
             recorder=recorder,
             tracer=tracer,
+            sweep_interval_seconds=max(5.0, settings.run_lease_seconds / 2),
         )
         return container
     except BaseException:

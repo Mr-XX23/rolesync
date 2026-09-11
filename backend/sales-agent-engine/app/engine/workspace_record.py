@@ -8,22 +8,24 @@ audit). Mapping:
 - a sent email, a final answer → a note on that context
 
 Records are written to ``agent.workspace_outbox`` and delivered by ``WorkspaceSyncWorker``.
-Recording is best-effort by design: it never slows down or fails an agent run.
+Recording is best-effort by design: every public recorder method swallows its own errors,
+so it never slows down or fails an agent run (tool arguments it sees may be malformed).
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import re
-from collections.abc import Callable, Sequence
-from typing import Any
+from collections.abc import Awaitable, Callable, Sequence
+from typing import Any, ParamSpec
 from uuid import UUID, uuid5
 
 from app.core.context import AgentContext
 from app.core.enums import SessionStatus, ToolOutcome
-from app.db.models import OutboxKind, PendingAction, WorkspaceOutbox
-from app.db.repositories.outbox import OutboxItem, OutboxRepository
+from app.db.models import OutboxKind, PendingAction
+from app.db.repositories.outbox import OutboxItem, OutboxRecord, OutboxRepository
 from app.platform.workspace_client import Delivery, WorkspaceRecordsClient
 from app.tools.types import ToolResult
 
@@ -35,12 +37,28 @@ CONTEXT_TYPE = "AGENT_SESSION"
 
 _TASK_STATUS = {
     ToolOutcome.EXECUTED: "DONE",
+    ToolOutcome.UNKNOWN: "UNKNOWN",
     ToolOutcome.REJECTED: "REJECTED",
     ToolOutcome.EXPIRED: "EXPIRED",
     ToolOutcome.DENIED: "DENIED",
     ToolOutcome.INVALID: "FAILED",
     ToolOutcome.FAILED: "FAILED",
 }
+
+P = ParamSpec("P")
+
+
+def _never_raises(method: Callable[P, Awaitable[None]]) -> Callable[P, Awaitable[None]]:
+    @functools.wraps(method)
+    async def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
+        try:
+            await method(*args, **kwargs)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("workspace recording (%s) failed; the run continues", method.__name__, exc_info=True)
+
+    return wrapper
 
 
 def context_id_for(session_id: UUID) -> UUID:
@@ -55,12 +73,14 @@ def note_id_for(session_id: UUID, label: str) -> UUID:
     return uuid5(_NAMESPACE, f"note:{session_id}:{label}")
 
 
-def describe_action(tool: str, args: dict[str, Any]) -> tuple[str, str]:
-    """(task name, output type) for the workspace timeline."""
+def describe_action(tool: str, args: Any) -> tuple[str, str]:
+    """(task name, output type) for the workspace timeline. ``args`` may be whatever the
+    model sent (including arguments the gate rejected), so nothing about its shape is assumed."""
+    fields = args if isinstance(args, dict) else {}
     if tool == "send_email":
-        recipients = ", ".join(args.get("to") or [])
-        return _clip(f"Email to {recipients}: {args.get('subject', '')}", 150), "EMAIL"
-    return _clip(tool.replace("_", " ").capitalize(), 150), _clip(tool.upper(), 50)
+        recipients = ", ".join(_addresses(fields.get("to")))
+        return _clip(f"Email to {recipients}: {_text(fields.get('subject'))}", 150), "EMAIL"
+    return _clip(str(tool).replace("_", " ").capitalize(), 150), _clip(str(tool).upper(), 50)
 
 
 class WorkspaceRecorder:
@@ -69,6 +89,7 @@ class WorkspaceRecorder:
         self._enabled = enabled
         self._on_enqueue = on_enqueue
 
+    @_never_raises
     async def session_updated(
         self, ctx: AgentContext, *, title: str | None, status: SessionStatus, summary: str | None = None
     ) -> None:
@@ -80,19 +101,21 @@ class WorkspaceRecorder:
         }
         await self._enqueue(ctx, [self._item(ctx, OutboxKind.CONTEXT, context_id_for(ctx.session_id), payload)])
 
+    @_never_raises
     async def action_awaiting_approval(self, ctx: AgentContext, action: PendingAction) -> None:
         task_name, output_type = describe_action(action.tool, action.args)
         payload = {
             "task_name": task_name,
-            "agent_name": action.agent,
+            "agent_name": _clip(action.agent, 100),
             "output_type": output_type,
             "task_status": "AWAITING_APPROVAL",
             "sort_order": _sort_order(action.idempotency_key),
         }
         await self._enqueue(ctx, [self._item(ctx, OutboxKind.TASK, task_id_for(action.idempotency_key), payload)])
 
+    @_never_raises
     async def action_finished(
-        self, ctx: AgentContext, *, idempotency_key: str, agent: str, tool: str, args: dict[str, Any], result: ToolResult
+        self, ctx: AgentContext, *, idempotency_key: str, agent: str, tool: str, args: Any, result: ToolResult
     ) -> None:
         task_name, output_type = describe_action(tool, args)
         items = [
@@ -102,33 +125,34 @@ class WorkspaceRecorder:
                 task_id_for(idempotency_key),
                 {
                     "task_name": task_name,
-                    "agent_name": agent,
+                    "agent_name": _clip(agent, 100),
                     "output_type": output_type,
                     "task_status": _TASK_STATUS.get(result.outcome, "FAILED"),
                     "sort_order": _sort_order(idempotency_key),
                 },
             )
         ]
-        if tool == "send_email" and result.outcome is ToolOutcome.EXECUTED:
-            lines = [f"To: {', '.join(args.get('to') or [])}"]
-            if args.get("cc"):
-                lines.append(f"Cc: {', '.join(args['cc'])}")
-            lines += [f"Subject: {args.get('subject', '')}", "", str(args.get("body", ""))]
+        if tool == "send_email" and result.outcome is ToolOutcome.EXECUTED and isinstance(args, dict):
+            lines = [f"To: {', '.join(_addresses(args.get('to')))}"]
+            if _addresses(args.get("cc")):
+                lines.append(f"Cc: {', '.join(_addresses(args.get('cc')))}")
+            lines += [f"Subject: {_text(args.get('subject'))}", "", _text(args.get("body"))]
             items.append(
                 self._item(
                     ctx,
                     OutboxKind.NOTE,
                     note_id_for(ctx.session_id, f"sent:{idempotency_key}"),
-                    {"note_title": _clip(f"Sent: {args.get('subject', 'email')}", 150), "note_body": "\n".join(lines)},
+                    {"note_title": _clip(f"Sent: {_text(args.get('subject')) or 'email'}", 150), "note_body": "\n".join(lines)},
                 )
             )
         await self._enqueue(ctx, items)
 
+    @_never_raises
     async def answer_recorded(self, ctx: AgentContext, *, turn: int, prompt: str | None, answer: str) -> None:
         if not answer.strip():
             return
-        title = f"Answer: {(prompt or '').strip().splitlines()[0] if prompt and prompt.strip() else 'agent response'}"
-        payload = {"note_title": _clip(title, 150), "note_body": answer}
+        first_line = prompt.strip().splitlines()[0] if prompt and prompt.strip() else "agent response"
+        payload = {"note_title": _clip(f"Answer: {first_line}", 150), "note_body": answer}
         await self._enqueue(ctx, [self._item(ctx, OutboxKind.NOTE, note_id_for(ctx.session_id, f"answer:{turn}"), payload)])
 
     def _item(self, ctx: AgentContext, kind: OutboxKind, target_id: UUID, payload: dict[str, Any]) -> OutboxItem:
@@ -145,11 +169,7 @@ class WorkspaceRecorder:
     async def _enqueue(self, ctx: AgentContext, items: Sequence[OutboxItem]) -> None:
         if not self._enabled:
             return
-        try:
-            await self._outbox.enqueue(items)
-        except Exception:
-            logger.warning("could not record workspace items for session %s", ctx.session_id, exc_info=True)
-            return
+        await self._outbox.enqueue(items)
         if self._on_enqueue is not None:
             self._on_enqueue()
 
@@ -185,7 +205,7 @@ class WorkspaceSyncWorker:
             delivered += await self._outbox.deliver_session(session_id, self._deliver, max_attempts=self._max_attempts)
         return delivered
 
-    async def _deliver(self, item: WorkspaceOutbox) -> Delivery:
+    async def _deliver(self, item: OutboxRecord) -> Delivery:
         if item.kind == OutboxKind.CONTEXT:
             return await self._client.put_context(
                 user_id=item.user_id, workspace_id=item.tenant_id, context_id=item.context_id, payload=item.payload
@@ -206,6 +226,31 @@ def _sort_order(idempotency_key: str) -> int:
     return int(match.group(1)) * 10 + int(match.group(2)) if match else 0
 
 
+def _addresses(value: Any) -> list[str]:
+    items = value if isinstance(value, list) else [value] if value else []
+    return [item for item in items if isinstance(item, str)]
+
+
+def _text(value: Any) -> str:
+    return value if isinstance(value, str) else ""
+
+
 def _clip(value: str | None, limit: int) -> str:
+    """Trim to ``limit`` UTF-16 code units: workspace-service (Java) counts length that way,
+    so an emoji counts as two."""
     text = (value or "").strip()
-    return text if len(text) <= limit else text[: limit - 1] + "…"
+    if _utf16_len(text) <= limit:
+        return text
+    kept: list[str] = []
+    used = 1  # room for the ellipsis
+    for char in text:
+        size = _utf16_len(char)
+        if used + size > limit:
+            break
+        kept.append(char)
+        used += size
+    return "".join(kept) + "…"
+
+
+def _utf16_len(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2

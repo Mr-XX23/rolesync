@@ -55,6 +55,16 @@ class ToolOutput:
     data: Any
     summary: str
     ref_id: str | None = None  # id of the created side effect, kept on the saga step
+    sources: tuple[SourceLink, ...] = ()  # where a read's facts came from, for citations and the UI
+
+
+@dataclass(frozen=True, slots=True)
+class SourceLink:
+    title: str
+    url: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"title": self.title, "url": self.url}
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +83,7 @@ class ToolResult:
     # The arguments the tool actually ran with: after a human edit these differ from what
     # the model proposed, and records of the action must reflect what really happened.
     executed_args: dict[str, Any] | None = None
+    sources: tuple[SourceLink, ...] = ()
 
     def for_model(self) -> dict[str, Any]:
         """The payload an LLM sees as the tool response."""
@@ -81,6 +92,8 @@ class ToolResult:
             payload["summary"] = self.summary
         if self.data is not None:
             payload["data"] = self.data
+        if self.sources:
+            payload["sources"] = [source.to_dict() for source in self.sources]
         if self.error:
             payload["error"] = self.error
         return payload
@@ -92,6 +105,16 @@ class ToolAccessDenied(Exception):
 
 class ToolInputError(Exception):
     """Raised by a handler for arguments that are well-typed but unusable."""
+
+
+class ToolFailed(Exception):
+    """Raised by a handler for an expected failure (e.g. an upstream service said no); the
+    message is safe to show to the agent and the user."""
+
+
+class ToolOutcomeUnknown(Exception):
+    """Raised by a write handler that could not learn whether its side effect happened
+    (e.g. the connection dropped after the request was sent). Never retried."""
 
 
 def describe_validation_error(exc: ValidationError) -> str:

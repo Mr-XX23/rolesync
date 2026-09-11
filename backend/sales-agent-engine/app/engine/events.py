@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 class EventType(StrEnum):
+    USER_MESSAGE = "user_message"  # addition: the prompt that started a turn, so a stream replay shows it
     STEP_STARTED = "step_started"
     TOKEN = "token"
     TOOL_CALL = "tool_call"
