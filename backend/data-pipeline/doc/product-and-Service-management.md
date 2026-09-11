@@ -23,7 +23,7 @@
 - **Frontend:** React + TypeScript + Tailwind CSS + Lucide Icons + Axios.
 - **DB:** PostgreSQL (structured source of truth, schema `catalog` in dedicated database `rolesync-micro-catalog`).
 - **Queue/Workers:** In-memory `asyncio.Queue` worker with Redis worker compatibility for async CSV batch import.
-- **Auth:** Three-tier authentication extraction (Bearer JWT with claim alias resolution → gateway headers `X-Tenant-Id` → `request.state`).
+- **Auth:** Gateway-verified `X-User-Id`, workspace membership of `X-Tenant-Id` checked with workspace-service, and a role that can write (not VIEWER) for changes — see §8.1.
 - **No new vector store, no embedding calls in the catalog core.**
 
 ---
@@ -314,14 +314,12 @@ product_name,type,category,option_size,option_color,sku,price,currency,keywords,
 
 ## 8. Multi-Tenancy, Security & Authentication Architecture
 
-### 8.1 Three-Tier Identity Extraction Cascade (`catalog/auth.py`)
+### 8.1 Identity, Workspace Membership & Roles (`catalog/auth.py`)
 
 Every request passes through `get_catalog_context`:
-1. **Tier 1 (Bearer JWT):** Parses token claims (`tenant_id`, `tenantId`, `workspace_id`, `workspaceId`) and user claims (`user_id`, `userId`, `sub`). Uses PyJWT if available or fallback base64 URL-safe payload decoder with automatic padding correction.
-2. **Tier 2 (Gateway Custom Headers):** Checks `X-Tenant-Id` or `X-Workspace-Id` and `X-User-Id` injected by API Gateway.
-3. **Tier 3 (ASGI Middleware State):** Checks `request.state.tenant_id` and `request.state.user_id`.
-
-If no tenant is identified, returns `401 Unauthorized`. If tenant format is not a valid UUID, returns `400 Bad Request`.
+1. **Identity:** The user id comes only from the `X-User-Id` header, which the API gateway sets after verifying the access-token cookie (client-supplied copies are stripped). Missing → `401 Unauthorized`.
+2. **Workspace:** `X-Tenant-Id` (or `X-Workspace-Id`) names the workspace the caller acts in and must be a UUID (missing or malformed → `400 Bad Request`). The caller must be an active member of it, checked with workspace-service (`module_1_document_processing/workspace_access.py`): not a member → `403 Forbidden`; membership can't be verified → `503 Service Unavailable`. Catalog queries are scoped by this tenant id.
+3. **Role:** Routes that change catalog data use `get_catalog_writer_context`, which also requires a role that can write (OWNER, ADMIN or MEMBER). Viewers get `403 Forbidden` ("Viewers can't make changes in this workspace", the same rule as the knowledge vault) on category upserts; product create/update/delete; options and variants; location create/update/delete; set, batch-set and adjust stock, reserve, release and transfer; and CSV import commit. Reads stay open to every member, including the POST routes that don't change data (`/ai/semantic-search`, `/ai/generate-findability`, `/validate-rows`, `/import/validate`).
 
 ### 8.2 Input Sanitization & SQL Injection Defense (`catalog/schemas.py`)
 
@@ -463,9 +461,9 @@ Describe, Search, Check, Reserve"]
 // ---------- GATEWAY & AUTH CASCADE ----------
 Security Boundary [color: orange] {
   Auth Resolver [icon: shield, color: orange, label: "CatalogContext Resolver
-Tier 1: JWT (PyJWT/Base64)
-Tier 2: X-Tenant-Id / X-User-Id
-Tier 3: request.state"]
+Gateway-verified X-User-Id
+X-Tenant-Id workspace membership
+Writer role for changes"]
   Input Sanitizer [icon: alert-triangle, color: red, label: "Input Sanitizer
 SQL injection regex check
 Field length boundaries"]
