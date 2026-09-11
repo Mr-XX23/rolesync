@@ -10,6 +10,10 @@ therefore an orphan (its process died), and a paused session whose approvals are
 decided was never resumed; the maintenance sweep repairs both, whenever they happen.
 Workspace records for a status change are always enqueued *before* the change, so a
 follow-up run's records can never be delivered ahead of the previous run's.
+
+Approval TTL: the sweep also expires approvals nobody decided in time and resumes their
+sessions with that EXPIRED decision, so a run never waits forever; the orchestrator then
+offers to undo whatever the request had already done (a new approval of its own).
 """
 
 from __future__ import annotations
@@ -45,6 +49,7 @@ def context_for(session: AgentSession) -> AgentContext:
         session_id=session.id,
         mode=RunMode(session.mode),
         goal_id=session.goal_id,
+        turn=session.turn,
     )
 
 
@@ -107,7 +112,9 @@ class SessionRunner:
         lease = await self._leases.acquire(session.id, wait_seconds=wait)
         if lease is None:
             return None
-        claimed = await self._sessions.transition(session.id, to=SessionStatus.RUNNING, expected=CONTINUABLE)
+        claimed = await self._sessions.transition(
+            session.id, to=SessionStatus.RUNNING, expected=CONTINUABLE, next_turn=True
+        )
         if claimed is None:
             await lease.release()
             return None
@@ -139,7 +146,33 @@ class SessionRunner:
             await asyncio.sleep(self._sweep_interval)
 
     async def sweep(self) -> dict[str, list[UUID]]:
-        return {"recovered": await self.recover_orphans(), "resumed": await self.resume_stalled_approvals()}
+        return {
+            "expired": await self.expire_stale_approvals(),
+            "recovered": await self.recover_orphans(),
+            "resumed": await self.resume_stalled_approvals(),
+        }
+
+    async def expire_stale_approvals(self) -> list[UUID]:
+        """Expire approvals past their TTL and continue their sessions with that decision."""
+        expired: list[UUID] = []
+        for action in await self._pending.expire_due():
+            expired.append(action.id)
+            await emit_best_effort(
+                self._events,
+                action.session_id,
+                EventType.APPROVAL_RESOLVED,
+                {"pending_action_id": action.id, "status": PendingActionStatus.EXPIRED, "resolved_by": None},
+            )
+            session = await self._sessions.get(action.session_id)
+            if session is None or session.status != SessionStatus.AWAITING_APPROVAL:
+                continue
+            logger.info("approval %s expired; resuming session %s", action.id, session.id)
+            try:
+                await self.resume(context_for(session), {"pending_action_id": str(action.id), "status": action.status})
+            except Exception:
+                # The decision is saved; resume_stalled_approvals picks the session up next sweep.
+                logger.exception("could not resume session %s after its approval expired", session.id)
+        return expired
 
     async def recover_orphans(self) -> list[UUID]:
         """Resume RUNNING sessions whose run died (no lease) from their last checkpoint."""
@@ -332,18 +365,22 @@ class SessionRunner:
     async def _finish(self, ctx: AgentContext, outcome: RunOutcome, title: str | None) -> None:
         answer = str(outcome.values.get("final_answer") or "")
         prompts = [m.get("content") for m in outcome.values.get("messages") or [] if m.get("role") == "user"]
-        await self._recorder.session_updated(ctx, title=title, status=SessionStatus.DONE, summary=answer)
+        # A guardrail that stopped the turn (a limit or a loop) ends it HALTED rather than DONE.
+        halt = outcome.values.get("halt") if isinstance(outcome.values.get("halt"), dict) else None
+        status = SessionStatus.HALTED if halt else SessionStatus.DONE
+        await self._recorder.session_updated(ctx, title=title, status=status, summary=answer)
         await self._recorder.answer_recorded(ctx, turn=len(prompts), prompt=prompts[-1] if prompts else None, answer=answer)
         await self._sessions.transition(
             ctx.session_id,
-            to=SessionStatus.DONE,
+            to=status,
             expected={SessionStatus.RUNNING},
             checkpoint_ref=outcome.checkpoint_id,
             settled_event_id=await self._events.latest_id(ctx.session_id),
         )
-        await emit_best_effort(
-            self._events, ctx.session_id, EventType.DONE, {"final_answer": answer, "checkpoint_id": outcome.checkpoint_id}
-        )
+        data: dict[str, Any] = {"final_answer": answer, "checkpoint_id": outcome.checkpoint_id}
+        if halt:
+            data |= {"reason": halt.get("reason"), "message": halt.get("message")}
+        await emit_best_effort(self._events, ctx.session_id, EventType.HALTED if halt else EventType.DONE, data)
 
     async def _fail(self, ctx: AgentContext, title: str | None, message: str) -> None:
         # The failed segment's events stay after the previous settle point, so a reopened

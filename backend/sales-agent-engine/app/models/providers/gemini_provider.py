@@ -52,6 +52,11 @@ class GeminiProvider:
         config = types.GenerateContentConfig(
             system_instruction=task.system,
             tools=_tools(task),
+            tool_config=types.ToolConfig(
+                function_calling_config=types.FunctionCallingConfig(mode=types.FunctionCallingConfigMode.NONE)
+            )
+            if task.tools and not task.allow_tool_calls
+            else None,
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
             temperature=task.temperature,
             max_output_tokens=task.max_output_tokens,

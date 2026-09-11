@@ -164,7 +164,9 @@ async def test_interactive_write_pauses_for_approval_then_executes_exactly_once(
     assert len(effects.sent) == 1 and effects.sent[0]["tenant"] == str(tenant_id)
     [step] = await container.ledger.list_steps(tenant_id=tenant_id, session_id=ctx.session_id)
     assert (step.status, step.ref_id, step.step_no) == (SagaStatus.DONE, "msg-1", 1)
-    assert step.undo_action == {"action": "recall_note", "to": "ceo@acme.test"}
+    assert step.undo_action == {"tool": "send_note", "args": {"ref": "msg-1"}, "label": "Recall the note to ceo@acme.test"}
+    assert result.action_id == step.id and result.undoable
+    assert step.turn == ctx.turn
     audits = await container.ledger.list_audit(tenant_id=tenant_id, session_id=ctx.session_id)
     assert [a.outcome for a in audits] == ["EXECUTED"]
     assert audits[0].result == {"message_id": "msg-1"} and audits[0].pending_action_id == pending.id
@@ -347,3 +349,48 @@ async def test_only_one_execution_row_per_idempotency_key(make_container, tenant
     async with container.engine.connect() as conn:
         count = len((await conn.execute(select(AuditEntry.id).where(AuditEntry.idempotency_key == "k1"))).all())
     assert count == 1
+
+
+async def test_a_write_whose_arguments_the_preview_rejects_never_asks_for_approval(make_container, tenant_id, user_id):
+    from app.tools.adapters.google_calendar import calendar_tools
+    from app.tools.registry import ToolRegistry
+    from tests.support import FakeConnector
+
+    container = await make_container()
+    ctx = await open_session(container, tenant_id, user_id)
+    connector = FakeConnector()
+    pausing = PausingApprovalPort()
+    gate = make_gate(container, ToolRegistry(calendar_tools(connector)), pausing)
+
+    # A wall-clock start with no time zone can't be scheduled: the agent hears it at once.
+    result = await gate.call_tool(
+        ctx, "orchestrator", "create_calendar_event", {"title": "Demo", "start": "2030-01-01T10:00:00"}, call_id="c1"
+    )
+
+    assert result.outcome is ToolOutcome.INVALID and "time_zone" in (result.error or "")
+    assert pausing.requests == [] and connector.executions == []
+    assert await container.pending_actions.list_for_user(tenant_id=tenant_id, user_id=user_id, status=None) == []
+    [audit] = await container.ledger.list_audit(tenant_id=tenant_id, session_id=ctx.session_id)
+    assert audit.outcome == "INVALID"
+
+
+async def test_an_approved_write_runs_with_the_arguments_that_were_approved(make_container, tenant_id, user_id):
+    container = await make_container()
+    effects = SideEffects()
+    ctx = await open_session(container, tenant_id, user_id)
+    registry = stub_registry(effects)
+    pausing = PausingApprovalPort()
+    with pytest.raises(Paused):
+        await make_gate(container, registry, pausing).call_tool(ctx, "orchestrator", "send_note", NOTE, call_id="c1")
+    await container.pending_actions.resolve(
+        tenant_id=tenant_id, action_id=pausing.requests[0].pending_action_id, status=PendingActionStatus.APPROVED,
+        resolved_by=user_id,
+    )
+
+    # Even if the resumed caller passed different arguments, what runs is what was approved.
+    changed = {"to": "someone-else@acme.test", "text": "not what the reviewer saw"}
+    result = await make_gate(container, registry, DecidedApprovalPort()).call_tool(
+        ctx, "orchestrator", "send_note", changed, call_id="c1"
+    )
+
+    assert result.ok and effects.sent[0]["to"] == NOTE["to"] and effects.sent[0]["text"] == NOTE["text"]

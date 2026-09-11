@@ -68,6 +68,7 @@ export type AgentEventType =
   | 'approval_resolved'
   | 'progress'
   | 'done'
+  | 'halted' // a safety limit stopped the turn; ends it like done
   | 'error';
 
 /** Fields the engine puts in an event's `data`, by event type. */
@@ -82,14 +83,14 @@ export interface AgentEventData {
   pending_action_id?: string; // awaiting_approval, approval_resolved
   preview?: Record<string, unknown>;
   expires_at?: string;
-  reason?: string;
+  reason?: string; // awaiting_approval; halted: which safety limit
   status?: string; // approval_resolved
   outcome?: string; // tool_result
   summary?: string | null;
   error?: string | null;
-  sources?: SourceLink[]; // tool_result of a read
-  final_answer?: string; // done
-  message?: string; // error
+  sources?: SourceLink[]; // tool_result: pages a read used, or links to what a write created
+  final_answer?: string; // done, halted
+  message?: string; // error, halted
 }
 
 /** The SSE envelope: `{type, session_id, data, ts}`. */
@@ -117,7 +118,8 @@ export const salesAgentApi = {
   startChat: async (message: string, sessionId?: string | null) => {
     const response = await api.post<{ session_id: string; status: SessionStatus; events_url: string }>(
       `${BASE}/chat`,
-      { message, session_id: sessionId ?? null },
+      // The rep's time zone lets the agent schedule meetings at the times they mean.
+      { message, session_id: sessionId ?? null, time_zone: browserTimeZone() },
       { headers: tenantHeaders() }
     );
     return response.data;
@@ -155,6 +157,14 @@ export const salesAgentApi = {
     return afterEventId ? `${base}?last_event_id=${encodeURIComponent(afterEventId)}` : base;
   },
 };
+
+function browserTimeZone(): string | null {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+  } catch {
+    return null;
+  }
+}
 
 /** Human-readable message for an engine error response. */
 export function describeAgentError(error: unknown): string {

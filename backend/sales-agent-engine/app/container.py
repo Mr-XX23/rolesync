@@ -19,6 +19,9 @@ from app.db.repositories import LedgerRepository, PendingActionRepository, Sessi
 from app.db.repositories.outbox import OutboxRepository
 from app.db.session import create_engine, create_sessionmaker
 from app.engine.events import RedisEventChannel
+from app.engine.guardrails.budgets import TenantBudgets
+from app.engine.guardrails.limits import TurnLimits
+from app.engine.guardrails.saga import UNDO_TOOL, Compensator
 from app.engine.leases import RunLeases
 from app.engine.orchestrator import Orchestrator
 from app.engine.runner import SessionRunner
@@ -37,13 +40,17 @@ from app.platform.redis import create_redis
 from app.platform.web_search import TavilySearch
 from app.platform.workspace_client import WorkspaceDirectory, WorkspaceRecordsClient
 from app.tools.adapters.catalog import catalog_tools
+from app.tools.adapters.catalog_writes import catalog_write_tools
+from app.tools.adapters.documents import document_tools
 from app.tools.adapters.gmail import gmail_tools
 from app.tools.adapters.google_calendar import calendar_tools
 from app.tools.adapters.knowledge import knowledge_tools
 from app.tools.adapters.notion import notion_tools
+from app.tools.adapters.quotes import quote_tools
 from app.tools.adapters.slack import slack_tools
 from app.tools.adapters.web import WebResearch, web_tools
-from app.tools.executor import ToolExecutor
+from app.tools.documents.storage import DocumentStore
+from app.tools.executor import CircuitBreaker, ToolExecutor
 from app.tools.gate import ToolGate
 from app.tools.registry import AgentScopes, ToolRegistry
 
@@ -71,6 +78,8 @@ class Container:
     sync_worker: WorkspaceSyncWorker
     leases: RunLeases
     tracer: TracingClient
+    budgets: TenantBudgets
+    compensator: Compensator
     runner: Any = None  # SessionRunner; tests may substitute a double
     _exit_stack: AsyncExitStack = field(default_factory=AsyncExitStack, repr=False)
 
@@ -123,16 +132,38 @@ def build_tracer(settings: Settings) -> TracingClient:
 
 
 def default_registry(
-    settings: Settings, *, connector: ConnectorClient | None, router: ModelRouter, http: httpx.AsyncClient
+    settings: Settings,
+    *,
+    connector: ConnectorClient | None,
+    router: ModelRouter,
+    http: httpx.AsyncClient,
+    workspaces: WorkspaceDirectory,
 ) -> ToolRegistry:
     definitions = []
     if connector is None:
-        logger.warning("COMPOSIO_API_KEY not set; Gmail, Calendar, Slack and Notion tools are unavailable")
+        logger.warning(
+            "COMPOSIO_API_KEY not set; Gmail, Calendar, Slack, Notion and Drive are unavailable "
+            "(documents are saved to the knowledge base)"
+        )
     else:
         definitions += [*gmail_tools(connector), *calendar_tools(connector), *slack_tools(connector), *notion_tools(connector)]
 
     data_pipeline = DataPipelineClient(base_url=settings.data_pipeline_url, http=http)
-    definitions += [*knowledge_tools(data_pipeline), *catalog_tools(data_pipeline)]
+    definitions += [
+        *knowledge_tools(data_pipeline),
+        *catalog_tools(data_pipeline),
+        *catalog_write_tools(data_pipeline, workspaces),
+    ]
+    store = DocumentStore(
+        connector=connector,
+        data_pipeline=data_pipeline,
+        vault_link=settings.knowledge_vault_link,
+        max_bytes=settings.document_max_bytes,
+    )
+    definitions += [
+        *document_tools(store, font_path=settings.pdf_font_path),
+        *quote_tools(data_pipeline, store, workspaces, font_path=settings.pdf_font_path),
+    ]
 
     tavily = None
     if settings.tavily_api_key and settings.tavily_api_key.get_secret_value():
@@ -181,13 +212,22 @@ async def build_container(
             routing_rules(settings),
             tracer,
         )
+        workspaces = WorkspaceDirectory(
+            base_url=settings.workspace_service_url,
+            http=http_client,
+            redis=redis,
+            key_prefix=settings.redis_key_prefix,
+            cache_seconds=settings.membership_cache_seconds,
+        )
         if registry is None:
             if connector is None and settings.composio_api_key and settings.composio_api_key.get_secret_value():
                 connector = ConnectorClient(
                     api_key=settings.composio_api_key.get_secret_value(),
                     toolkit_versions=settings.composio_versions(),
                 )
-            registry = default_registry(settings, connector=connector, router=model_router, http=http_client)
+            registry = default_registry(
+                settings, connector=connector, router=model_router, http=http_client, workspaces=workspaces
+            )
         scopes = AgentScopes()
         sessions = SessionRepository(sessionmaker)
         pending_actions = PendingActionRepository(sessionmaker)
@@ -199,6 +239,23 @@ async def build_container(
             maxlen=settings.event_stream_maxlen,
             ttl_seconds=settings.event_stream_ttl_seconds,
         )
+        executor = ToolExecutor(
+            settings.tool_timeout_seconds,
+            read_attempts=settings.tool_read_attempts,
+            backoff_seconds=settings.tool_retry_backoff_seconds,
+            breaker=CircuitBreaker(
+                threshold=settings.circuit_breaker_failures, cooldown_seconds=settings.circuit_breaker_cooldown_seconds
+            ),
+        )
+        compensator = Compensator(ledger=ledger, registry=registry, executor=executor)
+        if registry.get(UNDO_TOOL) is None:
+            registry.register(compensator.tool())
+        budgets = TenantBudgets(
+            redis,
+            key_prefix=settings.redis_key_prefix,
+            turns_per_minute_per_user=settings.turns_per_minute_per_user,
+            tokens_per_day_per_tenant=settings.tokens_per_day_per_tenant,
+        )
         gate = ToolGate(
             registry=registry,
             scopes=scopes,
@@ -206,7 +263,7 @@ async def build_container(
             pending_actions=pending_actions,
             approvals=GraphApprovalPort(),
             policy=policy or EscalateAllPolicy(),
-            executor=ToolExecutor(settings.tool_timeout_seconds),
+            executor=executor,
             events=events,
             tracer=tracer,
             approval_ttl=timedelta(seconds=settings.approval_ttl_seconds),
@@ -229,13 +286,7 @@ async def build_container(
             redis=redis,
             http=http_client,
             token_verifier=verifier,
-            workspaces=WorkspaceDirectory(
-                base_url=settings.workspace_service_url,
-                http=http_client,
-                redis=redis,
-                key_prefix=settings.redis_key_prefix,
-                cache_seconds=settings.membership_cache_seconds,
-            ),
+            workspaces=workspaces,
             sessions=sessions,
             pending_actions=pending_actions,
             ledger=ledger,
@@ -249,6 +300,8 @@ async def build_container(
             sync_worker=sync_worker,
             leases=leases,
             tracer=tracer,
+            budgets=budgets,
+            compensator=compensator,
             _exit_stack=stack,
         )
         orchestrator = Orchestrator(
@@ -258,7 +311,14 @@ async def build_container(
             scopes=scopes,
             events=events,
             recorder=recorder,
-            max_steps=settings.max_steps_per_turn,
+            limits=TurnLimits(
+                max_steps=settings.max_steps_per_turn,
+                max_tool_calls=settings.max_tool_calls_per_turn,
+                max_tokens=settings.max_tokens_per_turn,
+                max_identical_calls=settings.max_identical_tool_calls,
+            ),
+            compensator=compensator,
+            budgets=budgets,
         )
         spec = graph_factory(container) if graph_factory is not None else orchestrator.graph_spec()
         container.runner = SessionRunner(

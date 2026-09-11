@@ -11,10 +11,10 @@ from fastapi import APIRouter, Query
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.api.deps import ContainerDep, TenantDep
-from app.core.context import AgentContext, RunMode
 from app.core.enums import PendingActionStatus
 from app.core.errors import Conflict, NotFound, ValidationFailed
 from app.engine.events import EventType, emit_best_effort
+from app.engine.runner import context_for
 from app.tools.types import describe_validation_error
 
 router = APIRouter(tags=["approvals"])
@@ -104,15 +104,8 @@ async def decide(action_id: UUID, body: DecisionRequest, tenant: TenantDep, cont
         EventType.APPROVAL_RESOLVED,
         {"pending_action_id": resolved.id, "status": resolved.status, "resolved_by": tenant.user_id},
     )
-    ctx = AgentContext(
-        tenant_id=session.tenant_id,
-        user_id=session.user_id,
-        session_id=session.id,
-        mode=RunMode(session.mode),
-        goal_id=session.goal_id,
-    )
     try:
-        await container.runner.resume(ctx, {"pending_action_id": str(resolved.id), "status": resolved.status})
+        await container.runner.resume(context_for(session), {"pending_action_id": str(resolved.id), "status": resolved.status})
     except Exception:
         # The decision is saved; the maintenance sweep resumes decided-but-paused sessions.
         logger.exception("could not resume session %s after a decision", session.id)

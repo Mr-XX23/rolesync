@@ -50,6 +50,53 @@ def test_scope_map_keeps_research_read_only():
     assert scopes.tools_for("unknown-agent", registry) == []
 
 
+def _full_registry() -> ToolRegistry:
+    """The production tool set, built over doubles (nothing is called)."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    import httpx
+
+    from app.container import default_registry
+    from app.engine.guardrails.saga import Compensator
+    from tests.support import FakeConnector
+
+    router = MagicMock()
+    router.can_serve.return_value = True
+    settings = Settings(tavily_api_key=None, composio_api_key=None)
+    registry = default_registry(
+        settings, connector=FakeConnector(), router=router, http=httpx.AsyncClient(), workspaces=AsyncMock()
+    )
+    registry.register(Compensator(ledger=MagicMock(), registry=registry, executor=MagicMock()).tool())
+    return registry
+
+
+def test_every_write_tool_shows_the_reviewer_a_preview_and_says_how_to_undo_it():
+    registry = _full_registry()
+    writes = {d.name: d for d in registry.all() if d.kind is ToolKind.WRITE}
+    assert set(writes) == {
+        "send_email", "create_calendar_event", "send_slack_message", "create_notion_page", "generate_document",
+        "create_quote", "create_catalog_item", "update_catalog_item", "set_stock", "reserve_stock", "release_stock",
+        "retire_catalog_item", "undo_actions",
+    }
+    assert all(d.preview is not None for d in writes.values())
+    # Only these can't be reversed: a sent email, a released reservation, and an undo itself.
+    assert {name for name, d in writes.items() if d.undo_handler is None} == {"send_email", "release_stock", "undo_actions"}
+
+
+def test_sub_agent_scopes_stay_narrow_over_the_full_tool_set():
+    registry = _full_registry()
+    scopes = AgentScopes()
+    assert all(d.kind is ToolKind.READ for d in scopes.tools_for("research", registry))
+    assert {d.name for d in scopes.tools_for("quote", registry) if d.kind is ToolKind.WRITE} == {
+        "generate_document", "create_quote", "create_catalog_item", "update_catalog_item", "set_stock",
+        "reserve_stock", "release_stock", "retire_catalog_item",
+    }
+    assert {d.name for d in scopes.tools_for("outreach", registry) if d.kind is ToolKind.WRITE} == {
+        "send_email", "create_calendar_event", "send_slack_message", "create_notion_page",
+    }
+    assert "undo_actions" in {d.name for d in scopes.tools_for("orchestrator", registry)}
+
+
 def test_database_urls_are_derived_safely_from_one_source():
     settings = Settings(database_url="postgresql://svc:p%40ss%3Aword@db.internal:5433/agentdb")
     assert settings.sqlalchemy_url.drivername == "postgresql+asyncpg"

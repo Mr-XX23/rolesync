@@ -34,6 +34,7 @@ class EventType(StrEnum):
     APPROVAL_RESOLVED = "approval_resolved"  # addition: lets every open client update its approval card
     PROGRESS = "progress"
     DONE = "done"
+    HALTED = "halted"  # addition: a guardrail (limit, loop) stopped the turn; ends it like `done`
     ERROR = "error"
 
 

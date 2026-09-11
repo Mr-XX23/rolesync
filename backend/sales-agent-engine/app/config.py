@@ -79,6 +79,17 @@ class Settings(BaseSettings):
     # --- approvals + tools -----------------------------------------------
     approval_ttl_seconds: int = Field(86_400, validation_alias=_env("SALES_AGENT_APPROVAL_TTL_SECONDS"))
     tool_timeout_seconds: float = Field(30.0, validation_alias=_env("SALES_AGENT_TOOL_TIMEOUT_SECONDS"))
+    # retries for transient failures of reads and undo steps (writes never retry)
+    tool_read_attempts: int = Field(3, validation_alias=_env("SALES_AGENT_TOOL_READ_ATTEMPTS"))
+    tool_retry_backoff_seconds: float = Field(0.5, validation_alias=_env("SALES_AGENT_TOOL_RETRY_BACKOFF_SECONDS"))
+    # per-tool circuit breaker: consecutive transient failures before failing fast, and for how long
+    circuit_breaker_failures: int = Field(5, validation_alias=_env("SALES_AGENT_CIRCUIT_BREAKER_FAILURES"))
+    circuit_breaker_cooldown_seconds: float = Field(30.0, validation_alias=_env("SALES_AGENT_CIRCUIT_BREAKER_COOLDOWN_SECONDS"))
+    # generated documents and quotes: Google Drive, else the workspace knowledge base
+    document_max_bytes: int = Field(5 * 1024 * 1024, validation_alias=_env("SALES_AGENT_DOCUMENT_MAX_BYTES"))
+    pdf_font_path: Path | None = Field(None, validation_alias=_env("SALES_AGENT_PDF_FONT_PATH"))
+    # where the chat links documents saved to the knowledge base (a frontend route)
+    knowledge_vault_link: str = Field("/salesman/knowledge-vault", validation_alias=_env("SALES_AGENT_KNOWLEDGE_VAULT_LINK"))
 
     # --- event stream (SSE) ----------------------------------------------
     event_stream_maxlen: int = Field(5_000, validation_alias=_env("SALES_AGENT_EVENT_STREAM_MAXLEN"))
@@ -105,16 +116,22 @@ class Settings(BaseSettings):
     # grounded requests; the 3.x models answer them with 429 (verified 2026-09-11).
     model_web_grounding: str = Field("gemini-2.5-flash", validation_alias=_env("SALES_AGENT_MODEL_WEB_GROUNDING"))
 
-    # --- orchestrator + budgets ------------------------------------------
+    # --- orchestrator limits (per turn) + tenant budgets --------------------
     max_steps_per_turn: int = Field(12, validation_alias=_env("SALES_AGENT_MAX_STEPS_PER_TURN"))
+    max_tool_calls_per_turn: int = Field(40, validation_alias=_env("SALES_AGENT_MAX_TOOL_CALLS_PER_TURN"))
+    max_tokens_per_turn: int = Field(1_000_000, validation_alias=_env("SALES_AGENT_MAX_TOKENS_PER_TURN"))
+    # the same tool with the same arguments more often than this in one turn is a loop
+    max_identical_tool_calls: int = Field(2, validation_alias=_env("SALES_AGENT_MAX_IDENTICAL_TOOL_CALLS"))
     max_concurrent_runs_per_tenant: int = Field(5, validation_alias=_env("SALES_AGENT_MAX_CONCURRENT_RUNS_PER_TENANT"))
+    turns_per_minute_per_user: int = Field(10, validation_alias=_env("SALES_AGENT_TURNS_PER_MINUTE_PER_USER"))
+    tokens_per_day_per_tenant: int = Field(5_000_000, validation_alias=_env("SALES_AGENT_TOKENS_PER_DAY_PER_TENANT"))
     run_lease_seconds: int = Field(60, validation_alias=_env("SALES_AGENT_RUN_LEASE_SECONDS"))
 
     # --- connectors --------------------------------------------------------
     composio_api_key: SecretStr | None = Field(None, validation_alias=_env("COMPOSIO_API_KEY"))
     # toolkit=version pins, so a Composio tool schema change can't silently alter behaviour.
     composio_toolkit_versions: str = Field(
-        "gmail=20260911_00,googlecalendar=20260902_00,slack=20260911_00,notion=20260911_00",
+        "gmail=20260911_00,googlecalendar=20260902_00,slack=20260911_00,notion=20260911_00,googledrive=20260902_00",
         validation_alias=_env("SALES_AGENT_COMPOSIO_TOOLKIT_VERSIONS"),
     )
     tavily_api_key: SecretStr | None = Field(None, validation_alias=_env("TAVILY_API_KEY"))

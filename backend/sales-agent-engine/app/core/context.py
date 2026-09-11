@@ -46,3 +46,4 @@ class AgentContext:
     session_id: UUID
     mode: RunMode
     goal_id: UUID | None = None
+    turn: int = 0  # the session's current request; actions record it so a failure undoes only that request's

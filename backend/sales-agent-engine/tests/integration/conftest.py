@@ -126,7 +126,7 @@ async def open_session(
 ) -> AgentContext:
     """A session row with no run behind it (for exercising the gate directly)."""
     row = await container.sessions.create(tenant_id=tenant_id, user_id=user_id, mode=mode)
-    return AgentContext(tenant_id=tenant_id, user_id=user_id, session_id=row.id, mode=mode)
+    return context_for(row)
 
 
 async def start_run(

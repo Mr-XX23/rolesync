@@ -30,13 +30,15 @@ const STATUS_AFTER_EVENT: Partial<Record<AgentEventType, SessionStatus>> = {
   awaiting_approval: 'AWAITING_APPROVAL',
   approval_resolved: 'RUNNING',
   done: 'DONE',
+  halted: 'HALTED',
   error: 'FAILED',
 };
 
 const SUGGESTIONS = [
   'Prep me for my call with Acme: recent news, our past emails with them, and which of our products fit.',
-  'What does our knowledge base say about competing with Globex on pricing?',
-  'Email jane@acme.com a short thank-you for today’s demo and propose a follow-up call next week.',
+  'Email jane@acme.com a short thank-you for today’s demo and book a 30-minute follow-up with her next Tuesday at 3pm.',
+  'Create a PDF quote for Acme: 10 seats of our Pro plan with 10% off, valid for 30 days.',
+  'Put together a one-page Word summary of what our knowledge base says about competing with Globex.',
 ];
 
 const StatusPill: React.FC<{ status: SessionStatus }> = ({ status }) => (
@@ -153,8 +155,9 @@ export const SalesAgent: React.FC = () => {
       <section className="space-y-2">
         <h2 className="font-serif text-3xl font-bold text-primary">Sales Agent</h2>
         <p className="text-sm text-muted-foreground max-w-2xl leading-relaxed">
-          Ask for research or outreach in plain language. The agent gathers what it needs and prepares actions, and
-          nothing leaves your workspace until you approve it.
+          Ask for research, outreach, documents, quotes or catalog updates in plain language. The agent gathers what
+          it needs and prepares each action, and nothing changes until you approve it. If a later step fails, it asks
+          before undoing what was already done.
         </p>
       </section>
 
@@ -217,7 +220,8 @@ export const SalesAgent: React.FC = () => {
                 <div className="space-y-1">
                   <p className="font-serif text-xl font-bold text-foreground">What should we work on?</p>
                   <p className="text-xs text-muted-foreground">
-                    Research uses your connected apps, knowledge base, catalog and the web. Emails are sent only after you approve them.
+                    Research uses your connected apps, knowledge base, catalog and the web. Emails, meetings, documents and
+                    catalog changes happen only after you approve them.
                   </p>
                 </div>
                 <div className="flex flex-col gap-2 w-full max-w-lg">

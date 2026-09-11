@@ -31,7 +31,7 @@ class SessionRepository:
     ) -> AgentSession:
         row = AgentSession(
             id=session_id or uuid4(), tenant_id=tenant_id, user_id=user_id, mode=mode, goal_id=goal_id, status=status,
-            title=title,
+            title=title, turn=1,
         )
         async with self._sm.begin() as db:
             db.add(row)
@@ -90,9 +90,13 @@ class SessionRepository:
         expected: Collection[SessionStatus] | None = None,
         checkpoint_ref: str | None = None,
         settled_event_id: str | None = None,
+        next_turn: bool = False,
     ) -> AgentSession | None:
-        """Compare-and-set the status. Returns ``None`` if the session was not in ``expected``."""
+        """Compare-and-set the status. Returns ``None`` if the session was not in ``expected``.
+        ``next_turn`` starts the session's next request in the same statement."""
         values: dict[str, object] = {"status": to}
+        if next_turn:
+            values["turn"] = AgentSession.turn + 1
         if to in _TERMINAL:
             values["ended_at"] = func.now()
         elif to is SessionStatus.RUNNING:

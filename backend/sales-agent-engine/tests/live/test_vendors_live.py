@@ -119,6 +119,19 @@ ADAPTER_ARGUMENTS = {
     "SLACK_SEARCH_MESSAGES": {"query", "count", "sort", "sort_dir"},
     "NOTION_SEARCH_NOTION_PAGE": {"query", "page_size"},
     "NOTION_GET_PAGE_MARKDOWN": {"page_id"},
+    # Phase 3 writes and their undo steps
+    "GOOGLECALENDAR_CREATE_EVENT": {
+        "calendar_id", "summary", "start_datetime", "end_datetime", "timezone", "attendees", "create_meeting_room",
+        "send_updates", "description", "location",
+    },
+    "GOOGLECALENDAR_DELETE_EVENT": {"calendar_id", "event_id", "send_updates"},
+    "SLACK_SEND_MESSAGE": {"channel", "markdown_text", "thread_ts"},
+    "SLACK_DELETES_A_MESSAGE_FROM_A_CHAT": {"channel", "ts"},
+    "NOTION_CREATE_NOTION_PAGE": {"parent_id", "title", "markdown"},
+    "NOTION_ARCHIVE_NOTION_PAGE": {"page_id", "archive"},
+    "GOOGLEDRIVE_GET_ABOUT": {"fields"},
+    "GOOGLEDRIVE_UPLOAD_FILE": {"file_to_upload"},
+    "GOOGLEDRIVE_TRASH_FILE": {"file_id"},
 }
 
 
@@ -135,6 +148,9 @@ async def test_composio_actions_accept_the_arguments_our_adapters_send(live_sett
         tool = await asyncio.to_thread(sdk.tools.get_raw_composio_tool_by_slug, slug)
         accepted = set((tool.input_parameters or {}).get("properties") or {})
         assert arguments <= accepted, f"{slug} no longer accepts {sorted(arguments - accepted)}"
+        required = set((tool.input_parameters or {}).get("required") or [])
+        assert required <= arguments, f"{slug} now requires {sorted(required - arguments)}"
+        assert pins[slug.split("_", 1)[0].lower()] in (tool.available_versions or [tool.version]), f"{slug}: pinned version gone"
 
 
 async def test_gemini_answers_a_web_grounded_task_with_sources(live_settings):
@@ -173,11 +189,13 @@ RESEARCH_PROMPT = (
 
 def _full_registry(settings: Settings, http: httpx.AsyncClient):
     """Every tool the engine registers in production (nothing here gets executed)."""
+    from unittest.mock import AsyncMock
+
     from app.container import default_registry
     from tests.support import FakeConnector
 
     router = ModelRouter({"gemini": object()}, routing_rules(settings), NoopTracingClient())  # never called
-    registry = default_registry(settings, connector=FakeConnector(), router=router, http=http)
+    registry = default_registry(settings, connector=FakeConnector(), router=router, http=http, workspaces=AsyncMock())
     specs = tuple(ToolSpec(d.name, d.description, _clean_schema(d.parameters_schema())) for d in registry.all())
     return registry, specs
 

@@ -34,7 +34,11 @@ def test_timeline_order_comes_from_the_orchestrator_call_id():
 def test_actions_get_readable_timeline_names():
     name, output = describe_action("send_email", {"to": ["a@x.test", "b@x.test"], "subject": "Thanks"})
     assert (name, output) == ("Email to a@x.test, b@x.test: Thanks", "EMAIL")
-    assert describe_action("create_calendar_event", {}) == ("Create calendar event", "CREATE_CALENDAR_EVENT")
+    assert describe_action("create_calendar_event", {"title": "Demo"}) == ("Calendar event: Demo", "CALENDAR_EVENT")
+    assert describe_action("create_quote", {"customer_company": "Acme"}) == ("Quote for Acme", "QUOTE")
+    assert describe_action("set_stock", {"sku": "TS-1", "quantity": 40}) == ("Set stock of TS-1 to 40", "INVENTORY_CHANGE")
+    assert describe_action("undo_actions", {"action_ids": ["a", "b"]}) == ("Undo 2 completed action(s)", "UNDO")
+    assert describe_action("brand_new_tool", {}) == ("Brand new tool", "BRAND_NEW_TOOL")
     long_name, _ = describe_action("send_email", {"to": ["x@y.z"], "subject": "s" * 400})
     assert len(long_name) == 150
 
