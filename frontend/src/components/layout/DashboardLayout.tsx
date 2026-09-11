@@ -8,6 +8,7 @@ import {
   LifeBuoy,
   Plus,
   Settings as SettingsIcon,
+  Package,
 } from 'lucide-react';
 import { Sidebar } from './Sidebar';
 import type { SidebarItem } from './Sidebar';
@@ -32,6 +33,12 @@ export const DashboardLayout: React.FC = () => {
             subtitle: 'Enterprise AI',
           },
           items: [
+            {
+              id: 'products',
+              label: 'Product Management',
+              icon: Package,
+              path: '/salesman/products',
+            },
             {
               id: 'knowledge-vault',
               label: 'Knowledge Vault',

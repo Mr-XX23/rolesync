@@ -16,3 +16,4 @@ openpyxl
 python-multipart
 clamd
 pymongo
+PyJWT

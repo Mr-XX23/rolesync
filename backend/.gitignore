@@ -9,3 +9,5 @@ Dockerfile
 *.pyc
 *.xml
 *.idea
+
+storage

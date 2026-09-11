@@ -209,6 +209,17 @@
     @apply bg-background border border-border rounded-lg px-4 py-2.5 text-sm text-foreground placeholder:text-muted-foreground/50 transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-primary/10 focus:border-primary;
   }
 
+  /* Hide number input spinners (Chrome, Safari, Edge, Opera, Firefox) */
+  input[type="number"]::-webkit-inner-spin-button,
+  input[type="number"]::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type="number"] {
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
+
   /* Autofill styling overrides to maintain dark/light theme integrity */
   input:-webkit-autofill,
   input:-webkit-autofill:hover,

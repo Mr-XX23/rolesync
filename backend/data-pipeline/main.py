@@ -20,6 +20,9 @@ from module_1_document_processing.composio_connector.connector_routes import (
     notion_sync_manager,
 )
 from module_1_document_processing.knowledge_vault_routes import router as knowledge_vault_router
+from catalog.routes import router as catalog_router
+from catalog.database import init_catalog_db
+from catalog.csv_importer import catalog_import_worker
 
 raw_eureka = os.environ.get("EUREKA_SERVER", "http://eureka-service:8761/eureka/")
 if "localhost" in raw_eureka or "127.0.0.1" in raw_eureka:
@@ -36,6 +39,9 @@ async def lifespan(app: FastAPI):
     # Start Staging Queue Worker
     await queue_worker.start()
 
+    # Start Catalog CSV Import Worker
+    await catalog_import_worker.start()
+
     # Start Background Gmail, GDrive, Calendar, Slack & Notion Auto-Sync Schedulers
     await gmail_sync_manager.start_scheduler()
     await gdrive_sync_manager.start_scheduler()
@@ -43,6 +49,13 @@ async def lifespan(app: FastAPI):
     await slack_sync_manager.start_scheduler()
     await notion_sync_manager.start_scheduler()
 
+
+    # Initialize catalog database and schema migrations
+    try:
+        init_catalog_db()
+        print("Catalog database and schema initialized successfully.")
+    except Exception as e:
+        print(f"Catalog database initialization error: {e}")
 
     # Register with Eureka
     print(f"Registering {APP_NAME} with Eureka server at {EUREKA_SERVER}...")
@@ -74,6 +87,7 @@ async def lifespan(app: FastAPI):
     await gdrive_sync_manager.stop_scheduler()
     await gmail_sync_manager.stop_scheduler()
     await queue_worker.stop()
+    await catalog_import_worker.stop()
 
 
     try:
@@ -91,6 +105,8 @@ app.include_router(webhook_router, prefix="/api/v1")
 app.include_router(connector_router, prefix="/api/v1")
 app.include_router(knowledge_vault_router, prefix="/api/v1")
 app.include_router(knowledge_vault_router, prefix="/api/v1/data-pipeline")
+app.include_router(catalog_router, prefix="/api/v1/catalog")
+app.include_router(catalog_router, prefix="/api/v1/data-pipeline/catalog")
 
 @app.get("/health")
 def health_check():

@@ -22,6 +22,7 @@ import { Workspace } from './pages/salemans/Workspace';
 import { Settings } from './pages/salemans/Settings';
 import { Support } from './pages/salemans/Support';
 import { Profile } from './pages/salemans/Profile';
+import { ProductManagement } from './pages/salemans/productManagement/ProductManagement';
 
 export const router = createBrowserRouter([
   {
@@ -121,6 +122,10 @@ export const router = createBrowserRouter([
       {
         path: '',
         element: <Navigate to="knowledge-vault" replace />,
+      },
+      {
+        path: 'products',
+        element: <ProductManagement />,
       },
       {
         path: 'knowledge-vault',
