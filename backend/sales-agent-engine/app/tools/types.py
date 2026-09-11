@@ -70,6 +70,9 @@ class ToolResult:
     error: str | None = None
     pending_action_id: UUID | None = None
     duplicate: bool = False
+    # The arguments the tool actually ran with: after a human edit these differ from what
+    # the model proposed, and records of the action must reflect what really happened.
+    executed_args: dict[str, Any] | None = None
 
     def for_model(self) -> dict[str, Any]:
         """The payload an LLM sees as the tool response."""

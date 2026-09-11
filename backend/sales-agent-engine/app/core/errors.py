@@ -42,6 +42,11 @@ class ValidationFailed(EngineError):
     code = "VALIDATION_FAILED"
 
 
+class TooManyRequests(EngineError):
+    status_code = 429
+    code = "BUDGET_EXCEEDED"
+
+
 class UpstreamUnavailable(EngineError):
     status_code = 503
     code = "UPSTREAM_UNAVAILABLE"

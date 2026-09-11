@@ -84,6 +84,57 @@ class Settings(BaseSettings):
     sse_ping_seconds: int = Field(15, validation_alias=_env("SALES_AGENT_SSE_PING_SECONDS"))
     sse_max_connection_seconds: int = Field(1_800, validation_alias=_env("SALES_AGENT_SSE_MAX_CONNECTION_SECONDS"))
 
+    # --- model routing (implementation-plan §5: rules live here, not in agents) -------
+    gemini_api_key: SecretStr | None = Field(None, validation_alias=_env("GEMINI_API_KEY"))
+    openrouter_api_key: SecretStr | None = Field(
+        None, validation_alias=_env("OPEN_ROUTER_API", "OPENROUTER_API_KEY")
+    )
+    openrouter_base_url: str = Field("https://openrouter.ai/api/v1", validation_alias=_env("SALES_AGENT_OPENROUTER_URL"))
+    # complex → Gemini. Pro models need a billed Gemini project; the free tier serves Flash.
+    model_complex: str = Field("gemini-3.5-flash", validation_alias=_env("SALES_AGENT_MODEL_COMPLEX"))
+    # simple → OpenRouter; Gemini failure → OpenRouter. Comma-separated: OpenRouter tries them in order.
+    models_simple: str = Field("nvidia/nemotron-3.5-lightning:free", validation_alias=_env("SALES_AGENT_MODELS_SIMPLE"))
+    models_failover: str = Field(
+        "nvidia/nemotron-3-super-120b-a12b:free,nvidia/nemotron-3.5-lightning:free",
+        validation_alias=_env("SALES_AGENT_MODELS_FAILOVER"),
+    )
+    llm_timeout_seconds: float = Field(120.0, validation_alias=_env("SALES_AGENT_LLM_TIMEOUT_SECONDS"))
+
+    # --- orchestrator + budgets ------------------------------------------
+    max_steps_per_turn: int = Field(12, validation_alias=_env("SALES_AGENT_MAX_STEPS_PER_TURN"))
+    max_concurrent_runs_per_tenant: int = Field(5, validation_alias=_env("SALES_AGENT_MAX_CONCURRENT_RUNS_PER_TENANT"))
+    run_lease_seconds: int = Field(60, validation_alias=_env("SALES_AGENT_RUN_LEASE_SECONDS"))
+
+    # --- connectors --------------------------------------------------------
+    composio_api_key: SecretStr | None = Field(None, validation_alias=_env("COMPOSIO_API_KEY"))
+    # toolkit=version pins, so a Composio tool schema change can't silently alter behaviour.
+    composio_toolkit_versions: str = Field("gmail=20260911_00", validation_alias=_env("SALES_AGENT_COMPOSIO_TOOLKIT_VERSIONS"))
+
+    # --- workspace records (goals, tasks, notes live in workspace-service) -
+    workspace_sync_enabled: bool = Field(True, validation_alias=_env("SALES_AGENT_WORKSPACE_SYNC_ENABLED"))
+    workspace_sync_interval_seconds: float = Field(2.0, validation_alias=_env("SALES_AGENT_WORKSPACE_SYNC_INTERVAL_SECONDS"))
+
+    # --- tracing (LangSmith behind TracingClient) --------------------------
+    langsmith_tracing: bool = Field(False, validation_alias=_env("LANGSMITH_TRACING"))
+    langsmith_api_key: SecretStr | None = Field(None, validation_alias=_env("LANGSMITH_API_KEY"))
+    langsmith_endpoint: str | None = Field(None, validation_alias=_env("LANGSMITH_ENDPOINT"))
+    langsmith_project: str = Field("sales-agent-engine", validation_alias=_env("LANGSMITH_PROJECT"))
+
+    # --- identity keys: auth-service JWKS, with the PEM as fallback --------
+    jwt_jwks_url: str | None = Field(None, validation_alias=_env("SALES_AGENT_JWT_JWKS_URL"))
+
+    @staticmethod
+    def split_list(value: str) -> tuple[str, ...]:
+        return tuple(item.strip() for item in value.split(",") if item.strip())
+
+    def composio_versions(self) -> dict[str, str]:
+        pins: dict[str, str] = {}
+        for item in self.split_list(self.composio_toolkit_versions):
+            toolkit, _, version = item.partition("=")
+            if toolkit.strip() and version.strip():
+                pins[toolkit.strip().lower()] = version.strip()
+        return pins
+
     def _base_url(self) -> URL:
         if self.database_url:
             return make_url(self.database_url)
@@ -114,14 +165,16 @@ class Settings(BaseSettings):
             password=url.password or None,
         )
 
-    def jwt_public_key(self) -> str:
+    def jwt_public_key(self) -> str | None:
         if self.jwt_public_key_pem and self.jwt_public_key_pem.get_secret_value().strip():
             return self.jwt_public_key_pem.get_secret_value()
         if self.jwt_public_key_path and self.jwt_public_key_path.is_file():
             return self.jwt_public_key_path.read_text(encoding="utf-8")
+        if self.jwt_jwks_url:
+            return None
         raise RuntimeError(
-            "No JWT public key configured: set SALES_AGENT_JWT_PUBLIC_KEY_PATH (auth-service public_key.pem) "
-            "or SALES_AGENT_JWT_PUBLIC_KEY_PEM"
+            "No JWT verification key configured: set SALES_AGENT_JWT_JWKS_URL (auth-service JWKS), "
+            "SALES_AGENT_JWT_PUBLIC_KEY_PATH (public_key.pem) or SALES_AGENT_JWT_PUBLIC_KEY_PEM"
         )
 
 

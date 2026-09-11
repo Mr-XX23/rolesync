@@ -4,7 +4,7 @@ Async FastAPI + LangGraph microservice: an orchestrator and scoped sub-agents th
 tasks and long-running goals through gated tools, streaming their progress and pausing for human
 approval before any real-world action.
 
-- Architecture: [docs/architecture.md](docs/architecture.md)
+- Architecture: [docs/architecture.md](docs/architecture.md) (read its "As built" section first)
 - Build order: [docs/implementation-plan.md](docs/implementation-plan.md) (phases are built strictly in order)
 
 ## Status
@@ -12,48 +12,81 @@ approval before any real-world action.
 | Phase | Scope | State |
 |---|---|---|
 | 0 | Skeleton, schema `agent`, identity, SSE channel, Tool Gate (tenant/scope/ACL/audit/approval), LangGraph Postgres checkpointer | done |
-| 1 | One vertical slice: `send_email` via Composio, model router, orchestrator, approval pause/resume | next |
-| 2–6 | Read tools, write tools + guardrails, context/memory, sub-agents, autonomy layer | — |
+| 1 | Vertical slice: chat → orchestrator (model router: Gemini, OpenRouter failover) → `send_email` via Composio → approval pause/resume → audit; workspace records; chat UI | done |
+| 2 | Read tools: knowledge base, catalog, Gmail/Calendar/Slack/Notion reads, web search (Gemini grounding + Tavily), prospect research | next |
+| 3–6 | Write tools + guardrails, context/memory, sub-agents, autonomy layer | — |
 
 ## Layout
 
 ```
 app/
-  api/            FastAPI routes (health, SSE stream, approvals) + identity dependencies
-  engine/         runner (start / pause / resume), event emitter
-  tools/          gate.py (the choke point), registry.py (definitions + per-agent SCOPES), executor
+  api/            chat, sessions, SSE stream, approvals, health + identity dependencies
+  engine/         orchestrator (plan → act graph), runner (start / pause / resume / recovery),
+                  events, run leases, workspace_record (outbox → workspace-service)
+  models/         router.py (complexity + failover), providers/ (gemini, openrouter), neutral types
+  tools/          gate.py (the choke point), registry.py (definitions + per-agent SCOPES), adapters/
   autonomy/       policy envelope (EscalateAllPolicy until Phase 6)
-  observability/  TracingClient (no-op until LangSmith is wired)
+  observability/  TracingClient: LangSmith or no-op
   db/             SQLAlchemy models, repositories, Alembic migrations (schema `agent`)
-  platform/       adapters: LangGraph runtime, JWT verifier, workspace-service, Redis, Eureka
-  config.py       settings (SALES_AGENT_* plus shared platform variables)
+  platform/       adapters: LangGraph, Composio, JWT verifier, workspace-service, Redis, Eureka
+  config.py       settings, model routing rules, budgets
 ```
 
 `app/` is a package so the plan's `platform/` folder can't shadow Python's standard `platform` module.
 
+## How a chat turn runs
+
+1. `POST /chat` creates (or continues) a session and starts a background run.
+2. `plan` asks the model router for the next step. Complex work goes to Gemini, with OpenRouter as
+   failover; tokens stream to `GET /sessions/{id}/events`.
+3. `act` runs one tool call per step through the gate. A write such as `send_email` creates a
+   pending action, emits `awaiting_approval` and pauses durably in the Postgres checkpoint.
+4. `POST /approvals/{id}/decision` (approve / edit / reject) resumes the run, in this or another
+   process. The gate executes once (idempotency key), and records a saga step and an audit row.
+5. The session context, the action's task, the sent email and the final answer are written to
+   `agent.workspace_outbox` and delivered to workspace-service, where they can be retrieved later.
+
+A run whose process dies mid-step is resumed from its checkpoint at the next startup (sessions that
+are RUNNING with no live lease). A write interrupted mid-execution is never retried blindly.
+
 ## Identity
 
-The gateway does not verify tokens or inject identity headers, so the engine does:
+The gateway verifies the access token and injects `X-User-Id`, but this port can also be reached
+directly, so the engine verifies the token itself:
 
 1. The `access_token` cookie (or `Authorization: Bearer`) is verified with auth-service's RS256
-   public key. The user is the `userId` claim (`sub` is a non-unique display name).
+   keys (JWKS, or the mounted PEM as fallback). The user is the `userId` claim (`sub` is a
+   non-unique display name).
 2. The tenant is `X-Tenant-Id`, a workspace UUID. The engine confirms membership with
    workspace-service (`GET /api/v1/workspaces`), cached for 60s and re-checked live before any
    denial.
 3. The SSE endpoint can't receive custom headers (`EventSource`), so it takes the tenant from the
    session row and re-checks membership.
 
-A logged-out token stays valid here until it expires (up to 60 min), because revocation lives only
-inside auth-service.
+Sessions and approvals are private to the user who started them. A logged-out token stays valid
+here until it expires (up to 60 min), because revocation lives only inside auth-service.
 
 ## API (prefix `/api/v1/sales-agent`)
 
 | Method | Path | |
 |---|---|---|
-| GET | `/health`, `/health/ready` | liveness, and readiness (database + Redis) |
-| GET | `/sessions/{id}/events` | SSE: `{type, session_id, data, ts}` envelopes, resumable with `Last-Event-ID` |
+| POST | `/chat` | `{"message", "session_id"?}` → 202 `{session_id, status, events_url}` (429 over the workspace run budget) |
+| GET | `/sessions` | the caller's sessions in the workspace |
+| GET | `/sessions/{id}` | transcript, open approvals, and `last_event_id` to subscribe after |
+| GET | `/sessions/{id}/events` | SSE: `{type, session_id, data, ts}` envelopes; resume with `Last-Event-ID` or `?last_event_id=` |
 | GET | `/approvals?status=PENDING` | the caller's pending actions |
 | POST | `/approvals/{id}/decision` | `{"decision": "approve" \| "edit" \| "reject", "args"?, "note"?}` |
+| GET | `/health`, `/health/ready` | liveness, and readiness (database + Redis) |
+
+Event types: `step_started`, `token` (`reset: true` = discard partial text after a model failover),
+`tool_call`, `tool_result`, `awaiting_approval`, `approval_resolved`, `progress`, `done`, `error`.
+
+## Configuration
+
+Models, budgets, Composio version pins, workspace sync and identity keys are listed in
+[.env.example](.env.example). Defaults fit the free tiers: `gemini-3.5-flash` for complex work (Pro
+needs a billed Gemini project) and free NVIDIA Nemotron models on OpenRouter. With
+`LANGSMITH_TRACING=true`, every session run, LLM call and tool call is traced to `LANGSMITH_PROJECT`.
 
 ## Running
 
@@ -70,14 +103,16 @@ checkpointer) needs a selector event loop, which that entrypoint sets up.
 
 Docker: `docker compose up -d --build sales-agent-engine` (runs migrations, registers with Eureka).
 The gateway reads routes at startup, so restart `gateway-service` once to pick up
-`/api/v1/sales-agent/**`.
+`/api/v1/sales-agent/**`. The chat UI is at `/salesman/sales-agent` in the frontend.
 
 ## Tests
 
 ```bash
-.venv/Scripts/python -m pytest
+.venv/Scripts/python -m pytest            # unit + integration (local Postgres + Redis)
+.venv/Scripts/python -m pytest --live     # also call real Gemini / OpenRouter / Composio (nothing is sent)
 ```
 
 Integration tests use the local Postgres (database `rolesync-micro-sales-agent-test`) and Redis
-db 15. They cover the gate end to end, durable pause/resume across a simulated process restart,
-the approvals API and the SSE stream.
+db 15, with a scripted model, fake Gmail and a fake workspace-service. They cover the Phase 1 loop
+over HTTP + SSE, durable pause/resume across a restart, crash recovery, model failover, the gate,
+approvals, and the workspace outbox (ordering, retries, rejections).

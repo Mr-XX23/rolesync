@@ -12,15 +12,32 @@ Deliberate additions to the plan's column lists (each needed for correctness):
   result instead of running twice), ``pending_action_id``, ``duration_ms``.
 - ``saga_step``: ``PENDING`` status (the step is recorded before the side effect),
   ``idempotency_key``, ``error``.
+- ``session.title``: the first prompt, for session lists.
+- ``workspace_outbox``: goals, tasks and notes live in workspace-service; the engine
+  records them here first and a worker delivers them, so the agent never waits on (or
+  fails because of) that service.
 """
 
 from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Integer, Text, UniqueConstraint, func, text
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Identity,
+    Index,
+    Integer,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -45,6 +62,7 @@ class AgentSession(TimestampMixin, Base):
     goal_id: Mapped[uuid.UUID | None] = mapped_column()
     mode: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str | None] = mapped_column(Text)
     checkpoint_ref: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -131,3 +149,46 @@ class SagaStep(TimestampMixin, Base):
     ref_id: Mapped[str | None] = mapped_column(Text)
     idempotency_key: Mapped[str] = mapped_column(Text, nullable=False)
     error: Mapped[str | None] = mapped_column(Text)
+
+
+class OutboxKind(StrEnum):
+    CONTEXT = "CONTEXT"
+    TASK = "TASK"
+    NOTE = "NOTE"
+
+
+class OutboxStatus(StrEnum):
+    PENDING = "PENDING"
+    DELIVERED = "DELIVERED"
+    FAILED = "FAILED"
+
+
+class WorkspaceOutbox(Base):
+    """Workspace records waiting to be delivered to workspace-service, in order per session.
+
+    Every record is an idempotent upsert keyed by ``target_id`` (a deterministic UUID),
+    so redelivery after a timeout or crash is harmless.
+    """
+
+    __tablename__ = "workspace_outbox"
+    __table_args__ = (
+        CheckConstraint(check_in("kind", OutboxKind), name="kind"),
+        CheckConstraint(check_in("status", OutboxStatus), name="status"),
+        Index("ix_workspace_outbox_due", "next_attempt_at", postgresql_where=text("status = 'PENDING'")),
+        Index("ix_workspace_outbox_session_seq", "session_id", "seq"),
+    )
+
+    seq: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    session_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    context_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    target_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=OutboxStatus.PENDING.value)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

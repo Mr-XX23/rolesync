@@ -63,7 +63,12 @@ async def redis(settings: Settings):
 @pytest.fixture
 async def clean(db_engine: AsyncEngine, redis) -> None:
     async with db_engine.begin() as conn:
-        await conn.execute(text("TRUNCATE agent.audit, agent.saga_step, agent.pending_action, agent.session CASCADE"))
+        await conn.execute(
+            text(
+                "TRUNCATE agent.audit, agent.saga_step, agent.pending_action, agent.workspace_outbox, "
+                "agent.session CASCADE"
+            )
+        )
         await conn.execute(
             text(
                 "DO $$ BEGIN IF to_regclass('agent_checkpoint.checkpoints') IS NOT NULL THEN "
@@ -88,7 +93,11 @@ async def make_container(settings: Settings, clean, workspace_service) -> AsyncI
 
     async def factory(**kwargs) -> Container:
         http = httpx.AsyncClient(transport=workspace_service.transport())
-        container = await build_container(settings, http_client=http, **kwargs)
+        kwargs.setdefault("providers", {})
+        kwargs.setdefault("registry", ToolRegistry())
+        overrides = kwargs.pop("settings_overrides", None)
+        effective = settings.model_copy(update=overrides) if overrides else settings
+        container = await build_container(effective, http_client=http, **kwargs)
         opened.append((container, http))
         return container
 

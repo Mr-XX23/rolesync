@@ -83,10 +83,16 @@ def make_token(
 
 @dataclass
 class FakeWorkspaceService:
-    """Answers ``GET /api/v1/workspaces`` like workspace-service does."""
+    """Answers like workspace-service: ``GET /api/v1/workspaces`` (membership) and the
+    context / task / note upserts the engine uses to record agent work."""
 
     memberships: dict[UUID, set[UUID]] = field(default_factory=dict)
     calls: int = 0
+    contexts: dict[str, dict[str, Any]] = field(default_factory=dict)
+    tasks: dict[str, dict[str, Any]] = field(default_factory=dict)
+    notes: dict[str, dict[str, Any]] = field(default_factory=dict)
+    puts: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    fail_next_puts: list[int] = field(default_factory=list)  # status codes to answer the next PUTs with
 
     def add(self, user_id: UUID, tenant_id: UUID) -> None:
         self.memberships.setdefault(user_id, set()).add(tenant_id)
@@ -97,6 +103,8 @@ class FakeWorkspaceService:
     def transport(self) -> httpx.MockTransport:
         def handler(request: httpx.Request) -> httpx.Response:
             self.calls += 1
+            if request.method == "PUT":
+                return self._upsert(request)
             if request.url.path != "/api/v1/workspaces":
                 return httpx.Response(404)
             user_id = UUID(request.headers["X-User-Id"])
@@ -106,6 +114,104 @@ class FakeWorkspaceService:
             return httpx.Response(200, json=body)
 
         return httpx.MockTransport(handler)
+
+    def _upsert(self, request: httpx.Request) -> httpx.Response:
+        if self.fail_next_puts:
+            return httpx.Response(self.fail_next_puts.pop(0), text="injected failure")
+        payload = json.loads(request.content)
+        parts = request.url.path.strip("/").split("/")  # api v1 workspaces ...
+        user_id = UUID(request.headers["X-User-Id"])
+        self.puts.append((request.url.path, payload))
+        if parts[3] != "contexts":  # /{workspace}/contexts/{context}
+            workspace_id, context_id = UUID(parts[3]), parts[5]
+            if workspace_id not in self.memberships.get(user_id, set()):
+                return httpx.Response(403, text="not a member")
+            self.contexts[context_id] = {**payload, "workspace_id": str(workspace_id), "created_by": str(user_id)}
+            return httpx.Response(200, json={"context_id": context_id})
+        context_id, kind, record_id = parts[4], parts[5], parts[6]  # /contexts/{context}/{tasks|notes}/{id}
+        if context_id not in self.contexts:
+            return httpx.Response(404, text="context not found")
+        (self.tasks if kind == "tasks" else self.notes)[record_id] = {**payload, "context_id": context_id}
+        return httpx.Response(200, json={"id": record_id})
+
+
+# --------------------------------------------------------------------------- model + connector doubles
+
+
+class ScriptedBrain:
+    """A deterministic stand-in for the model. It decides from the conversation (like a
+    real model would), so a replayed or resumed step produces the same decision:
+    user asks → call send_email; tool result arrives → report the outcome."""
+
+    def __init__(self, name: str = "gemini", *, email: dict[str, Any] | None = None) -> None:
+        self.name = name
+        self.email = email or {
+            "to": ["jane@acme.test"],
+            "cc": ["cfo@acme.test"],
+            "subject": "Thanks for the demo",
+            "body": "Hi Jane,\n\nThanks for your time today.\n\nBest,\nRep",
+        }
+        self.tasks: list[Any] = []
+
+    async def stream(self, task: Any, models: Any):
+        from app.models.types import Completion, Message, Role, StreamDone, TextDelta, ToolCall
+
+        self.tasks.append(task)
+        last = task.messages[-1]
+        if last.role is Role.USER:
+            text, calls = "Drafting the email now.", (ToolCall(id="call_1", name="send_email", arguments=dict(self.email)),)
+        else:
+            outcome = json.loads(last.content).get("outcome")
+            text = {
+                "EXECUTED": "Done: the email to Jane was sent.",
+                "REJECTED": "Understood, I did not send it. What should I change?",
+            }.get(outcome, f"The email was not sent ({outcome}).")
+            calls = ()
+        for word in text.split(" "):
+            yield TextDelta(word + " ")
+        message = Message(role=Role.ASSISTANT, content=text, tool_calls=calls)
+        yield StreamDone(Completion(message=message, provider=self.name, model=f"scripted-{self.name}"))
+
+
+class BlockingBrain:
+    """A model call that never returns (to simulate a process dying mid-step)."""
+
+    name = "gemini"
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+
+    async def stream(self, task: Any, models: Any):
+        self.started.set()
+        await asyncio.Event().wait()
+        yield  # pragma: no cover
+
+
+class FailingBrain:
+    def __init__(self, name: str, error: Exception) -> None:
+        self.name = name
+        self.error = error
+        self.calls = 0
+
+    async def stream(self, task: Any, models: Any):
+        self.calls += 1
+        raise self.error
+        yield  # pragma: no cover
+
+
+@dataclass
+class FakeConnector:
+    """Composio stand-in: records executions instead of sending anything."""
+
+    connected: bool = True
+    executions: list[dict[str, Any]] = field(default_factory=list)
+
+    async def has_active_connection(self, user_id: UUID, toolkit: str) -> bool:
+        return self.connected
+
+    async def execute(self, *, user_id: UUID, slug: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        self.executions.append({"user_id": user_id, "slug": slug, "arguments": arguments})
+        return {"response_data": {"id": f"gmail-msg-{len(self.executions)}", "threadId": "thread-1"}}
 
 
 # --------------------------------------------------------------------------- stub tools
@@ -305,6 +411,41 @@ async def read_sse(
                 elif line.startswith(":"):
                     continue  # keep-alive ping
                 else:
+                    name, _, value = line.partition(":")
+                    value = value.removeprefix(" ")
+                    current[name] = json.loads(value) if name == "data" else value
+
+    await asyncio.wait_for(consume(), timeout)
+    return events
+
+
+async def read_sse_until(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    token: str,
+    until: set[str],
+    last_event_id: str | None = None,
+    timeout: float = 15.0,
+) -> list[dict[str, Any]]:
+    """Read SSE events (``{"id", "data"}``) until one whose envelope type is in ``until``."""
+    headers = {"Accept": "text/event-stream", "Cookie": f"access_token={token}"}
+    if last_event_id:
+        headers["Last-Event-ID"] = last_event_id
+    events: list[dict[str, Any]] = []
+
+    async def consume() -> None:
+        async with client.stream("GET", url, headers=headers) as response:
+            response.raise_for_status()
+            current: dict[str, Any] = {}
+            async for line in response.aiter_lines():
+                if line == "":
+                    if "data" in current:
+                        events.append(current)
+                        if current["data"]["type"] in until:
+                            return
+                    current = {}
+                elif not line.startswith(":"):
                     name, _, value = line.partition(":")
                     value = value.removeprefix(" ")
                     current[name] = json.loads(value) if name == "data" else value

@@ -6,11 +6,17 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.time.LocalDateTime;
+import java.util.UUID;
+
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
 @Builder
 public class TaskResponse {
+
+    @JsonProperty("view_id")
+    private UUID viewId;
 
     @JsonProperty("task_name")
     private String taskName;
@@ -23,4 +29,10 @@ public class TaskResponse {
 
     @JsonProperty("output_type")
     private String outputType;
+
+    @JsonProperty("sort_order")
+    private Integer sortOrder;
+
+    @JsonProperty("updated_at")
+    private LocalDateTime updatedAt;
 }

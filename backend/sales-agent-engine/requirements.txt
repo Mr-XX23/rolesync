@@ -24,5 +24,10 @@ redis==8.1.0
 # Identity (verify auth-service RS256 access tokens)
 pyjwt[crypto]==2.13.0
 
+# Vendors, each wrapped by an adapter in app/platform or app/models/providers
+google-genai==2.23.0
+composio==0.21.1
+langsmith==0.12.4
+
 # Service discovery (same client as data-pipeline)
 py-eureka-client==0.13.3

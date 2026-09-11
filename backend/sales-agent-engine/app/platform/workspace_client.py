@@ -1,15 +1,22 @@
-"""Workspace membership, from workspace-service.
+"""workspace-service adapters: membership (who may act in a workspace) and records (where
+user-facing work — goals, tasks, notes — is kept for later retrieval).
 
 The tenant is a workspace UUID chosen by the client (``X-Tenant-Id``). Before acting in
 it, the engine confirms the verified user belongs to it by asking workspace-service
 for that user's active workspaces. Positive answers are cached briefly; a tenant not in
 the cached set is always re-checked live before being denied, so a just-created
 workspace works immediately.
+
+Service-to-service calls carry the acting user as ``X-User-Id``: workspace-service
+authorizes every call against that user's membership, the same as for gateway traffic.
 """
 
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import Any
 from uuid import UUID
 
 import httpx
@@ -69,3 +76,49 @@ class WorkspaceDirectory:
             if raw_id and workspace.get("isActive") is not False:
                 ids.add(UUID(raw_id))
         return frozenset(ids)
+
+
+class DeliveryResult(StrEnum):
+    DELIVERED = "DELIVERED"
+    RETRY = "RETRY"  # transient: network, 404 (parent not there yet), 429, 5xx
+    REJECTED = "REJECTED"  # permanent: validation, membership revoked, id owned by someone else
+
+
+@dataclass(frozen=True, slots=True)
+class Delivery:
+    result: DeliveryResult
+    detail: str | None = None
+
+
+class WorkspaceRecordsClient:
+    """Idempotent upserts of agent work into workspace-service (client-chosen ids)."""
+
+    def __init__(self, *, base_url: str, http: httpx.AsyncClient) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._http = http
+
+    async def put_context(
+        self, *, user_id: UUID, workspace_id: UUID, context_id: UUID, payload: dict[str, Any]
+    ) -> Delivery:
+        return await self._put(f"/api/v1/workspaces/{workspace_id}/contexts/{context_id}", user_id, payload)
+
+    async def put_task(self, *, user_id: UUID, context_id: UUID, task_id: UUID, payload: dict[str, Any]) -> Delivery:
+        return await self._put(f"/api/v1/workspaces/contexts/{context_id}/tasks/{task_id}", user_id, payload)
+
+    async def put_note(self, *, user_id: UUID, context_id: UUID, note_id: UUID, payload: dict[str, Any]) -> Delivery:
+        return await self._put(f"/api/v1/workspaces/contexts/{context_id}/notes/{note_id}", user_id, payload)
+
+    async def _put(self, path: str, user_id: UUID, payload: dict[str, Any]) -> Delivery:
+        try:
+            response = await self._http.put(
+                f"{self._base_url}{path}", json=payload, headers={"X-User-Id": str(user_id)}, timeout=10.0
+            )
+        except httpx.HTTPError as exc:
+            return Delivery(DeliveryResult.RETRY, f"workspace-service unreachable: {type(exc).__name__}")
+        status = response.status_code
+        if 200 <= status < 300:
+            return Delivery(DeliveryResult.DELIVERED)
+        detail = f"workspace-service {status}: {response.text[:300]}"
+        if status in (404, 408, 425, 429) or status >= 500:
+            return Delivery(DeliveryResult.RETRY, detail)
+        return Delivery(DeliveryResult.REJECTED, detail)

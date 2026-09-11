@@ -1,7 +1,8 @@
 """Request-scoped dependencies. Identity is established here and nowhere else.
 
 - ``Principal``: the ``access_token`` cookie (or ``Authorization: Bearer``) verified
-  against auth-service's public key.
+  against auth-service's signing keys. The gateway's ``X-User-Id`` is not trusted here:
+  this port is reachable without passing through the gateway.
 - ``TenantContext``: ``X-Tenant-Id`` (a workspace UUID) confirmed against
   workspace-service membership for that principal.
 """
@@ -33,7 +34,7 @@ async def get_principal(request: Request, container: ContainerDep) -> Principal:
             token = credentials.strip()
     if not token:
         raise AuthenticationFailed("missing access token")
-    return container.token_verifier.verify(token)
+    return await container.token_verifier.verify(token)
 
 
 PrincipalDep = Annotated[Principal, Depends(get_principal)]

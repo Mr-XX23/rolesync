@@ -9,6 +9,7 @@ import {
   Plus,
   Settings as SettingsIcon,
   Package,
+  MessagesSquare,
 } from 'lucide-react';
 import { Sidebar } from './Sidebar';
 import type { SidebarItem } from './Sidebar';
@@ -33,6 +34,13 @@ export const DashboardLayout: React.FC = () => {
             subtitle: 'Enterprise AI',
           },
           items: [
+            {
+              id: 'sales-agent',
+              label: 'Sales Agent',
+              icon: MessagesSquare,
+              path: '/salesman/sales-agent',
+              badge: 'New',
+            },
             {
               id: 'products',
               label: 'Product Management',

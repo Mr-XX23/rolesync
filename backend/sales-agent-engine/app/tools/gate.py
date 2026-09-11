@@ -180,6 +180,7 @@ class ToolGate:
                 summary=prior.result_summary,
                 pending_action_id=prior.pending_action_id,
                 duplicate=True,
+                executed_args=prior.args,
             )
 
         pending = await self._pending.get_by_key(tenant_id=ctx.tenant_id, idempotency_key=key)
@@ -319,7 +320,7 @@ class ToolGate:
             await self._emit_result(ctx, call_id, agent_name, definition.name, outcome, error=message)
             return ToolResult(
                 ok=False, tool=definition.name, call_id=call_id, outcome=outcome, error=message,
-                pending_action_id=pending_action_id,
+                pending_action_id=pending_action_id, executed_args=args_json,
             )
 
         data = to_jsonable_python(output.data, fallback=str)
@@ -344,7 +345,7 @@ class ToolGate:
         await self._emit_result(ctx, call_id, agent_name, definition.name, ToolOutcome.EXECUTED, summary=output.summary)
         return ToolResult(
             ok=True, tool=definition.name, call_id=call_id, outcome=ToolOutcome.EXECUTED, data=data,
-            summary=output.summary, pending_action_id=pending_action_id,
+            summary=output.summary, pending_action_id=pending_action_id, executed_args=args_json,
         )
 
     # ------------------------------------------------------------------ reads

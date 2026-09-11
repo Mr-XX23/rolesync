@@ -81,6 +81,12 @@ class RedisEventChannel:
             entry_id, _ = await pipe.execute()
         return _text(entry_id)
 
+    async def latest_id(self, session_id: UUID) -> str:
+        """Id of the newest retained event (``"0-0"`` if none): a client that has just loaded a
+        snapshot subscribes after this id to receive only newer events."""
+        entries = await self._redis.xrevrange(self._key(session_id), count=1)
+        return _text(entries[0][0]) if entries else "0-0"
+
     async def read(
         self, session_id: UUID, *, after: str, block_ms: int | None = None, count: int = 100
     ) -> list[StreamedEvent]:

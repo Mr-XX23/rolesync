@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Collection
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import func, select, update
@@ -25,11 +26,43 @@ class SessionRepository:
         mode: RunMode,
         goal_id: UUID | None = None,
         status: SessionStatus = SessionStatus.RUNNING,
+        title: str | None = None,
     ) -> AgentSession:
-        row = AgentSession(tenant_id=tenant_id, user_id=user_id, mode=mode, goal_id=goal_id, status=status)
+        row = AgentSession(tenant_id=tenant_id, user_id=user_id, mode=mode, goal_id=goal_id, status=status, title=title)
         async with self._sm.begin() as db:
             db.add(row)
         return row
+
+    async def list_for_user(self, *, tenant_id: UUID, user_id: UUID, limit: int = 50) -> list[AgentSession]:
+        async with self._sm() as db:
+            rows = await db.scalars(
+                select(AgentSession)
+                .where(AgentSession.tenant_id == tenant_id, AgentSession.user_id == user_id)
+                .order_by(AgentSession.started_at.desc())
+                .limit(limit)
+            )
+            return list(rows.all())
+
+    async def list_by_status(
+        self, status: SessionStatus, *, updated_before: datetime | None = None, limit: int = 500
+    ) -> list[AgentSession]:
+        stmt = select(AgentSession).where(AgentSession.status == status)
+        if updated_before is not None:
+            stmt = stmt.where(AgentSession.updated_at < updated_before)
+        async with self._sm() as db:
+            rows = await db.scalars(stmt.order_by(AgentSession.updated_at).limit(limit))
+            return list(rows.all())
+
+    async def count_running(self, tenant_id: UUID) -> int:
+        async with self._sm() as db:
+            return int(
+                await db.scalar(
+                    select(func.count())
+                    .select_from(AgentSession)
+                    .where(AgentSession.tenant_id == tenant_id, AgentSession.status == SessionStatus.RUNNING)
+                )
+                or 0
+            )
 
     async def get(self, session_id: UUID) -> AgentSession | None:
         async with self._sm() as db:
