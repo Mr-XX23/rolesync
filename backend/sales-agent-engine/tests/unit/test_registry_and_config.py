@@ -44,7 +44,9 @@ def test_scope_map_keeps_research_read_only():
     registry = stub_registry(SideEffects())
     scopes = AgentScopes()
     assert [d.name for d in scopes.tools_for("research", registry)] == ["lookup_facts"]
-    assert {d.name for d in scopes.tools_for("outreach", registry)} == {"lookup_facts", "send_note", "broken_send"}
+    assert {d.name for d in scopes.tools_for("outreach", registry)} == {
+        "lookup_facts", "send_note", "broken_send", "unconfirmed_send"
+    }
     assert scopes.tools_for("unknown-agent", registry) == []
 
 

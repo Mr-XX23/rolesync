@@ -46,12 +46,13 @@ export interface PendingAction {
 }
 
 export interface SessionDetail extends SessionSummary {
-  transcript: TranscriptItem[];
+  transcript: TranscriptItem[]; // as of the session's last pause or finish
   pending_approvals: PendingAction[];
-  last_event_id: string;
+  last_event_id: string; // follow events after this id to catch up from that point
 }
 
 export type AgentEventType =
+  | 'user_message'
   | 'step_started'
   | 'token'
   | 'tool_call'
@@ -65,7 +66,7 @@ export type AgentEventType =
 /** Fields the engine puts in an event's `data`, by event type. */
 export interface AgentEventData {
   step?: string; // step_started
-  text?: string; // token
+  text?: string; // token, user_message
   reset?: boolean; // token: discard the partial answer (model failover)
   call_id?: string; // tool_call, tool_result, awaiting_approval
   agent?: string;

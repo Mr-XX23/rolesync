@@ -109,6 +109,32 @@ class PendingActionRepository:
         async with self._sm.begin() as db:
             return (await db.scalars(stmt)).one_or_none()
 
+    async def latest_decision_if_settled(self, *, tenant_id: UUID, session_id: UUID) -> PendingAction | None:
+        """The most recently decided action of a session, but only if none is still PENDING:
+        a paused session in that state was decided and never resumed."""
+        async with self._sm() as db:
+            still_pending = await db.scalar(
+                select(func.count())
+                .select_from(PendingAction)
+                .where(
+                    PendingAction.tenant_id == tenant_id,
+                    PendingAction.session_id == session_id,
+                    PendingAction.status == PendingActionStatus.PENDING,
+                )
+            )
+            if still_pending:
+                return None
+            return await db.scalar(
+                select(PendingAction)
+                .where(
+                    PendingAction.tenant_id == tenant_id,
+                    PendingAction.session_id == session_id,
+                    PendingAction.resolved_at.is_not(None),
+                )
+                .order_by(PendingAction.resolved_at.desc())
+                .limit(1)
+            )
+
     async def list_for_user(
         self,
         *,

@@ -11,11 +11,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import operator
 import time
 from typing import Annotated, Any, TypedDict
 
 from app.core.clock import utcnow
+from app.core.enums import ToolOutcome
 from app.engine.events import EventEmitter, EventType, emit_best_effort
 from app.engine.workspace_record import WorkspaceRecorder
 from app.models.router import ModelRouter
@@ -31,10 +33,12 @@ from app.models.types import (
     TextDelta,
     ToolSpec,
 )
-from app.platform.langgraph_runtime import END, GraphSpec, current_context
+from app.platform.langgraph_runtime import END, GraphSpec, current_context, is_control_flow_signal
 from app.tools.gate import ToolGate
 from app.tools.registry import AgentScopes, ToolRegistry
-from app.tools.types import ToolKind
+from app.tools.types import ToolKind, ToolResult
+
+logger = logging.getLogger(__name__)
 
 AGENT_NAME = "orchestrator"
 
@@ -46,6 +50,8 @@ How to work:
   Call the tool directly with complete, final content; do not ask for permission in chat first.
 - If an action is REJECTED, do not retry it unchanged: ask what the rep wants changed.
   If it FAILED or was DENIED, say so briefly and suggest a next step.
+- If an action's outcome is UNKNOWN it may already have happened: never retry it. Tell the rep and ask
+  them to check (for email, their Sent folder).
 - Write in clear, professional, friendly language. Keep chat replies short.
 
 Today is {today} (UTC)."""
@@ -122,7 +128,7 @@ class Orchestrator:
         task = TaskSpec(
             purpose="plan",
             system=SYSTEM_PROMPT.format(today=utcnow().date().isoformat()),
-            messages=tuple(Message.from_dict(item) for item in history),
+            messages=repair_history([Message.from_dict(item) for item in history]),
             tools=self._tool_specs(),
             complexity=Complexity.HIGH,
         )
@@ -146,7 +152,20 @@ class Orchestrator:
         ctx = current_context()
         call, *remaining = state["pending_calls"]
         arguments = call.get("arguments") or {}
-        result = await self._gate.call_tool(ctx, AGENT_NAME, call["name"], arguments, call_id=call["gate_call_id"])
+        try:
+            result = await self._gate.call_tool(ctx, AGENT_NAME, call["name"], arguments, call_id=call["gate_call_id"])
+        except Exception as exc:
+            if is_control_flow_signal(exc):
+                raise  # an approval pause
+            # Keep the conversation well-formed (every call gets a reply) instead of failing the run.
+            logger.exception("tool call %s crashed in session %s", call.get("name"), ctx.session_id)
+            result = ToolResult(
+                ok=False,
+                tool=str(call.get("name")),
+                call_id=call["gate_call_id"],
+                outcome=ToolOutcome.FAILED,
+                error=f"internal error while running '{call.get('name')}'; it may not have completed",
+            )
 
         definition = self._registry.get(call["name"])
         if definition is not None and definition.kind is ToolKind.WRITE:
@@ -192,6 +211,43 @@ class Orchestrator:
                 await flush()
                 return event.completion
         raise ProviderError("model stream ended without a completion")
+
+
+def repair_history(messages: list[Message]) -> tuple[Message, ...]:
+    """Give every tool call a reply before the history reaches a model.
+
+    A run that crashed mid-step leaves an assistant message whose calls were never answered;
+    providers reject such a history (OpenAI-compatible APIs with a 400). The missing replies
+    are filled in with an explicit "did not complete" result; the stored state is unchanged.
+    """
+    repaired: list[Message] = []
+    open_calls: dict[str, str] = {}
+
+    def close_open_calls() -> None:
+        for call_id, name in open_calls.items():
+            repaired.append(
+                Message(
+                    role=Role.TOOL,
+                    content=json.dumps(
+                        {"ok": False, "outcome": "FAILED", "error": "this action did not complete (the run was interrupted)"}
+                    ),
+                    tool_call_id=call_id,
+                    name=name,
+                )
+            )
+        open_calls.clear()
+
+    for message in messages:
+        if message.role is Role.TOOL:
+            open_calls.pop(message.tool_call_id or "", None)
+            repaired.append(message)
+            continue
+        close_open_calls()
+        repaired.append(message)
+        if message.role is Role.ASSISTANT:
+            open_calls.update({call.id: call.name for call in message.tool_calls})
+    # Calls at the very end are still pending (the next step executes them); leave them open.
+    return tuple(repaired)
 
 
 def _after_plan(state: dict[str, Any]) -> str:

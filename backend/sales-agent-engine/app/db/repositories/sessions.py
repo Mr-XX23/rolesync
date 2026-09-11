@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Collection
 from datetime import datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -27,8 +27,12 @@ class SessionRepository:
         goal_id: UUID | None = None,
         status: SessionStatus = SessionStatus.RUNNING,
         title: str | None = None,
+        session_id: UUID | None = None,
     ) -> AgentSession:
-        row = AgentSession(tenant_id=tenant_id, user_id=user_id, mode=mode, goal_id=goal_id, status=status, title=title)
+        row = AgentSession(
+            id=session_id or uuid4(), tenant_id=tenant_id, user_id=user_id, mode=mode, goal_id=goal_id, status=status,
+            title=title,
+        )
         async with self._sm.begin() as db:
             db.add(row)
         return row
@@ -85,6 +89,7 @@ class SessionRepository:
         to: SessionStatus,
         expected: Collection[SessionStatus] | None = None,
         checkpoint_ref: str | None = None,
+        settled_event_id: str | None = None,
     ) -> AgentSession | None:
         """Compare-and-set the status. Returns ``None`` if the session was not in ``expected``."""
         values: dict[str, object] = {"status": to}
@@ -94,6 +99,8 @@ class SessionRepository:
             values["ended_at"] = None
         if checkpoint_ref is not None:
             values["checkpoint_ref"] = checkpoint_ref
+        if settled_event_id is not None:
+            values["settled_event_id"] = settled_event_id
 
         stmt = update(AgentSession).where(AgentSession.id == session_id)
         if expected is not None:

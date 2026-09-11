@@ -24,6 +24,7 @@ export interface ChatState {
   status: SessionStatus | null;
   items: TranscriptItem[];
   draft: string; // assistant text streaming in right now
+  outgoing: string | null; // the message being sent, shown until the stream confirms it
   step: string | null;
   approvals: ApprovalCardModel[];
   lastEventId: string | null;
@@ -35,6 +36,7 @@ export const emptyChat: ChatState = {
   status: null,
   items: [],
   draft: '',
+  outgoing: null,
   step: null,
   approvals: [],
   lastEventId: null,
@@ -44,10 +46,11 @@ export const emptyChat: ChatState = {
 export type ChatAction =
   | { type: 'reset' }
   | { type: 'snapshot'; detail: SessionDetail }
-  | { type: 'started'; sessionId: string; message: string }
+  | { type: 'sending'; message: string }
+  | { type: 'send_failed' }
+  | { type: 'started'; sessionId: string }
   | { type: 'event'; event: AgentEvent }
-  | { type: 'approval_decided'; action: PendingAction }
-  | { type: 'failed'; message: string };
+  | { type: 'approval_decided'; action: PendingAction };
 
 function fromPending(action: PendingAction): ApprovalCardModel {
   return {
@@ -73,6 +76,19 @@ function upsertApproval(approvals: ApprovalCardModel[], card: ApprovalCardModel)
   return [...others, card];
 }
 
+function addUserMessage(state: ChatState, text: string): ChatState {
+  const flushed = flushDraft(state);
+  return {
+    ...flushed,
+    items: [...flushed.items, { kind: 'user', text }],
+    outgoing: null,
+    status: 'RUNNING',
+    step: 'starting',
+    error: null,
+    approvals: flushed.approvals.filter((card) => card.status === 'PENDING'),
+  };
+}
+
 function applyEvent(state: ChatState, event: AgentEvent): ChatState {
   // Replayed events (at-least-once delivery around reconnects) are ignored by position.
   if (state.lastEventId && compareStreamIds(event.id, state.lastEventId) <= 0) {
@@ -82,8 +98,14 @@ function applyEvent(state: ChatState, event: AgentEvent): ChatState {
   const data = event.data || {};
 
   switch (event.type) {
-    case 'step_started':
-      return { ...next, status: 'RUNNING', step: String(data.step ?? 'working') };
+    case 'user_message':
+      // Every turn's prompt comes from the stream, so a reopened chat shows it exactly once.
+      return addUserMessage(next, String(data.text ?? ''));
+    case 'step_started': {
+      // If the prompt's own event was lost, the run starting still confirms it.
+      const confirmed = next.outgoing !== null ? addUserMessage(next, next.outgoing) : next;
+      return { ...confirmed, status: 'RUNNING', step: String(data.step ?? 'working') };
+    }
     case 'token':
       if (data.reset) {
         return { ...next, draft: '' };
@@ -169,17 +191,16 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         approvals: action.detail.pending_approvals.map(fromPending),
         lastEventId: action.detail.last_event_id,
       };
+    case 'sending':
+      return { ...state, outgoing: action.message, error: null };
+    case 'send_failed':
+      return { ...state, outgoing: null };
     case 'started':
-      return {
-        ...state,
-        sessionId: action.sessionId,
-        status: 'RUNNING',
-        step: 'starting',
-        error: null,
-        draft: '',
-        items: [...state.items, { kind: 'user', text: action.message }],
-        approvals: state.approvals.filter((card) => card.status === 'PENDING'),
-      };
+      if (state.outgoing === null) {
+        // The stream already delivered this turn's prompt (it can beat the HTTP response).
+        return { ...state, sessionId: action.sessionId };
+      }
+      return { ...state, sessionId: action.sessionId, status: 'RUNNING', step: 'starting' };
     case 'event':
       if (action.event.session_id !== state.sessionId) {
         return state;
@@ -192,8 +213,6 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           card.id === action.action.id ? { ...card, status: action.action.status } : card
         ),
       };
-    case 'failed':
-      return { ...state, error: action.message, step: null };
     default:
       return state;
   }

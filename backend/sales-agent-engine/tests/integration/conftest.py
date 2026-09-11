@@ -6,6 +6,7 @@ import asyncio
 import socket
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import timedelta
+from typing import Any
 from uuid import UUID, uuid4
 
 import httpx
@@ -22,6 +23,7 @@ from app.config import SERVICE_ROOT, Settings
 from app.container import Container, build_container
 from app.core.context import AgentContext, RunMode
 from app.db.session import create_engine
+from app.engine.runner import context_for
 from app.main import create_app
 from app.observability.tracing import NoopTracingClient
 from app.platform.redis import create_redis
@@ -122,8 +124,37 @@ def user_id(workspace_service: FakeWorkspaceService, tenant_id: UUID) -> UUID:
 async def open_session(
     container: Container, tenant_id: UUID, user_id: UUID, mode: RunMode = RunMode.INTERACTIVE
 ) -> AgentContext:
+    """A session row with no run behind it (for exercising the gate directly)."""
     row = await container.sessions.create(tenant_id=tenant_id, user_id=user_id, mode=mode)
     return AgentContext(tenant_id=tenant_id, user_id=user_id, session_id=row.id, mode=mode)
+
+
+async def start_run(
+    container: Container,
+    tenant_id: UUID,
+    user_id: UUID,
+    graph_input: dict[str, Any],
+    *,
+    mode: RunMode = RunMode.INTERACTIVE,
+    user_message: str | None = None,
+) -> AgentContext:
+    """Start a run in the background, as ``POST /chat`` does."""
+    session = await container.runner.start_new(
+        tenant_id=tenant_id, user_id=user_id, mode=mode, title=user_message, graph_input=graph_input,
+        user_message=user_message,
+    )
+    return context_for(session)
+
+
+async def settle_runs(container: Container, timeout: float = 15.0) -> None:
+    """Wait until every run the runner started, including follow-ups it spawned, has finished."""
+
+    async def drain() -> None:
+        while container.runner._tasks:
+            await asyncio.gather(*list(container.runner._tasks), return_exceptions=True)
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(drain(), timeout)
 
 
 def make_gate(

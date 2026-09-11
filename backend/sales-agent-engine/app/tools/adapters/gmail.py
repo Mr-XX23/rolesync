@@ -7,7 +7,7 @@ from typing import Annotated, Any
 from pydantic import Field, StringConstraints
 
 from app.core.context import AgentContext
-from app.platform.composio_client import ConnectorClient
+from app.platform.composio_client import ConnectorClient, ConnectorOutcomeUnknown
 from app.tools.registry import ToolDefinition
 from app.tools.types import (
     ToolAccessDenied,
@@ -15,6 +15,7 @@ from app.tools.types import (
     ToolInput,
     ToolInvocation,
     ToolKind,
+    ToolOutcomeUnknown,
     ToolOutput,
     ToolScope,
 )
@@ -39,20 +40,23 @@ def gmail_tools(connector: ConnectorClient) -> list[ToolDefinition]:
     async def send_email(invocation: ToolInvocation) -> ToolOutput:
         args = invocation.args
         assert isinstance(args, SendEmailArgs)
-        data = await connector.execute(
-            user_id=invocation.ctx.user_id,
-            slug="GMAIL_SEND_EMAIL",
-            arguments={
-                "recipient_email": args.to[0],
-                "extra_recipients": args.to[1:],
-                "cc": args.cc,
-                "bcc": args.bcc,
-                "subject": args.subject,
-                "body": args.body,
-                "is_html": args.is_html,
-                "user_id": "me",
-            },
-        )
+        try:
+            data = await connector.execute(
+                user_id=invocation.ctx.user_id,
+                slug="GMAIL_SEND_EMAIL",
+                arguments={
+                    "recipient_email": args.to[0],
+                    "extra_recipients": args.to[1:],
+                    "cc": args.cc,
+                    "bcc": args.bcc,
+                    "subject": args.subject,
+                    "body": args.body,
+                    "is_html": args.is_html,
+                    "user_id": "me",
+                },
+            )
+        except ConnectorOutcomeUnknown as exc:
+            raise ToolOutcomeUnknown(str(exc)) from exc
         message_id, thread_id = _message_ids(data)
         return ToolOutput(
             data={"message_id": message_id, "thread_id": thread_id, "to": args.to},

@@ -88,8 +88,12 @@ class GraphRuntime:
         await self._graph.ainvoke(payload, self._config(ctx), context=ctx, durability="sync")
         return await self.inspect(ctx)
 
-    async def inspect(self, ctx: AgentContext) -> RunOutcome:
-        snapshot = await self._graph.aget_state(self._config(ctx))
+    async def inspect(self, ctx: AgentContext, *, checkpoint_id: str | None = None) -> RunOutcome:
+        """The thread's latest state, or its state at ``checkpoint_id``."""
+        config = self._config(ctx)
+        if checkpoint_id:
+            config["configurable"]["checkpoint_id"] = checkpoint_id
+        snapshot = await self._graph.aget_state(config)
         interrupts = [item.value for item in snapshot.interrupts]
         return RunOutcome(
             status=RunStatus.INTERRUPTED if interrupts else RunStatus.COMPLETED,

@@ -29,6 +29,7 @@ from app.tools.types import (
     ToolInput,
     ToolInvocation,
     ToolKind,
+    ToolOutcomeUnknown,
     ToolOutput,
     ToolScope,
 )
@@ -165,6 +166,7 @@ class ScriptedBrain:
             text = {
                 "EXECUTED": "Done: the email to Jane was sent.",
                 "REJECTED": "Understood, I did not send it. What should I change?",
+                "UNKNOWN": "I could not confirm the email went out; please check your Sent folder.",
             }.get(outcome, f"The email was not sent ({outcome}).")
             calls = ()
         for word in text.split(" "):
@@ -205,12 +207,15 @@ class FakeConnector:
 
     connected: bool = True
     executions: list[dict[str, Any]] = field(default_factory=list)
+    fail_with: Exception | None = None  # raised after the call is recorded (the provider may have acted)
 
     async def has_active_connection(self, user_id: UUID, toolkit: str) -> bool:
         return self.connected
 
     async def execute(self, *, user_id: UUID, slug: str, arguments: dict[str, Any]) -> dict[str, Any]:
         self.executions.append({"user_id": user_id, "slug": slug, "arguments": arguments})
+        if self.fail_with is not None:
+            raise self.fail_with
         return {"response_data": {"id": f"gmail-msg-{len(self.executions)}", "threadId": "thread-1"}}
 
 
@@ -234,7 +239,12 @@ class NoteArgs(ToolInput):
 
 
 def stub_registry(
-    effects: SideEffects, *, acl_denies: bool = False, acl_breaks: bool = False, read_delay: float = 0.0
+    effects: SideEffects,
+    *,
+    acl_denies: bool = False,
+    acl_breaks: bool = False,
+    read_delay: float = 0.0,
+    write_delay: float = 0.0,
 ) -> ToolRegistry:
     async def lookup(inv: ToolInvocation) -> ToolOutput:
         if read_delay:
@@ -248,10 +258,18 @@ def stub_registry(
         assert isinstance(args, NoteArgs)
         ref = f"msg-{len(effects.sent) + 1}"
         effects.sent.append({"to": args.to, "text": args.text, "tenant": str(inv.ctx.tenant_id), "ref": ref})
+        if write_delay:
+            await asyncio.sleep(write_delay)  # sent, but the confirmation is slow
         return ToolOutput(data={"message_id": ref}, summary=f"note sent to {args.to}", ref_id=ref)
 
     async def broken_send(inv: ToolInvocation) -> ToolOutput:
         raise RuntimeError("smtp relay unavailable")
+
+    async def unconfirmed_send(inv: ToolInvocation) -> ToolOutput:
+        args = inv.args
+        assert isinstance(args, NoteArgs)
+        effects.sent.append({"to": args.to, "text": args.text, "tenant": str(inv.ctx.tenant_id), "ref": None})
+        raise ToolOutcomeUnknown("the relay dropped the connection before answering")
 
     async def acl(ctx: AgentContext, args: ToolInput) -> None:
         if acl_denies:
@@ -290,6 +308,15 @@ def stub_registry(
                 category=ToolCategory.COMMUNICATION,
                 input_model=NoteArgs,
                 handler=broken_send,
+            ),
+            ToolDefinition(
+                name="unconfirmed_send",
+                description="Sends, then loses the answer",
+                kind=ToolKind.WRITE,
+                scope=ToolScope.COMMUNICATION,
+                category=ToolCategory.COMMUNICATION,
+                input_model=NoteArgs,
+                handler=unconfirmed_send,
             ),
         ]
     )

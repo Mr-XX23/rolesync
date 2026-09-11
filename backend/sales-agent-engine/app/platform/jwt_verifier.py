@@ -44,24 +44,30 @@ class SigningKeys:
         self._pem = pem
         self._cache_seconds = cache_seconds
         self._min_refresh_seconds = min_refresh_seconds
-        self._keys: list[Any] | None = None
+        self._keys: list[Any] | None = None  # from the last successful JWKS fetch
         self._fetched_at = 0.0
+        self._attempted_at: float | None = None
 
     async def get(self, *, refresh: bool = False) -> list[Any]:
         if self._jwks_url:
-            age = time.monotonic() - self._fetched_at
-            # A forced refresh (unknown signature) is rate-limited so forged tokens can't hammer JWKS.
-            if self._keys is None or age > self._cache_seconds or (refresh and age > self._min_refresh_seconds):
+            now = time.monotonic()
+            stale = self._keys is None or now - self._fetched_at > self._cache_seconds
+            since_attempt = float("inf") if self._attempted_at is None else now - self._attempted_at
+            # Fetch when the cache is stale or a signature didn't match (key rotation), but never
+            # more often than min_refresh_seconds: neither forged tokens nor an unreachable
+            # auth-service can turn every request into a JWKS round trip.
+            if (stale or refresh) and since_attempt >= self._min_refresh_seconds:
                 await self._fetch()
-        keys = list(self._keys or [])
+            if self._keys:
+                # The PEM is only a fallback: once JWKS answers, a rotated-out key must stop working.
+                return list(self._keys)
         if self._pem:
-            keys.append(self._pem)
-        if not keys:
-            raise UpstreamUnavailable("token signing keys are unavailable")
-        return keys
+            return [self._pem]
+        raise UpstreamUnavailable("token signing keys are unavailable")
 
     async def _fetch(self) -> None:
         assert self._jwks_url and self._http is not None
+        self._attempted_at = time.monotonic()
         try:
             response = await self._http.get(self._jwks_url, timeout=5.0)
             response.raise_for_status()
@@ -71,8 +77,8 @@ class SigningKeys:
                 if item.get("kty") == "RSA" and item.get("use", "sig") == "sig"
             ]
         except Exception as exc:
+            # Keep any previously fetched keys: a brief auth-service outage must not lock users out.
             logger.warning("could not fetch JWKS from %s: %s", self._jwks_url, exc)
-            self._fetched_at = time.monotonic()  # back off before trying again
             return
         self._keys = keys
         self._fetched_at = time.monotonic()

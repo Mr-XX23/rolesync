@@ -26,6 +26,7 @@ const STATUS_LABEL: Record<SessionStatus, string> = {
 };
 
 const STATUS_AFTER_EVENT: Partial<Record<AgentEventType, SessionStatus>> = {
+  user_message: 'RUNNING',
   awaiting_approval: 'AWAITING_APPROVAL',
   approval_resolved: 'RUNNING',
   done: 'DONE',
@@ -112,12 +113,14 @@ export const SalesAgent: React.FC = () => {
       return;
     }
     setSending(true);
+    dispatch({ type: 'sending', message });
     try {
       const started = await salesAgentApi.startChat(message, chat.sessionId);
-      dispatch({ type: 'started', sessionId: started.session_id, message });
+      dispatch({ type: 'started', sessionId: started.session_id });
       setInput('');
       void refreshSessions();
     } catch (error) {
+      dispatch({ type: 'send_failed' });
       toast.error(describeAgentError(error));
     } finally {
       setSending(false);
@@ -205,7 +208,7 @@ export const SalesAgent: React.FC = () => {
           </header>
 
           <div className="flex-1 overflow-y-auto px-5 py-5 space-y-4 bg-background/40">
-            {chat.items.length === 0 && !chat.draft && pending.length === 0 ? (
+            {chat.items.length === 0 && !chat.draft && !chat.outgoing && pending.length === 0 ? (
               <div className="h-full flex flex-col items-center justify-center text-center gap-4 py-10">
                 <div className="w-12 h-12 rounded-2xl bg-primary/10 text-primary flex items-center justify-center">
                   <Sparkles className="w-6 h-6" />
@@ -227,7 +230,13 @@ export const SalesAgent: React.FC = () => {
                 </div>
               </div>
             ) : (
-              <Transcript items={chat.items} draft={chat.draft} step={chat.step} running={chat.status === 'RUNNING'} />
+              <Transcript
+                items={chat.items}
+                outgoing={chat.outgoing}
+                draft={chat.draft}
+                step={chat.step}
+                running={chat.status === 'RUNNING'}
+              />
             )}
 
             {decided.map((card) => (

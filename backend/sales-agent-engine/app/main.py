@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
@@ -14,8 +13,6 @@ from app.config import API_PREFIX, Settings, get_settings
 from app.container import Container, build_container
 from app.core.logging import configure_logging
 from app.platform import eureka
-
-logger = logging.getLogger(__name__)
 
 ContainerFactory = Callable[[Settings], Awaitable[Container]]
 
@@ -32,9 +29,8 @@ def create_app(settings: Settings | None = None, *, container_factory: Container
         background: list[asyncio.Task] = []
         if settings.workspace_sync_enabled:
             background.append(asyncio.create_task(container.sync_worker.run_forever(), name="workspace-sync"))
-        recovered = await container.runner.recover_orphans(idle_seconds=2 * settings.run_lease_seconds)
-        if recovered:
-            logger.info("resumed %d interrupted session(s)", len(recovered))
+        # Recovers orphaned runs and decided-but-paused sessions now, then periodically.
+        background.append(asyncio.create_task(container.runner.run_maintenance(), name="run-maintenance"))
         registered = settings.eureka_enabled and await eureka.register(settings)
         try:
             yield

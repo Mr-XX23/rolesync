@@ -40,4 +40,31 @@ class AgentContextAccessTest {
         assertDoesNotThrow(() -> AgentContextAccess.requireAccess("DEAL", creator, colleague));
         assertDoesNotThrow(() -> AgentContextAccess.requireAccess(null, creator, colleague));
     }
+
+    @Test
+    void viewersCannotWriteAnywhere() {
+        ResponseStatusException denied = assertThrows(ResponseStatusException.class,
+                () -> AgentContextAccess.requireWriteAccess("DEAL", creator, creator, "VIEWER", false));
+        assertEquals(HttpStatus.FORBIDDEN, denied.getStatusCode());
+    }
+
+    @Test
+    void onlyTheCreatorWritesToAPrivateAgentContext() {
+        assertDoesNotThrow(() -> AgentContextAccess.requireWriteAccess("AGENT_SESSION", creator, creator, "MEMBER", true));
+        ResponseStatusException denied = assertThrows(ResponseStatusException.class,
+                () -> AgentContextAccess.requireWriteAccess("AGENT_SESSION", creator, colleague, "OWNER", true));
+        assertEquals(HttpStatus.NOT_FOUND, denied.getStatusCode()); // even an owner can't see into it
+    }
+
+    @Test
+    void sharedContextTasksAreChangedOnlyByTheCreatorOrAnAdmin() {
+        assertDoesNotThrow(() -> AgentContextAccess.requireWriteAccess("DEAL", creator, creator, "MEMBER", true));
+        assertDoesNotThrow(() -> AgentContextAccess.requireWriteAccess("DEAL", creator, colleague, "ADMIN", true));
+        assertDoesNotThrow(() -> AgentContextAccess.requireWriteAccess("DEAL", creator, colleague, "OWNER", true));
+        ResponseStatusException denied = assertThrows(ResponseStatusException.class,
+                () -> AgentContextAccess.requireWriteAccess("DEAL", creator, colleague, "MEMBER", true));
+        assertEquals(HttpStatus.FORBIDDEN, denied.getStatusCode());
+        // Notes on a shared context: any writer (the note upsert itself only updates the author's own notes).
+        assertDoesNotThrow(() -> AgentContextAccess.requireWriteAccess("DEAL", creator, colleague, "MEMBER", false));
+    }
 }

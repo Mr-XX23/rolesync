@@ -268,8 +268,37 @@ async def test_write_interrupted_mid_execution_is_not_blindly_retried(make_conta
 
     result = await gate.call_tool(ctx, "orchestrator", "send_note", NOTE, call_id="c1")
 
-    assert not result.ok and "may already have taken effect" in (result.error or "")
+    assert result.outcome is ToolOutcome.UNKNOWN and "MAY HAVE HAPPENED" in (result.error or "")
     assert effects.sent == []
+
+
+@pytest.mark.parametrize(
+    ("tool", "registry_options"),
+    [("send_note", {"write_delay": 1.0}), ("unconfirmed_send", {})],
+    ids=["timed-out", "connection-lost"],
+)
+async def test_a_write_that_gives_no_answer_is_unknown_and_never_sent_twice(
+    make_container, tenant_id, user_id, tool, registry_options
+):
+    container = await make_container()
+    effects = SideEffects()
+    ctx = await open_session(container, tenant_id, user_id, RunMode.AUTONOMOUS)
+    registry = stub_registry(effects, **registry_options)
+    gate = make_gate(container, registry, PausingApprovalPort(), policy=AllowAllPolicy(), timeout_seconds=0.1)
+
+    result = await gate.call_tool(ctx, "orchestrator", tool, NOTE, call_id="c1")
+
+    assert result.outcome is ToolOutcome.UNKNOWN and "MAY HAVE HAPPENED" in (result.error or "")
+    assert len(effects.sent) == 1  # it did go out
+    [step] = await container.ledger.list_steps(tenant_id=tenant_id, session_id=ctx.session_id)
+    assert step.status == SagaStatus.PENDING
+    [audit] = await container.ledger.list_audit(tenant_id=tenant_id, session_id=ctx.session_id)
+    assert audit.outcome == "UNKNOWN"
+
+    # Replaying the call (e.g. after a crash) refuses instead of acting again.
+    again = await gate.call_tool(ctx, "orchestrator", tool, NOTE, call_id="c1")
+    assert again.outcome is ToolOutcome.UNKNOWN
+    assert len(effects.sent) == 1
 
 
 async def test_slow_read_times_out_as_a_failed_result(make_container, tenant_id, user_id):

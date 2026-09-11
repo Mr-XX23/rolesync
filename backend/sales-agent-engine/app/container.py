@@ -162,7 +162,7 @@ async def build_container(
         sessions = SessionRepository(sessionmaker)
         pending_actions = PendingActionRepository(sessionmaker)
         ledger = LedgerRepository(sessionmaker)
-        outbox = OutboxRepository(sessionmaker)
+        outbox = OutboxRepository(sessionmaker, engine)
         events = RedisEventChannel(
             redis,
             key_prefix=settings.redis_key_prefix,
@@ -244,6 +244,7 @@ async def build_container(
             leases=leases,
             recorder=recorder,
             tracer=tracer,
+            sweep_interval_seconds=max(5.0, settings.run_lease_seconds / 2),
         )
         return container
     except BaseException:

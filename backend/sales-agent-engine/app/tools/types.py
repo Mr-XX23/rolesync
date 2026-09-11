@@ -94,6 +94,11 @@ class ToolInputError(Exception):
     """Raised by a handler for arguments that are well-typed but unusable."""
 
 
+class ToolOutcomeUnknown(Exception):
+    """Raised by a write handler that could not learn whether its side effect happened
+    (e.g. the connection dropped after the request was sent). Never retried."""
+
+
 def describe_validation_error(exc: ValidationError) -> str:
     return "; ".join(
         f"{'.'.join(str(part) for part in error['loc']) or 'arguments'}: {error['msg']}" for error in exc.errors()

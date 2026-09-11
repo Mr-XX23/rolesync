@@ -47,6 +47,7 @@ from app.tools.types import (
     ToolInputError,
     ToolInvocation,
     ToolKind,
+    ToolOutcomeUnknown,
     ToolResult,
     describe_validation_error,
 )
@@ -283,14 +284,16 @@ class ToolGate:
         )
         if not created:
             if step.status == SagaStatus.PENDING:
+                outcome = ToolOutcome.UNKNOWN
                 message = (
-                    f"a previous attempt at '{definition.name}' stopped mid-execution, so it may already have "
-                    "taken effect; verify before retrying"
+                    f"a previous attempt at '{definition.name}' stopped before confirming, so it MAY HAVE HAPPENED. "
+                    "Do not retry it; ask the user to check."
                 )
             else:
+                outcome = ToolOutcome.FAILED
                 message = step.error or f"'{definition.name}' already failed"
             return await self._refuse(
-                ctx, agent_name, definition.name, args_json, call_id, ToolOutcome.FAILED, message, pending_action_id
+                ctx, agent_name, definition.name, args_json, call_id, outcome, message, pending_action_id
             )
 
         started = time.monotonic()
@@ -300,23 +303,25 @@ class ToolGate:
             if is_control_flow_signal(exc):
                 raise
             outcome, message = _classify_failure(exc, definition)
-            await self._ledger.fail_write(
-                AuditFields(
-                    tenant_id=ctx.tenant_id,
-                    session_id=ctx.session_id,
-                    user_id=ctx.user_id,
-                    agent=agent_name,
-                    tool=definition.name,
-                    args=args_json,
-                    outcome=outcome,
-                    result_summary=message,
-                    idempotency_key=key,
-                    pending_action_id=pending_action_id,
-                    duration_ms=_elapsed_ms(started),
-                ),
-                step_id=step.id,
-                error=message,
+            audit = AuditFields(
+                tenant_id=ctx.tenant_id,
+                session_id=ctx.session_id,
+                user_id=ctx.user_id,
+                agent=agent_name,
+                tool=definition.name,
+                args=args_json,
+                outcome=outcome,
+                result_summary=message,
+                idempotency_key=key,
+                pending_action_id=pending_action_id,
+                duration_ms=_elapsed_ms(started),
             )
+            if outcome is ToolOutcome.UNKNOWN:
+                # The side effect may have happened: the saga step stays PENDING, so a replay
+                # of this call is refused instead of acting twice.
+                await self._ledger.record(audit)
+            else:
+                await self._ledger.fail_write(audit, step_id=step.id, error=message)
             await self._emit_result(ctx, call_id, agent_name, definition.name, outcome, error=message)
             return ToolResult(
                 ok=False, tool=definition.name, call_id=call_id, outcome=outcome, error=message,
@@ -470,6 +475,13 @@ def _classify_failure(exc: Exception, definition: ToolDefinition) -> tuple[ToolO
         return ToolOutcome.DENIED, str(exc) or f"access to '{definition.name}' denied"
     if isinstance(exc, ToolInputError):
         return ToolOutcome.INVALID, str(exc) or f"invalid input for '{definition.name}'"
+    unknown = isinstance(exc, ToolOutcomeUnknown) or (isinstance(exc, TimeoutError) and definition.kind is ToolKind.WRITE)
+    if unknown:
+        # A timed-out write keeps running in the connector: it is not a failure we can report as one.
+        return ToolOutcome.UNKNOWN, (
+            f"'{definition.name}' did not confirm whether it completed, so it MAY HAVE HAPPENED. "
+            "Do not retry it; ask the user to check (for email, their Sent folder)."
+        )
     if isinstance(exc, TimeoutError):
         return ToolOutcome.FAILED, f"'{definition.name}' timed out"
     logger.exception("tool %s raised", definition.name)
