@@ -175,6 +175,31 @@ class ScriptedBrain:
         yield StreamDone(Completion(message=message, provider=self.name, model=f"scripted-{self.name}"))
 
 
+class PlanningBrain:
+    """A model double for research turns: on the rep's message it requests every call in
+    ``plan`` in one step; once results are back it answers with their summaries."""
+
+    def __init__(self, plan: list[tuple[str, dict[str, Any]]], name: str = "gemini") -> None:
+        self.name = name
+        self.plan = plan
+        self.tasks: list[Any] = []
+
+    async def stream(self, task: Any, models: Any):
+        from app.models.types import Completion, Message, Role, StreamDone, TextDelta, ToolCall
+
+        self.tasks.append(task)
+        if task.messages[-1].role is Role.USER:
+            text = "Looking into it."
+            calls = tuple(ToolCall(id=f"call_{i}", name=name, arguments=args) for i, (name, args) in enumerate(self.plan))
+        else:
+            results = [json.loads(m.content) for m in task.messages if m.role is Role.TOOL]
+            text = "Findings: " + " | ".join(str(r.get("summary") or r.get("error") or r["outcome"]) for r in results)
+            calls = ()
+        for word in text.split(" "):
+            yield TextDelta(word + " ")
+        yield StreamDone(Completion(message=Message(role=Role.ASSISTANT, content=text, tool_calls=calls), provider=self.name, model="scripted"))
+
+
 class BlockingBrain:
     """A model call that never returns (to simulate a process dying mid-step)."""
 
@@ -205,17 +230,20 @@ class FailingBrain:
 class FakeConnector:
     """Composio stand-in: records executions instead of sending anything."""
 
-    connected: bool = True
+    connected: bool | set[str] = True  # or the set of connected toolkits
     executions: list[dict[str, Any]] = field(default_factory=list)
     fail_with: Exception | None = None  # raised after the call is recorded (the provider may have acted)
+    responses: dict[str, dict[str, Any]] = field(default_factory=dict)  # canned `data` per action slug
 
     async def has_active_connection(self, user_id: UUID, toolkit: str) -> bool:
-        return self.connected
+        return toolkit in self.connected if isinstance(self.connected, set) else self.connected
 
     async def execute(self, *, user_id: UUID, slug: str, arguments: dict[str, Any]) -> dict[str, Any]:
         self.executions.append({"user_id": user_id, "slug": slug, "arguments": arguments})
         if self.fail_with is not None:
             raise self.fail_with
+        if slug in self.responses:
+            return self.responses[slug]
         return {"response_data": {"id": f"gmail-msg-{len(self.executions)}", "threadId": "thread-1"}}
 
 

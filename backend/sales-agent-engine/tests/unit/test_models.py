@@ -107,10 +107,28 @@ async def test_openrouter_streams_text_and_assembles_tool_call_deltas():
         events = [e async for e in provider.stream(TaskSpec(purpose="p", messages=(), tools=tools), ["m1", "m2"])]
 
     assert captured["body"]["models"] == ["m1", "m2"] and captured["body"]["stream"] is True
+    assert "reasoning" not in captured["body"]  # planning keeps the model's thinking
     assert [e.text for e in events if isinstance(e, TextDelta)] == ["Sending "]
     completion = events[-1].completion
     assert completion.model == "nvidia/nemotron" and completion.usage.output_tokens == 7
     assert completion.message.tool_calls == (ToolCall(id="call-9", name="send_email", arguments={"to": ["jane@acme.test"]}),)
+
+
+async def test_openrouter_low_complexity_tasks_turn_reasoning_off():
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        chunks = _sse({"model": "m", "choices": [{"delta": {"content": "Brief."}, "finish_reason": "stop"}]}, "[DONE]")
+        return httpx.Response(200, content=chunks, headers={"content-type": "text/event-stream"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        provider = OpenRouterProvider(api_key="k", http=http)
+        task = TaskSpec(purpose="digest", messages=(), complexity=Complexity.LOW, max_output_tokens=900)
+        [*_, done] = [e async for e in provider.stream(task, ["m"])]
+
+    assert captured["body"]["reasoning"] == {"enabled": False} and captured["body"]["max_tokens"] == 900
+    assert done.completion.message.content == "Brief."
 
 
 @pytest.mark.parametrize(("status", "error"), [(429, RateLimited), (503, ProviderUnavailable), (400, ProviderError)])

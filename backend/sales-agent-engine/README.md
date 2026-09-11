@@ -13,8 +13,9 @@ approval before any real-world action.
 |---|---|---|
 | 0 | Skeleton, schema `agent`, identity, SSE channel, Tool Gate (tenant/scope/ACL/audit/approval), LangGraph Postgres checkpointer | done |
 | 1 | Vertical slice: chat → orchestrator (model router: Gemini, OpenRouter failover) → `send_email` via Composio → approval pause/resume → audit; workspace records; chat UI | done |
-| 2 | Read tools: knowledge base, catalog, Gmail/Calendar/Slack/Notion reads, web search (Gemini grounding + Tavily), prospect research | next |
-| 3–6 | Write tools + guardrails, context/memory, sub-agents, autonomy layer | — |
+| 2 | Read tools: knowledge base, catalog, Gmail/Calendar/Slack/Notion reads, web search (Gemini grounding + Tavily), prospect research; reads run in parallel; sources in the UI | done |
+| 3 | Remaining write tools + guardrails (limits, retry/timeout, circuit breaker, saga, approval TTL) | next |
+| 4–6 | Context/memory, sub-agents, autonomy layer | — |
 
 ## Layout
 
@@ -28,7 +29,8 @@ app/
   autonomy/       policy envelope (EscalateAllPolicy until Phase 6)
   observability/  TracingClient: LangSmith or no-op
   db/             SQLAlchemy models, repositories, Alembic migrations (schema `agent`)
-  platform/       adapters: LangGraph, Composio, JWT verifier, workspace-service, Redis, Eureka
+  platform/       adapters: LangGraph, Composio, data-pipeline (knowledge vault + catalog), Tavily,
+                  JWT verifier, workspace-service, Redis, Eureka
   config.py       settings, model routing rules, budgets
 ```
 
@@ -39,15 +41,34 @@ app/
 1. `POST /chat` creates (or continues) a session and starts a background run.
 2. `plan` asks the model router for the next step. Complex work goes to Gemini, with OpenRouter as
    failover; tokens stream to `GET /sessions/{id}/events`.
-3. `act` runs one tool call per step through the gate. A write such as `send_email` creates a
-   pending action, emits `awaiting_approval` and pauses durably in the Postgres checkpoint.
+3. `act` runs tool calls through the gate: reads the model asked for together run in parallel and
+   never need approval; a write such as `send_email` runs alone, creates a pending action, emits
+   `awaiting_approval` and pauses durably in the Postgres checkpoint.
 4. `POST /approvals/{id}/decision` (approve / edit / reject) resumes the run, in this or another
    process. The gate executes once (idempotency key), and records a saga step and an audit row.
 5. The session context, the action's task, the sent email and the final answer are written to
    `agent.workspace_outbox` and delivered to workspace-service, where they can be retrieved later.
 
-A run whose process dies mid-step is resumed from its checkpoint at the next startup (sessions that
-are RUNNING with no live lease). A write interrupted mid-execution is never retried blindly.
+A maintenance sweep resumes runs whose process died (RUNNING with no live lease) from their
+checkpoint, and paused sessions whose approvals were decided but never resumed. A write whose
+outcome is unknown (timeout, dropped connection) is reported as UNKNOWN and never retried.
+
+## Tools
+
+| Tool | Kind | Backed by |
+|---|---|---|
+| `send_email` | write (approval) | Composio Gmail |
+| `search_emails`, `read_email_thread` | read | Composio Gmail |
+| `list_calendar_events` | read | Composio Google Calendar |
+| `search_slack_messages` | read | Composio Slack |
+| `search_notion`, `read_notion_page` | read | Composio Notion |
+| `search_knowledge_base`, `read_knowledge_document` | read | data-pipeline knowledge vault (keyword retrieval in the adapter) |
+| `search_catalog`, `check_inventory` | read | data-pipeline catalog |
+| `web_search` | read | Tavily pages + Google Search grounding (Gemini) |
+| `research_prospect` | read | web search, condensed into a cited brief by the low-complexity route (OpenRouter) |
+
+Connector reads are denied (not failed) when the user hasn't connected that app. Read results carry
+`sources` (web pages, message and page links), which the chat UI shows under each step.
 
 ## Identity
 
@@ -78,8 +99,9 @@ here until it expires (up to 60 min), because revocation lives only inside auth-
 | POST | `/approvals/{id}/decision` | `{"decision": "approve" \| "edit" \| "reject", "args"?, "note"?}` |
 | GET | `/health`, `/health/ready` | liveness, and readiness (database + Redis) |
 
-Event types: `step_started`, `token` (`reset: true` = discard partial text after a model failover),
-`tool_call`, `tool_result`, `awaiting_approval`, `approval_resolved`, `progress`, `done`, `error`.
+Event types: `user_message` (the prompt that started a turn), `step_started`, `token` (`reset: true`
+= discard partial text after a model failover), `tool_call`, `tool_result` (with `sources` for
+reads), `awaiting_approval`, `approval_resolved`, `progress`, `done`, `error`.
 
 ## Configuration
 
@@ -113,6 +135,9 @@ The gateway reads routes at startup, so restart `gateway-service` once to pick u
 ```
 
 Integration tests use the local Postgres (database `rolesync-micro-sales-agent-test`) and Redis
-db 15, with a scripted model, fake Gmail and a fake workspace-service. They cover the Phase 1 loop
-over HTTP + SSE, durable pause/resume across a restart, crash recovery, model failover, the gate,
-approvals, and the workspace outbox (ordering, retries, rejections).
+db 15, with scripted models, fake Composio, data-pipeline, Tavily and workspace-service. They cover
+the Phase 1 loop and a multi-source research turn over HTTP + SSE, parallel reads, durable
+pause/resume across a restart, crash and lease-loss recovery, model failover, the gate (including
+UNKNOWN outcomes), approvals, and the workspace outbox. `--live` adds contract checks: Composio
+accepts every argument the adapters send, Gemini and the failover models accept every tool schema,
+and grounding, Tavily and the low-complexity route answer.

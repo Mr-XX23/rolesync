@@ -155,6 +155,7 @@ function applyEvent(state: ChatState, event: AgentEvent): ChatState {
             outcome: data.outcome,
             summary: data.summary,
             error: data.error,
+            sources: data.sources,
           },
         ],
       };

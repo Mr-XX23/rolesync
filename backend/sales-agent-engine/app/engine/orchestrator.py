@@ -3,13 +3,15 @@
     plan ──(tool calls?)──► act ──(more calls?)──► act ─ … ─► plan ─ … ─► END
 
 - ``plan`` asks the model router for the next step and streams its tokens to the session.
-- ``act`` runs exactly ONE pending tool call through the Tool Gate per super-step. A run
-  that pauses for approval therefore resumes by re-running only that call, and the
-  gate turns the re-run into a lookup (see ``langgraph_runtime``).
+- ``act`` runs pending tool calls through the Tool Gate: ONE write per super-step, so a
+  run that pauses for approval resumes by re-running only that call (the gate turns the
+  re-run into a lookup, see ``langgraph_runtime``). Consecutive reads can't pause and have
+  no side effects, so they run together in one step.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import operator
@@ -17,6 +19,7 @@ import time
 from typing import Annotated, Any, TypedDict
 
 from app.core.clock import utcnow
+from app.core.context import AgentContext
 from app.core.enums import ToolOutcome
 from app.engine.events import EventEmitter, EventType, emit_best_effort
 from app.engine.workspace_record import WorkspaceRecorder
@@ -49,10 +52,21 @@ How to work:
 - Actions that affect the outside world (such as sending email) automatically pause for the rep's approval.
   Call the tool directly with complete, final content; do not ask for permission in chat first.
 - If an action is REJECTED, do not retry it unchanged: ask what the rep wants changed.
-  If it FAILED or was DENIED, say so briefly and suggest a next step.
+  If it FAILED or was DENIED, say so briefly and suggest a next step (for example, connecting an app).
 - If an action's outcome is UNKNOWN it may already have happened: never retry it. Tell the rep and ask
   them to check (for email, their Sent folder).
-- Write in clear, professional, friendly language. Keep chat replies short.
+
+Research and answers:
+- Reading never needs approval. Before answering questions about prospects, customers, products or the rep's
+  own history, gather facts with the read tools, and use every source the question spans (web, emails,
+  calendar, Slack, Notion, knowledge base, catalog). Request independent reads together in one step.
+- Base answers only on tool results. Cite web facts with their URLs and name the documents, emails or messages
+  you used. If something wasn't found, say so instead of guessing.
+- When a source finds nothing, try at most one differently worded search there, then report it as not found.
+  Don't retry sources that were DENIED (for example, an app that isn't connected).
+- Prices, discounts and stock come only from the catalog tools.
+
+Write in clear, professional, friendly language. Keep chat replies short unless the rep asks for detail.
 
 Today is {today} (UTC)."""
 
@@ -150,7 +164,25 @@ class Orchestrator:
 
     async def act(self, state: dict[str, Any]) -> dict[str, Any]:
         ctx = current_context()
-        call, *remaining = state["pending_calls"]
+        pending = state["pending_calls"]
+        batch = self._next_batch(pending)
+        replies = await asyncio.gather(*(self._run_call(ctx, call) for call in batch))
+        return {"messages": [reply.to_dict() for reply in replies], "pending_calls": pending[len(batch) :]}
+
+    def _next_batch(self, pending: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """The next call alone, or, if it is a read, it and the reads directly after it."""
+        batch: list[dict[str, Any]] = []
+        for call in pending:
+            definition = self._registry.get(call["name"])
+            is_read = definition is not None and definition.kind is ToolKind.READ
+            if batch and not is_read:
+                break
+            batch.append(call)
+            if not is_read:
+                break
+        return batch
+
+    async def _run_call(self, ctx: AgentContext, call: dict[str, Any]) -> Message:
         arguments = call.get("arguments") or {}
         try:
             result = await self._gate.call_tool(ctx, AGENT_NAME, call["name"], arguments, call_id=call["gate_call_id"])
@@ -177,10 +209,7 @@ class Orchestrator:
                 args=result.executed_args or arguments,  # a reviewer may have edited them
                 result=result,
             )
-        reply = Message(
-            role=Role.TOOL, content=json.dumps(result.for_model()), tool_call_id=call["id"], name=call["name"]
-        )
-        return {"messages": [reply.to_dict()], "pending_calls": remaining}
+        return Message(role=Role.TOOL, content=json.dumps(result.for_model()), tool_call_id=call["id"], name=call["name"])
 
     def _tool_specs(self) -> tuple[ToolSpec, ...]:
         return tuple(

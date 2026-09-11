@@ -25,6 +25,7 @@ from app.models.types import (
     ProviderUnavailable,
     RateLimited,
     Role,
+    Source,
     StreamDone,
     StreamEvent,
     TaskSpec,
@@ -58,6 +59,7 @@ class GeminiProvider:
         text: list[str] = []
         text_signature: str | None = None
         calls: list[ToolCall] = []
+        sources: dict[str, Source] = {}
         usage = Usage()
         finish_reason: str | None = None
         try:
@@ -74,6 +76,11 @@ class GeminiProvider:
                 for candidate in chunk.candidates or ():
                     if candidate.finish_reason is not None:
                         finish_reason = str(getattr(candidate.finish_reason, "value", candidate.finish_reason))
+                    grounding = candidate.grounding_metadata
+                    for grounding_chunk in (grounding.grounding_chunks or ()) if grounding else ():
+                        web = grounding_chunk.web
+                        if web is not None and web.uri:
+                            sources.setdefault(web.uri, Source(title=web.title or web.domain or web.uri, url=web.uri))
                     parts = candidate.content.parts if candidate.content and candidate.content.parts else ()
                     for part in parts:
                         if part.function_call is not None:
@@ -103,7 +110,14 @@ class GeminiProvider:
             raise ProviderError(f"gemini returned no content (finish_reason={finish_reason})")
         message = Message(role=Role.ASSISTANT, content="".join(text), tool_calls=tuple(calls), signature=text_signature)
         yield StreamDone(
-            Completion(message=message, provider=self.name, model=model, usage=usage, finish_reason=finish_reason)
+            Completion(
+                message=message,
+                provider=self.name,
+                model=model,
+                usage=usage,
+                finish_reason=finish_reason,
+                sources=tuple(sources.values()),
+            )
         )
 
 
@@ -149,6 +163,8 @@ def to_contents(messages: Sequence[Message]) -> list[types.Content]:
 
 
 def _tools(task: TaskSpec) -> list[types.Tool] | None:
+    if task.web_grounded:
+        return [types.Tool(google_search=types.GoogleSearch())]
     if not task.tools:
         return None
     declarations = [

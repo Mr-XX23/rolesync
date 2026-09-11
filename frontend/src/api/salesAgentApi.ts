@@ -18,6 +18,12 @@ export interface SessionSummary {
   workspace_context_id: string;
 }
 
+/** A web page, message or document a read's facts came from. */
+export interface SourceLink {
+  title: string;
+  url: string;
+}
+
 export interface TranscriptItem {
   kind: 'user' | 'assistant' | 'tool_call' | 'tool_result';
   text?: string | null;
@@ -27,6 +33,7 @@ export interface TranscriptItem {
   outcome?: string | null;
   summary?: string | null;
   error?: string | null;
+  sources?: SourceLink[] | null;
 }
 
 export interface PendingAction {
@@ -80,6 +87,7 @@ export interface AgentEventData {
   outcome?: string; // tool_result
   summary?: string | null;
   error?: string | null;
+  sources?: SourceLink[]; // tool_result of a read
   final_answer?: string; // done
   message?: string; // error
 }

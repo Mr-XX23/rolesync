@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Protocol
@@ -42,7 +42,9 @@ from app.platform.langgraph_runtime import is_control_flow_signal
 from app.tools.executor import ToolExecutor
 from app.tools.registry import AgentScopes, ToolDefinition, ToolRegistry
 from app.tools.types import (
+    SourceLink,
     ToolAccessDenied,
+    ToolFailed,
     ToolInput,
     ToolInputError,
     ToolInvocation,
@@ -373,10 +375,13 @@ class ToolGate:
             ctx, agent_name, definition.name, args_json, ToolOutcome.EXECUTED, output.summary,
             duration_ms=_elapsed_ms(started),
         )
-        await self._emit_result(ctx, call_id, agent_name, definition.name, ToolOutcome.EXECUTED, summary=output.summary)
+        await self._emit_result(
+            ctx, call_id, agent_name, definition.name, ToolOutcome.EXECUTED, summary=output.summary,
+            sources=output.sources,
+        )
         return ToolResult(
             ok=True, tool=definition.name, call_id=call_id, outcome=ToolOutcome.EXECUTED,
-            data=to_jsonable_python(output.data, fallback=str), summary=output.summary,
+            data=to_jsonable_python(output.data, fallback=str), summary=output.summary, sources=output.sources,
         )
 
     # ------------------------------------------------------------------ helpers
@@ -451,20 +456,20 @@ class ToolGate:
         *,
         summary: str | None = None,
         error: str | None = None,
+        sources: Sequence[SourceLink] = (),
     ) -> None:
-        await self._emit(
-            ctx.session_id,
-            EventType.TOOL_RESULT,
-            {
-                "call_id": call_id,
-                "agent": agent_name,
-                "tool": tool,
-                "ok": outcome is ToolOutcome.EXECUTED,
-                "outcome": outcome.value,
-                "summary": summary,
-                "error": error,
-            },
-        )
+        data: dict[str, Any] = {
+            "call_id": call_id,
+            "agent": agent_name,
+            "tool": tool,
+            "ok": outcome is ToolOutcome.EXECUTED,
+            "outcome": outcome.value,
+            "summary": summary,
+            "error": error,
+        }
+        if sources:
+            data["sources"] = [source.to_dict() for source in sources]
+        await self._emit(ctx.session_id, EventType.TOOL_RESULT, data)
 
     async def _emit(self, session_id: UUID, type: EventType, data: Mapping[str, Any]) -> None:
         await emit_best_effort(self._events, session_id, type, data)
@@ -484,6 +489,9 @@ def _classify_failure(exc: Exception, definition: ToolDefinition) -> tuple[ToolO
         )
     if isinstance(exc, TimeoutError):
         return ToolOutcome.FAILED, f"'{definition.name}' timed out"
+    if isinstance(exc, ToolFailed):
+        logger.warning("tool %s failed: %s", definition.name, exc)
+        return ToolOutcome.FAILED, str(exc) or f"'{definition.name}' failed"
     logger.exception("tool %s raised", definition.name)
     return ToolOutcome.FAILED, f"'{definition.name}' failed: {type(exc).__name__}: {str(exc)[:300]}"
 

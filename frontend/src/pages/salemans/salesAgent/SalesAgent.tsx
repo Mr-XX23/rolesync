@@ -34,8 +34,9 @@ const STATUS_AFTER_EVENT: Partial<Record<AgentEventType, SessionStatus>> = {
 };
 
 const SUGGESTIONS = [
+  'Prep me for my call with Acme: recent news, our past emails with them, and which of our products fit.',
+  'What does our knowledge base say about competing with Globex on pricing?',
   'Email jane@acme.com a short thank-you for today’s demo and propose a follow-up call next week.',
-  'Draft a friendly check-in email to a prospect who went quiet after our proposal.',
 ];
 
 const StatusPill: React.FC<{ status: SessionStatus }> = ({ status }) => (
@@ -152,8 +153,8 @@ export const SalesAgent: React.FC = () => {
       <section className="space-y-2">
         <h2 className="font-serif text-3xl font-bold text-primary">Sales Agent</h2>
         <p className="text-sm text-muted-foreground max-w-2xl leading-relaxed">
-          Ask for outreach in plain language. The agent drafts and prepares actions, and nothing leaves your
-          workspace until you approve it.
+          Ask for research or outreach in plain language. The agent gathers what it needs and prepares actions, and
+          nothing leaves your workspace until you approve it.
         </p>
       </section>
 
@@ -215,7 +216,9 @@ export const SalesAgent: React.FC = () => {
                 </div>
                 <div className="space-y-1">
                   <p className="font-serif text-xl font-bold text-foreground">What should we work on?</p>
-                  <p className="text-xs text-muted-foreground">Emails are sent from your connected Gmail, only after you approve them.</p>
+                  <p className="text-xs text-muted-foreground">
+                    Research uses your connected apps, knowledge base, catalog and the web. Emails are sent only after you approve them.
+                  </p>
                 </div>
                 <div className="flex flex-col gap-2 w-full max-w-lg">
                   {SUGGESTIONS.map((suggestion) => (

@@ -68,6 +68,8 @@ class Settings(BaseSettings):
     workspace_service_url: str = Field(
         "http://localhost:8083", validation_alias=_env("SALES_AGENT_WORKSPACE_SERVICE_URL")
     )
+    # knowledge vault + catalog (reached inside the platform network, like workspace-service)
+    data_pipeline_url: str = Field("http://localhost:8000", validation_alias=_env("SALES_AGENT_DATA_PIPELINE_URL"))
     membership_cache_seconds: int = Field(60, validation_alias=_env("SALES_AGENT_MEMBERSHIP_CACHE_SECONDS"))
 
     # --- discovery -------------------------------------------------------
@@ -99,6 +101,9 @@ class Settings(BaseSettings):
         validation_alias=_env("SALES_AGENT_MODELS_FAILOVER"),
     )
     llm_timeout_seconds: float = Field(120.0, validation_alias=_env("SALES_AGENT_LLM_TIMEOUT_SECONDS"))
+    # Google Search grounding (web answers). On the free tier only Gemini 2.5 Flash serves
+    # grounded requests; the 3.x models answer them with 429 (verified 2026-09-11).
+    model_web_grounding: str = Field("gemini-2.5-flash", validation_alias=_env("SALES_AGENT_MODEL_WEB_GROUNDING"))
 
     # --- orchestrator + budgets ------------------------------------------
     max_steps_per_turn: int = Field(12, validation_alias=_env("SALES_AGENT_MAX_STEPS_PER_TURN"))
@@ -108,7 +113,12 @@ class Settings(BaseSettings):
     # --- connectors --------------------------------------------------------
     composio_api_key: SecretStr | None = Field(None, validation_alias=_env("COMPOSIO_API_KEY"))
     # toolkit=version pins, so a Composio tool schema change can't silently alter behaviour.
-    composio_toolkit_versions: str = Field("gmail=20260911_00", validation_alias=_env("SALES_AGENT_COMPOSIO_TOOLKIT_VERSIONS"))
+    composio_toolkit_versions: str = Field(
+        "gmail=20260911_00,googlecalendar=20260902_00,slack=20260911_00,notion=20260911_00",
+        validation_alias=_env("SALES_AGENT_COMPOSIO_TOOLKIT_VERSIONS"),
+    )
+    tavily_api_key: SecretStr | None = Field(None, validation_alias=_env("TAVILY_API_KEY"))
+    tavily_base_url: str = Field("https://api.tavily.com", validation_alias=_env("SALES_AGENT_TAVILY_URL"))
 
     # --- workspace records (goals, tasks, notes live in workspace-service) -
     workspace_sync_enabled: bool = Field(True, validation_alias=_env("SALES_AGENT_WORKSPACE_SYNC_ENABLED"))

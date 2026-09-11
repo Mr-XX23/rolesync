@@ -55,6 +55,7 @@ class TranscriptItem(BaseModel):
     outcome: str | None = None
     summary: str | None = None
     error: str | None = None
+    sources: list[dict[str, str]] | None = None  # web pages / documents a read's facts came from
 
 
 class SessionDetail(SessionView):
@@ -120,6 +121,11 @@ def transcript_from(messages: list[dict[str, Any]]) -> list[TranscriptItem]:
                 result = json.loads(message.get("content") or "{}")
             except json.JSONDecodeError:
                 result = {}
+            sources = [
+                {"title": str(source.get("title") or source["url"]), "url": str(source["url"])}
+                for source in result.get("sources") or []
+                if isinstance(source, dict) and source.get("url")
+            ]
             items.append(
                 TranscriptItem(
                     kind="tool_result",
@@ -128,6 +134,7 @@ def transcript_from(messages: list[dict[str, Any]]) -> list[TranscriptItem]:
                     outcome=result.get("outcome"),
                     summary=result.get("summary"),
                     error=result.get("error"),
+                    sources=sources or None,
                 )
             )
     return items
