@@ -68,6 +68,7 @@ class OpenRouterProvider:
 
         text: list[str] = []
         slots: dict[int, dict[str, Any]] = {}
+        markers = CitationMarkerFilter()
         usage = Usage()
         finish_reason: str | None = None
         model_used = models[0]
@@ -97,13 +98,19 @@ class OpenRouterProvider:
                     for choice in chunk.get("choices") or ():
                         delta = choice.get("delta") or {}
                         if delta.get("content"):
-                            text.append(delta["content"])
-                            yield TextDelta(delta["content"])
+                            visible = markers.feed(delta["content"])
+                            if visible:
+                                text.append(visible)
+                                yield TextDelta(visible)
                         for part in delta.get("tool_calls") or ():
                             _merge_tool_delta(slots, part)
                         finish_reason = choice.get("finish_reason") or finish_reason
         except httpx.HTTPError as exc:
             raise ProviderUnavailable(f"openrouter request failed: {type(exc).__name__}") from exc
+        rest = markers.flush()
+        if rest:
+            text.append(rest)
+            yield TextDelta(rest)
 
         calls: list[ToolCall] = []
         for index in sorted(slots):
@@ -121,6 +128,37 @@ class OpenRouterProvider:
         yield StreamDone(
             Completion(message=message, provider=self.name, model=model_used, usage=usage, finish_reason=finish_reason)
         )
+
+
+class CitationMarkerFilter:
+    """Removes the citation markers some models emit, like 【{"id": "doc_1"}】 or 【4:0†source】:
+    they refer to the model's own training format, not to anything the rep can open. Works on
+    streamed text, holding back a possible marker until it closes."""
+
+    _OPEN, _CLOSE, _MAX = "【", "】", 300
+
+    def __init__(self) -> None:
+        self._pending = ""
+
+    def feed(self, text: str) -> str:
+        data, out = self._pending + text, []
+        self._pending = ""
+        while (start := data.find(self._OPEN)) >= 0:
+            out.append(data[:start])
+            end = data.find(self._CLOSE, start)
+            if end < 0:
+                if len(data) - start > self._MAX:  # too long to be a marker: ordinary text
+                    out.append(data[start:])
+                else:
+                    self._pending = data[start:]
+                return "".join(out)
+            data = data[end + 1 :]
+        out.append(data)
+        return "".join(out)
+
+    def flush(self) -> str:
+        rest, self._pending = self._pending, ""
+        return rest
 
 
 def to_openai_messages(task: TaskSpec) -> list[dict[str, Any]]:
