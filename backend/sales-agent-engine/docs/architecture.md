@@ -1,5 +1,200 @@
-# Full Sales AI Agnet Architecture - Eraser.io code
-
+# Sales Agent Engine — Architecture
+ 
+> Reference for how the Sales Agent Engine is structured and how its parts connect.
+> Read this before changing how components interact. Build order lives in `implementation-plan.md`.
+> `[NEW]` = built in this service · `[EXISTS]` = existing platform service the engine calls, never rebuilds.
+ 
+---
+ 
+## One-paragraph summary
+ 
+The Sales Agent Engine is a new async Python microservice. A user gives it either a **single task** ("draft a follow-up to Acme") or a **long-running goal** ("sell 200 shirts this month"). An **autonomy layer** turns long goals into scheduled/triggered wake-ups that repeatedly drive a **reactive engine** (LangGraph orchestrator + scoped sub-agents). Every LLM call goes through a **model router** (Gemini primary, OpenRouter fallback). Every tool call goes through a single **tool gate** (tenant + ACL + per-agent scope + audit + human approval). The agent **streams its reasoning live** (SSE) and **pauses for human approval** before any real-world action. It reuses existing platform services (Composio, knowledge base, catalog) as tools rather than reimplementing them.
+ 
+---
+ 
+## The layers (top to bottom)
+ 
+1. **Entry** — chat UI (single task) and goal UI (long goal); live events stream back out, approval cards come back for sign-off.
+2. **Gateway** `[EXISTS]` — JWT verify, rate limit, resolve tenant. Tenant/user identity comes from here, never from client input.
+3. **Autonomy layer** `[NEW]` — goal manager, scheduler (time wakes), trigger listener (event wakes), wake queue (deduped, rate-controlled), and the autonomy policy envelope. Drives the reactive engine over time.
+4. **Reactive engine** `[NEW]` — LangGraph orchestrator (sole coordinator), execution guardrails, scoped sub-agents, streaming + human-in-the-loop gate. This is invoked once per single task and once per wake.
+5. **Shared context + memory** `[NEW]` — the only surface agents use for shared state; compress/summarize/offload + state locking with versioning.
+6. **Model router** `[NEW]` — complex → Gemini, simple → OpenRouter, plus failover.
+7. **Gated tool layer** `[NEW]` — the one choke point every tool call passes through.
+8. **Tools** — communication (Gmail/Calendar/Slack/Notion `[EXISTS]`), knowledge (KB `[EXISTS]`, catalog/deal `[NEW]`), action (doc-gen/quote `[NEW]`, Drive `[EXISTS]`), intelligence (web search / prospect research `[NEW]`).
+9. **Cross-cutting** `[NEW]` — observability/tracing (LangSmith) and per-tenant budgets.
+10. **Data** — goals, agent state/checkpoints, versioned memory, audit + traces `[NEW]`; existing Postgres/Mongo/pgvector `[EXISTS]`.
+---
+ 
+## Diagram
+ 
+```mermaid
+flowchart TD
+    %% ---------- ENTRY ----------
+    subgraph ENTRY["1 · Entry"]
+        ChatUI["Chat UI [NEW]<br/>single task: one prompt"]
+        GoalUI["Goal UI [NEW]<br/>long goal: sell 200 this month"]
+        Stream["SSE stream [NEW]<br/>live events out"]
+        Approval["Approval cards [NEW]<br/>approve / edit / reject · TTL"]
+    end
+ 
+    %% ---------- GATEWAY ----------
+    Gateway["2 · API Gateway [EXISTS]<br/>JWT · rate limit · resolve tenant"]
+ 
+    %% ---------- AUTONOMY ----------
+    subgraph AUTO["3 · Autonomy layer [NEW]"]
+        GoalMgr["Goal manager<br/>goal · progress · budget · terminal conditions"]
+        Sched["Scheduler<br/>time wakes: follow-ups, pacing"]
+        Trig["Trigger listener<br/>event wakes: reply · order · stock-out"]
+        WakeQ["Wake queue<br/>idempotent · rate-controlled"]
+        Policy["Autonomy policy envelope<br/>inside → act alone · outside → human"]
+    end
+ 
+    %% ---------- REACTIVE ENGINE ----------
+    subgraph ENGINE["4 · Reactive engine [NEW] (LangGraph)"]
+        Planner["Orchestrator / Planner<br/>ONLY coordinator · re-assesses each wake"]
+        Guards["Guardrails<br/>limits · circuit breaker · retry · saga"]
+        Subs["Sub-agents (scoped)<br/>research(read) · outreach(send) · quote(catalog)"]
+        HITL["Human-in-the-loop gate<br/>pause → approve → resume · TTL"]
+    end
+ 
+    %% ---------- CONTEXT ----------
+    subgraph CTX["5 · Shared context + memory [NEW]"]
+        CtxMgr["Context manager<br/>compress · summarize · offload"]
+        Lock["State lock + version<br/>no concurrent-write corruption"]
+        Mem["Memory: conversation · rep · deal/account"]
+    end
+ 
+    %% ---------- MODEL ROUTER ----------
+    subgraph MODELS["6 · Model router [NEW]"]
+        Router["Model router<br/>complexity + failover"]
+        Gemini["Gemini [PRIMARY]<br/>complex reasoning"]
+        OpenRouter["OpenRouter [SECONDARY]<br/>simple + fallback"]
+    end
+ 
+    %% ---------- GATE ----------
+    Gate["7 · Tool gate [NEW]<br/>EVERY call: tenant + ACL + agent-scope + audit"]
+ 
+    %% ---------- TOOLS ----------
+    subgraph TOOLS["8 · Tools"]
+        Comm["Communication [EXISTS]<br/>Gmail · Calendar · Slack · Notion"]
+        Know["Knowledge<br/>KB [EXISTS] · catalog [NEW] · deal [NEW]"]
+        Act["Action<br/>doc-gen [NEW] · Drive [EXISTS] · quote [NEW]"]
+        Intel["Intelligence [NEW]<br/>web search · prospect research"]
+    end
+ 
+    %% ---------- CROSS-CUTTING ----------
+    subgraph CROSS["9 · Cross-cutting [NEW]"]
+        Trace["Observability / tracing<br/>LangSmith · replay"]
+        Budget["Per-tenant budgets<br/>rate · cost · concurrency"]
+    end
+ 
+    %% ---------- DATA ----------
+    subgraph DATA["10 · Data"]
+        GoalDB[("Goal DB [NEW]")]
+        StateDB[("Agent state [NEW]<br/>checkpoints · saga")]
+        MemDB[("Memory store [NEW]<br/>versioned")]
+        AuditDB[("Audit + trace [NEW]")]
+        Existing[("Existing [EXISTS]<br/>Postgres · Mongo · pgvector")]
+    end
+ 
+    %% ===== FLOWS =====
+    ChatUI --> Gateway
+    GoalUI --> Gateway
+    Gateway --> Budget
+    Budget -->|task| Planner
+    Budget -->|goal| GoalMgr
+ 
+    GoalMgr --> Sched
+    GoalMgr --> Trig
+    Trig -.watches.-> Existing
+    Sched --> WakeQ
+    Trig --> WakeQ
+    WakeQ --> Policy
+    Policy -->|within envelope| Planner
+    Policy -->|outside envelope| HITL
+    GoalMgr --> GoalDB
+ 
+    Planner --> Guards
+    Planner --> Subs
+    Subs -->|result only| Planner
+    Planner --> StateDB
+ 
+    Planner --> CtxMgr
+    Subs --> CtxMgr
+    CtxMgr --> Lock
+    CtxMgr --> Mem
+    Mem --> MemDB
+ 
+    Planner --> Router
+    Subs --> Router
+    Router -->|complex| Gemini
+    Router -->|simple / failover| OpenRouter
+ 
+    Planner --> Stream
+    Stream --> ChatUI
+    HITL --> Approval
+    Approval --> HITL
+ 
+    Planner --> Gate
+    Subs --> Gate
+    Gate --> Comm
+    Gate --> Know
+    Gate --> Act
+    Gate --> Intel
+    Gate -->|writes need approval| HITL
+    Gate --> AuditDB
+ 
+    Know --> Existing
+    Comm --> Existing
+    Know -->|units sold| GoalMgr
+ 
+    Planner --> Trace
+    Trace --> AuditDB
+```
+ 
+---
+ 
+## Key design decisions (the "why")
+ 
+**One tool gate, no exceptions.** Every tool call from the orchestrator and every sub-agent passes through `tools/gate.py`: tenant check → ACL → per-agent scope → audit → approval (if a write). This single choke point is what makes "the agent can touch the whole system" safe instead of dangerous. A research agent physically cannot call a write tool — the gate rejects it by scope.
+ 
+**Orchestrator-mediated, never peer-to-peer.** Sub-agents never talk to each other. The orchestrator delegates and collects results (`result only` edges). One coordinator = one place to audit and reason about the flow, and no tangled agent-to-agent mesh.
+ 
+**The autonomy layer drives the reactive engine — it doesn't replace it.** A long goal doesn't run continuously. The scheduler and triggers generate wake-ups; each wake invokes the same reactive engine (orchestrator → guardrails → gated tools) that a single task uses. Nothing is built twice.
+ 
+**The autonomy policy envelope is the core safety boundary.** In autonomous mode, routine actions inside the envelope (follow-up to a known contact) run alone; anything outside (new discount, net-new list, exceeding the goal budget, anything irreversible) pauses for a human even mid-campaign. The panic case — hitting the target would require breaking the discount cap — escalates to a human rather than self-authorizing.
+ 
+**Re-assess every wake.** On each wake the orchestrator reads current goal + progress + reality and re-plans, rather than blindly executing the day-1 strategy. Stock ran out on the discounted variant? It re-strategizes.
+ 
+**Shared state only through the context manager.** Agents never touch memory directly. The manager compresses/summarizes/offloads (prevents context explosion) and enforces versioned locking (prevents concurrent-write corruption).
+ 
+**Two models, one router.** Complex reasoning → Gemini; simple tasks → OpenRouter; Gemini failure → OpenRouter failover. Every agent asks the router for a brain; no agent calls a provider directly, so routing rules live in one place and providers are swappable.
+ 
+**Wrap every vendor.** LangGraph, Gemini, OpenRouter, Composio, LangSmith each sit behind a thin adapter this service owns. Business logic never imports a vendor type. These APIs churn; you must be able to swap one without a rewrite.
+ 
+---
+ 
+## What is new vs. reused
+ 
+| Reused `[EXISTS]` | Built new `[NEW]` |
+|---|---|
+| API gateway (JWT, tenant) | Orchestrator + sub-agents |
+| Composio (Gmail/Cal/Slack/Notion/Drive) | Tool gate |
+| Knowledge-base retrieval / vector | Model router |
+| Postgres / MongoDB / pgvector | Context manager + memory |
+| Redis, Kafka | Guardrails |
+| | Goal manager + scheduler + triggers + wake queue + policy |
+| | Doc generator, quote builder, catalog + deal tools |
+| | Web search + prospect research |
+| | Audit, tracing, per-tenant budgets |
+ 
+---
+ 
+## Eraser source (editable master)
+ 
+The Mermaid diagram above renders inline. The Eraser version below is the editable master for `eraser.io` if you prefer to edit there.
+ 
 ```
 direction down
 
