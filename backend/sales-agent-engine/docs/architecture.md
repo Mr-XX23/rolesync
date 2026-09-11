@@ -11,6 +11,19 @@
 The Sales Agent Engine is a new async Python microservice. A user gives it either a **single task** ("draft a follow-up to Acme") or a **long-running goal** ("sell 200 shirts this month"). An **autonomy layer** turns long goals into scheduled/triggered wake-ups that repeatedly drive a **reactive engine** (LangGraph orchestrator + scoped sub-agents). Every LLM call goes through a **model router** (Gemini primary, OpenRouter fallback). Every tool call goes through a single **tool gate** (tenant + ACL + per-agent scope + audit + human approval). The agent **streams its reasoning live** (SSE) and **pauses for human approval** before any real-world action. It reuses existing platform services (Composio, knowledge base, catalog) as tools rather than reimplementing them.
  
 ---
+
+## As built: where the platform differs from this document
+
+Verified against the code on 2026-09-11. The diagram below is the target, but these `[EXISTS]` pieces are missing or partial, so the engine works around them:
+
+- **Identity.** The gateway does not verify JWTs, rate-limit or resolve a tenant; it only routes and handles CORS. The engine verifies auth-service's RS256 `access_token` itself, using the `userId` claim. The tenant is the workspace UUID in `X-Tenant-Id`, and the engine checks membership with workspace-service. SSE takes the tenant from the session row instead.
+- **Composio.** data-pipeline only runs read syncs. The engine calls the Composio SDK directly for read and write tools, using the same project and connections (Composio `user_id` = auth `userId`).
+- **Knowledge base.** No retrieval endpoint exists: vector search is a placeholder and there is no pgvector. The KB tool adapter uses document keyword search plus content fetch until real retrieval lands.
+- **Triggers.** Nothing publishes reply, order or stock-out events (the only Kafka topic is `auth-user-events`). The trigger listener polls (Gmail threads via Composio, catalog stock) behind one adapter interface.
+- **Deals.** No order or deal data exists anywhere. The engine owns `agent.deal`, and units sold come from closed-won deal lines.
+- **Storage.** The engine uses database `rolesync-micro-sales-agent`: schema `agent` (Alembic) and schema `agent_checkpoint` (LangGraph checkpointer tables).
+
+---
  
 ## The layers (top to bottom)
  
