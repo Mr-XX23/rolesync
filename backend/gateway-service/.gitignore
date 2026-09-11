@@ -19,6 +19,8 @@ target/
 *.iml
 *.ipr
 *.xml
+# Do not ignore the Maven build file (the broad *.xml above otherwise hides it).
+!pom.xml
 
 ### NetBeans ###
 /nbproject/private/
