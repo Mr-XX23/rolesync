@@ -37,6 +37,7 @@ public class WorkspaceServiceImpl implements WorkspaceService {
     private final WorkspaceProfileRepository workspaceProfileRepository;
     private final WorkspaceRoleRepository workspaceRoleRepository;
     private final WorkspaceMembershipRepository workspaceMembershipRepository;
+    private final WorkspaceAuthorizationService authorizationService;
 
     @Override
     @Transactional
@@ -106,22 +107,33 @@ public class WorkspaceServiceImpl implements WorkspaceService {
 
     @Override
     @Transactional
-    public Mono<UUID> addMemberToWorkspace(UUID workspaceId, AddMemberRequest request) {
+    public Mono<UUID> addMemberToWorkspace(UUID workspaceId, UUID callerAuthUserId, AddMemberRequest request) {
         return Mono.fromCallable(() -> {
+            // AuthZ: caller must be an OWNER/ADMIN of this workspace.
+            WorkspaceAuthorizationService.CallerContext caller =
+                    authorizationService.requireAdmin(callerAuthUserId, workspaceId);
+
             Workspace workspace = workspaceRepository.findById(workspaceId)
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Workspace not found"));
 
             WorkspaceProfile memberProfile = workspaceProfileRepository.findById(request.getProfileId())
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Profile to add not found"));
 
-            String roleName = request.getRoleName() != null ? request.getRoleName() : "MEMBER";
-            WorkspaceRole role = workspaceRoleRepository.findByRoleName(roleName)
-                    .orElseGet(() -> workspaceRoleRepository.save(
-                            WorkspaceRole.builder()
-                                    .roleName(roleName)
-                                    .description("Workspace Role: " + roleName)
-                                    .build()
-                    ));
+            // Validate the requested role (rejects OWNER / unknown; ADMIN requires caller OWNER).
+            String roleName = authorizationService.validateAssignableRole(request.getRoleName(), caller);
+
+            // Cannot alter your own membership through this endpoint (blocks self-escalation).
+            if (memberProfile.getProfileId().equals(caller.profileId())) {
+                throw new ResponseStatusException(HttpStatus.FORBIDDEN, "You cannot change your own membership");
+            }
+
+            // Cannot alter the workspace owner's membership (blocks owner takeover/demotion).
+            UUID ownerProfileId = workspaceRepository.findOwnerProfileId(workspaceId).orElse(null);
+            if (memberProfile.getProfileId().equals(ownerProfileId)) {
+                throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Cannot modify the workspace owner's membership");
+            }
+
+            WorkspaceRole role = findOrCreateRole(roleName);
 
             // Check if membership already exists
             WorkspaceMembership membership = workspaceMembershipRepository
@@ -147,31 +159,45 @@ public class WorkspaceServiceImpl implements WorkspaceService {
 
     @Override
     @Transactional
-    public Mono<WorkspaceMembershipResponse> updateMemberRole(UUID workspaceId, UUID membershipId, UpdateMemberRoleRequest request) {
+    public Mono<WorkspaceMembershipResponse> updateMemberRole(UUID workspaceId, UUID membershipId, UUID callerAuthUserId, UpdateMemberRoleRequest request) {
         return Mono.fromCallable(() -> {
-            WorkspaceMembership membership = workspaceMembershipRepository.findById(membershipId)
-                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Membership not found"));
+            // AuthZ: caller must be an OWNER/ADMIN of this workspace.
+            WorkspaceAuthorizationService.CallerContext caller =
+                    authorizationService.requireAdmin(callerAuthUserId, workspaceId);
 
-            if (!membership.getWorkspace().getWorkspaceId().equals(workspaceId)) {
+            // Resolve target membership via ID projections (no lazy-proxy navigation).
+            UUID membershipWorkspaceId = workspaceMembershipRepository.findWorkspaceIdByMembershipId(membershipId)
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Membership not found"));
+            if (!membershipWorkspaceId.equals(workspaceId)) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Membership does not belong to this workspace");
             }
+            UUID targetProfileId = workspaceMembershipRepository.findProfileIdByMembershipId(membershipId)
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Membership not found"));
 
-            WorkspaceRole role = workspaceRoleRepository.findByRoleName(request.getRoleName())
-                    .orElseGet(() -> workspaceRoleRepository.save(
-                            WorkspaceRole.builder()
-                                    .roleName(request.getRoleName())
-                                    .description("Workspace Role: " + request.getRoleName())
-                                    .build()
-                    ));
+            // Cannot change your own role (blocks self-escalation).
+            if (targetProfileId.equals(caller.profileId())) {
+                throw new ResponseStatusException(HttpStatus.FORBIDDEN, "You cannot change your own role");
+            }
+            // Cannot change the workspace owner's role (blocks owner demotion).
+            UUID ownerProfileId = workspaceRepository.findOwnerProfileId(workspaceId).orElse(null);
+            if (targetProfileId.equals(ownerProfileId)) {
+                throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Cannot change the workspace owner's role");
+            }
 
+            String roleName = authorizationService.validateAssignableRole(request.getRoleName(), caller);
+            WorkspaceRole role = findOrCreateRole(roleName);
+
+            WorkspaceMembership membership = workspaceMembershipRepository.findById(membershipId)
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Membership not found"));
             membership.setRole(role);
             WorkspaceMembership saved = workspaceMembershipRepository.save(membership);
 
+            // Build response from known values (avoids lazy-proxy navigation on detached entity).
             return WorkspaceMembershipResponse.builder()
                     .membershipId(saved.getMembershipId())
-                    .workspaceId(saved.getWorkspace().getWorkspaceId())
-                    .profileId(saved.getProfile().getProfileId())
-                    .roleName(saved.getRole() != null ? saved.getRole().getRoleName() : "MEMBER")
+                    .workspaceId(workspaceId)
+                    .profileId(targetProfileId)
+                    .roleName(roleName)
                     .joinedAt(saved.getJoinedAt())
                     .isActive(saved.getIsActive())
                     .build();
@@ -182,6 +208,9 @@ public class WorkspaceServiceImpl implements WorkspaceService {
     @Transactional
     public Mono<WorkspaceResponse> updateWorkspace(UUID workspaceId, UUID authUserId, WorkspaceRequest request) {
         return Mono.fromCallable(() -> {
+            // AuthZ: caller must be an OWNER/ADMIN of this workspace.
+            authorizationService.requireAdmin(authUserId, workspaceId);
+
             Workspace workspace = workspaceRepository.findById(workspaceId)
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Workspace not found"));
 
@@ -195,6 +224,16 @@ public class WorkspaceServiceImpl implements WorkspaceService {
             Workspace saved = workspaceRepository.save(workspace);
             return mapToResponse(saved);
         }).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    private WorkspaceRole findOrCreateRole(String roleName) {
+        return workspaceRoleRepository.findByRoleName(roleName)
+                .orElseGet(() -> workspaceRoleRepository.save(
+                        WorkspaceRole.builder()
+                                .roleName(roleName)
+                                .description("Workspace Role: " + roleName)
+                                .build()
+                ));
     }
 
     private WorkspaceResponse mapToResponse(Workspace ws) {

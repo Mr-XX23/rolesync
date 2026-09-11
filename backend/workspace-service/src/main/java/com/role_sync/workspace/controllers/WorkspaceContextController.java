@@ -40,8 +40,12 @@ public class WorkspaceContextController {
     }
 
     @GetMapping("/contexts/{contextId}/tasks")
-    public Flux<TaskResponse> getTasksTimeline(@PathVariable UUID contextId) {
-        return workspaceContextService.getTasksTimeline(contextId)
+    public Flux<TaskResponse> getTasksTimeline(
+            @PathVariable UUID contextId,
+            @RequestHeader(value = "X-User-Id", required = false) String userIdHeader,
+            @RequestHeader(value = "X-Auth-User-Id", required = false) String authUserIdHeader) {
+        UUID authUserId = resolveAuthUserId(userIdHeader, authUserIdHeader);
+        return workspaceContextService.getTasksTimeline(contextId, authUserId)
                 .map(view -> TaskResponse.builder()
                         .taskName(view.getTaskName())
                         .agentName(view.getAgentName())

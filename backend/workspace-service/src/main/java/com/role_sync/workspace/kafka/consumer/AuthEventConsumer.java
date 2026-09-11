@@ -43,7 +43,7 @@ public class AuthEventConsumer {
                         "Member"
                 );
 
-                workspaceProfileService.createOrUpdateProfile(request)
+                workspaceProfileService.createOrUpdateProfile(payload.getAuthUserId(), request)
                         .flatMap(profile -> {
                             log.info("Successfully provisioned WorkspaceProfile for user: {}. Creating default personal workspace...", profile.getAuthUserId());
                             

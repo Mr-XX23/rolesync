@@ -12,6 +12,6 @@ import java.util.UUID;
 
 public interface WorkspaceContextService {
     Mono<WorkspaceContext> createContext(UUID workspaceId, UUID authUserId, WorkspaceContextRequest request);
-    Flux<WorkspaceTaskView> getTasksTimeline(UUID contextId);
+    Flux<WorkspaceTaskView> getTasksTimeline(UUID contextId, UUID authUserId);
     Mono<WorkspaceNote> createNote(UUID contextId, UUID authUserId, NoteRequest request);
 }

@@ -13,7 +13,7 @@ import java.util.UUID;
 public interface WorkspaceService {
     Mono<WorkspaceResponse> createWorkspace(UUID authUserId, WorkspaceRequest request);
     Flux<WorkspaceResponse> getWorkspacesForUser(UUID authUserId);
-    Mono<UUID> addMemberToWorkspace(UUID workspaceId, AddMemberRequest request);
-    Mono<WorkspaceMembershipResponse> updateMemberRole(UUID workspaceId, UUID membershipId, UpdateMemberRoleRequest request);
+    Mono<UUID> addMemberToWorkspace(UUID workspaceId, UUID callerAuthUserId, AddMemberRequest request);
+    Mono<WorkspaceMembershipResponse> updateMemberRole(UUID workspaceId, UUID membershipId, UUID callerAuthUserId, UpdateMemberRoleRequest request);
     Mono<WorkspaceResponse> updateWorkspace(UUID workspaceId, UUID authUserId, WorkspaceRequest request);
 }

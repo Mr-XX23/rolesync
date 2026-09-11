@@ -32,10 +32,14 @@ public class WorkspaceContextServiceImpl implements WorkspaceContextService {
     private final WorkspaceContextRepository workspaceContextRepository;
     private final WorkspaceTaskViewRepository workspaceTaskViewRepository;
     private final WorkspaceNoteRepository workspaceNoteRepository;
+    private final WorkspaceAuthorizationService authorizationService;
 
     @Override
     public Mono<WorkspaceContext> createContext(UUID workspaceId, UUID authUserId, WorkspaceContextRequest request) {
         return Mono.fromCallable(() -> {
+            // AuthZ: caller must be an active member of this workspace.
+            authorizationService.requireActiveMembership(authUserId, workspaceId);
+
             Workspace workspace = workspaceRepository.findById(workspaceId)
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Workspace not found"));
 
@@ -56,8 +60,13 @@ public class WorkspaceContextServiceImpl implements WorkspaceContextService {
     }
 
     @Override
-    public Flux<WorkspaceTaskView> getTasksTimeline(UUID contextId) {
+    public Flux<WorkspaceTaskView> getTasksTimeline(UUID contextId, UUID authUserId) {
         return Mono.fromCallable(() -> {
+            // AuthZ: caller must be an active member of the context's workspace.
+            UUID workspaceId = workspaceContextRepository.findWorkspaceIdByContextId(contextId)
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Workspace context not found"));
+            authorizationService.requireActiveMembership(authUserId, workspaceId);
+
             return workspaceTaskViewRepository.findByContextContextIdOrderBySortOrderAsc(contextId);
         })
         .subscribeOn(Schedulers.boundedElastic())
@@ -67,6 +76,11 @@ public class WorkspaceContextServiceImpl implements WorkspaceContextService {
     @Override
     public Mono<WorkspaceNote> createNote(UUID contextId, UUID authUserId, NoteRequest request) {
         return Mono.fromCallable(() -> {
+            // AuthZ: caller must be an active member of the context's workspace.
+            UUID workspaceId = workspaceContextRepository.findWorkspaceIdByContextId(contextId)
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Workspace context not found"));
+            authorizationService.requireActiveMembership(authUserId, workspaceId);
+
             WorkspaceContext context = workspaceContextRepository.findById(contextId)
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Workspace context not found"));
 
