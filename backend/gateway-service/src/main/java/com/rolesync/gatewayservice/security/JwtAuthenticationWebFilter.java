@@ -22,6 +22,7 @@ import reactor.core.publisher.Mono;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * Edge authentication for the API gateway.
@@ -99,7 +100,17 @@ public class JwtAuthenticationWebFilter implements WebFilter {
         }
 
         return jwtVerifier.verify(token)
-                .flatMap(claims -> {
+                .map(Optional::of)
+                .onErrorResume(ex -> {
+                    log.debug("Access token verification failed for {}: {}", path, ex.getMessage());
+                    return Mono.just(Optional.empty());
+                })
+                .defaultIfEmpty(Optional.empty())
+                .flatMap(verified -> {
+                    if (verified.isEmpty()) {
+                        return unauthorized(exchange, "Invalid or expired token");
+                    }
+                    JWTClaimsSet claims = verified.get();
                     String userId = claimAsString(claims, "userId");
                     String tokenType = claimAsString(claims, "tokenType");
 
@@ -108,11 +119,10 @@ public class JwtAuthenticationWebFilter implements WebFilter {
                     }
 
                     String email = claimAsString(claims, "email");
+                    // Only token problems become 401s. Errors from routing or the downstream
+                    // service (e.g. no instance available during a restart) pass through as
+                    // themselves: clients treat a 401 as a lost session and sign the user out.
                     return chain.filter(withTrustedIdentity(exchange, userId, email));
-                })
-                .onErrorResume(ex -> {
-                    log.debug("Access token verification failed for {}: {}", path, ex.getMessage());
-                    return unauthorized(exchange, "Invalid or expired token");
                 });
     }
 

@@ -126,6 +126,32 @@ class JwtAuthenticationWebFilterTest {
     }
 
     @Test
+    void downstreamErrorsAreNotReportedAsAuthenticationFailures() {
+        MockServerWebExchange exchange = MockServerWebExchange.from(
+                MockServerHttpRequest.get("/api/v1/workspaces/profile")
+                        .cookie(new HttpCookie("access_token", "good-token")));
+        WebFilterChain failingChain = e -> Mono.error(new IllegalStateException("No servers available for service: WORKSPACE"));
+
+        var filter = filterReturning(Mono.just(accessClaims("real-user-uuid", "user@example.com")));
+        StepVerifier.create(filter.filter(exchange, failingChain))
+                .expectErrorMessage("No servers available for service: WORKSPACE")
+                .verify();
+
+        assertNull(exchange.getResponse().getStatusCode(), "a routing failure must not become a 401");
+    }
+
+    @Test
+    void verifierReturningNothingIsRejected() {
+        MockServerWebExchange exchange = MockServerWebExchange.from(
+                MockServerHttpRequest.get("/api/v1/catalog/products")
+                        .cookie(new HttpCookie("access_token", "odd-token")));
+
+        StepVerifier.create(filterReturning(Mono.empty()).filter(exchange, e -> Mono.empty())).verifyComplete();
+
+        assertEquals(HttpStatus.UNAUTHORIZED, exchange.getResponse().getStatusCode());
+    }
+
+    @Test
     void invalidTokenReturns401() {
         MockServerWebExchange exchange = MockServerWebExchange.from(
                 MockServerHttpRequest.get("/api/v1/knowledge-vault/documents")
