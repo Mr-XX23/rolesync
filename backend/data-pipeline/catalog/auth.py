@@ -1,9 +1,9 @@
 import logging
 from typing import Optional
 from uuid import UUID
-from fastapi import HTTPException, Request, status
+from fastapi import Depends, HTTPException, Request, status
 
-from module_1_document_processing.workspace_access import resolve_workspace_access
+from module_1_document_processing.workspace_access import WorkspaceAccess, require_writer, resolve_workspace_access
 
 logger = logging.getLogger("catalog.auth")
 
@@ -62,3 +62,14 @@ def get_catalog_context(request: Request) -> CatalogContext:
 
     access = resolve_workspace_access(user_id_str.strip(), str(tenant_uuid))
     return CatalogContext(tenant_id=tenant_uuid, user_id=access.user_id, role=access.role)
+
+
+def get_catalog_writer_context(ctx: CatalogContext = Depends(get_catalog_context)) -> CatalogContext:
+    """
+    ``get_catalog_context`` for routes that change catalog data.
+
+    The caller's role in the workspace must also allow writing: every member except
+    a VIEWER, the same rule (and 403) as the knowledge vault.
+    """
+    require_writer(WorkspaceAccess(user_id=ctx.user_id, workspace_id=str(ctx.tenant_id), role=ctx.role))
+    return ctx

@@ -5,7 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy.orm import Session
 
-from catalog.auth import CatalogContext, get_catalog_context
+from catalog.auth import CatalogContext, get_catalog_context, get_catalog_writer_context
 from catalog.database import get_catalog_db
 from catalog.schemas import (
     CategoryCreate,
@@ -119,7 +119,7 @@ def list_categories(
 @router.post("/categories", response_model=CategoryResponse, status_code=status.HTTP_201_CREATED)
 def upsert_category(
     data: CategoryCreate,
-    ctx: CatalogContext = Depends(get_catalog_context),
+    ctx: CatalogContext = Depends(get_catalog_writer_context),
     service: ProductService = Depends(get_service),
 ):
     """Add or update a category in the tenant's vocabulary."""
@@ -168,7 +168,7 @@ def list_products(
 @router.post("/products", response_model=ProductDetailResponse, status_code=status.HTTP_201_CREATED)
 def create_product(
     data: ProductCreate,
-    ctx: CatalogContext = Depends(get_catalog_context),
+    ctx: CatalogContext = Depends(get_catalog_writer_context),
     service: ProductService = Depends(get_service),
 ):
     """Create a new product with options and AI-findability attributes."""
@@ -199,7 +199,7 @@ def get_product(
 def update_product(
     product_id: UUID,
     data: ProductUpdate,
-    ctx: CatalogContext = Depends(get_catalog_context),
+    ctx: CatalogContext = Depends(get_catalog_writer_context),
     service: ProductService = Depends(get_service),
 ):
     """Update product attributes and options."""
@@ -221,7 +221,7 @@ def delete_product(
         False,
         description="If True, permanently hard-deletes the product and all dependent variants/stock from database. If False, soft-deletes by setting status to RETIRED.",
     ),
-    ctx: CatalogContext = Depends(get_catalog_context),
+    ctx: CatalogContext = Depends(get_catalog_writer_context),
     service: ProductService = Depends(get_service),
 ):
     """Delete product: soft-delete (RETIRED) by default, or permanent hard-delete when permanent=True."""
@@ -242,7 +242,7 @@ def delete_product(
 def set_options(
     product_id: UUID,
     payload: SetOptionsRequest,
-    ctx: CatalogContext = Depends(get_catalog_context),
+    ctx: CatalogContext = Depends(get_catalog_writer_context),
     service: ProductService = Depends(get_service),
 ):
     """Replace all options and values for a product."""
@@ -277,7 +277,7 @@ def generate_variant_grid(
 def upsert_variants(
     product_id: UUID,
     payload: BatchUpsertVariantsRequest,
-    ctx: CatalogContext = Depends(get_catalog_context),
+    ctx: CatalogContext = Depends(get_catalog_writer_context),
     service: ProductService = Depends(get_service),
 ):
     """Persist enabled variants with SKU and price."""
@@ -316,7 +316,7 @@ def list_locations(
 @router.post("/locations", response_model=LocationResponse, status_code=status.HTTP_201_CREATED)
 def upsert_location(
     data: LocationCreate,
-    ctx: CatalogContext = Depends(get_catalog_context),
+    ctx: CatalogContext = Depends(get_catalog_writer_context),
     service: ProductService = Depends(get_service),
 ):
     """Create a new stock location."""
@@ -330,7 +330,7 @@ def upsert_location(
 def update_location(
     location_id: UUID,
     data: LocationCreate,
-    ctx: CatalogContext = Depends(get_catalog_context),
+    ctx: CatalogContext = Depends(get_catalog_writer_context),
     service: ProductService = Depends(get_service),
 ):
     """Update an existing stock location."""
@@ -343,7 +343,7 @@ def update_location(
 @router.delete("/locations/{location_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_location(
     location_id: UUID,
-    ctx: CatalogContext = Depends(get_catalog_context),
+    ctx: CatalogContext = Depends(get_catalog_writer_context),
     service: ProductService = Depends(get_service),
 ):
     """Delete a stock location (must have zero active inventory)."""
@@ -361,7 +361,7 @@ def delete_location(
 @router.post("/inventory/set-stock", response_model=InventoryLevelResponse)
 def set_stock(
     payload: SetStockRequest,
-    ctx: CatalogContext = Depends(get_catalog_context),
+    ctx: CatalogContext = Depends(get_catalog_writer_context),
     service: ProductService = Depends(get_service),
 ):
     """Set absolute stock quantity and log delta in the append-only ledger."""
@@ -393,7 +393,7 @@ def set_stock(
 @router.post("/inventory/batch-set-stock", response_model=List[InventoryLevelResponse])
 def batch_set_stock(
     payload: BatchSetStockRequest,
-    ctx: CatalogContext = Depends(get_catalog_context),
+    ctx: CatalogContext = Depends(get_catalog_writer_context),
     service: ProductService = Depends(get_service),
 ):
     """Atomically set stock levels for multiple (variant, location) pairs in a single transaction."""
@@ -423,7 +423,7 @@ def batch_set_stock(
 @router.post("/inventory/adjust-stock", response_model=InventoryLevelResponse)
 def adjust_stock(
     payload: AdjustStockRequest,
-    ctx: CatalogContext = Depends(get_catalog_context),
+    ctx: CatalogContext = Depends(get_catalog_writer_context),
     service: ProductService = Depends(get_service),
 ):
     """Adjust stock by delta and log to ledger."""
@@ -455,7 +455,7 @@ def adjust_stock(
 @router.post("/inventory/reserve", response_model=ReservationResponse)
 def reserve_stock(
     payload: ReserveStockRequest,
-    ctx: CatalogContext = Depends(get_catalog_context),
+    ctx: CatalogContext = Depends(get_catalog_writer_context),
     service: ProductService = Depends(get_service),
 ):
     """Reserve stock with priority allocation and row-level locking."""
@@ -474,7 +474,7 @@ def reserve_stock(
 @router.post("/inventory/release/{reservation_id}", response_model=ReleaseStockResponse)
 def release_stock(
     reservation_id: UUID,
-    ctx: CatalogContext = Depends(get_catalog_context),
+    ctx: CatalogContext = Depends(get_catalog_writer_context),
     service: ProductService = Depends(get_service),
 ):
     """Release a previously reserved stock allocation."""
@@ -487,7 +487,7 @@ def release_stock(
 @router.post("/inventory/transfer", response_model=TransferStockResponse)
 def transfer_stock(
     payload: TransferStockRequest,
-    ctx: CatalogContext = Depends(get_catalog_context),
+    ctx: CatalogContext = Depends(get_catalog_writer_context),
     service: ProductService = Depends(get_service),
 ):
     """Transfer stock between locations with paired ledger movements."""
@@ -672,7 +672,7 @@ async def validate_import_csv(
 )
 async def commit_import_job(
     request: Request,
-    ctx: CatalogContext = Depends(get_catalog_context),
+    ctx: CatalogContext = Depends(get_catalog_writer_context),
 ):
     """Enqueue an async CSV import job and return 202 Accepted with job_id."""
     csv_text, skip_invalid, auto_create_categories = await _extract_csv_payload(request)
