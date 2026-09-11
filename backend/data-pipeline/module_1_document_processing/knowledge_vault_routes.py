@@ -4,9 +4,11 @@ import re
 import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Optional
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Header, BackgroundTasks
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Header, BackgroundTasks, Depends
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
+
+from module_1_document_processing.identity import bind_identity
 
 try:
     import pymongo
@@ -22,7 +24,10 @@ from module_3_batch_ingestion_vector.embedding_worker import EmbeddingWorker
 from module_3_batch_ingestion_vector.vector_store import VectorStore
 from module_3_batch_ingestion_vector.ingestion_pipeline import BatchIngestionPipeline
 
-router = APIRouter(tags=["Knowledge Vault"])
+# All knowledge-vault routes require the gateway-verified identity (X-User-Id).
+# Tenant-scoped document access is additionally enforced per-endpoint via
+# _find_doc_record(doc_id, x_tenant_id).
+router = APIRouter(tags=["Knowledge Vault"], dependencies=[Depends(bind_identity)])
 
 # Storage & Engine instances
 vector_store = VectorStore()
@@ -139,16 +144,27 @@ def _save_doc_record(doc: dict[str, Any]):
     _in_memory_docs[doc_id] = doc
 
 
-def _find_doc_record(doc_id: str) -> Optional[dict[str, Any]]:
+def _find_doc_record(doc_id: str, tenant_id: Optional[str] = None) -> Optional[dict[str, Any]]:
+    """Look up a document. When tenant_id is given, the document must belong to
+    that tenant or None is returned — request handlers MUST pass it to prevent
+    cross-tenant access by document id. Internal pipeline callers omit it."""
     if _docs_col is not None:
         try:
-            doc = _docs_col.find_one({"doc_id": doc_id})
+            query: dict[str, Any] = {"doc_id": doc_id}
+            if tenant_id is not None:
+                query["tenant_id"] = tenant_id
+            doc = _docs_col.find_one(query)
             if doc:
                 doc.pop("_id", None)
                 return doc
+            if tenant_id is not None:
+                return None
         except Exception as e:
             print(f"[KnowledgeVault] Error reading doc from MongoDB: {e}")
-    return _in_memory_docs.get(doc_id)
+    doc = _in_memory_docs.get(doc_id)
+    if doc is not None and tenant_id is not None and doc.get("tenant_id") != tenant_id:
+        return None
+    return doc
 
 
 def _list_doc_records(tenant_id: str, user_id: str = "") -> list[dict[str, Any]]:
@@ -611,7 +627,7 @@ def update_sales_classification(
     x_tenant_id: str = Header(default="tenant_default"),
 ):
     """Allows a salesperson to manually update or override the sales taxonomy category, target competitor, tags, or summary."""
-    doc = _find_doc_record(doc_id)
+    doc = _find_doc_record(doc_id, x_tenant_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found.")
 
@@ -657,7 +673,7 @@ def reclassify_document(
     x_tenant_id: str = Header(default="tenant_default"),
 ):
     """Re-runs the SalesClassifier (OpenRouter AI + heuristics) on an existing document."""
-    doc = _find_doc_record(doc_id)
+    doc = _find_doc_record(doc_id, x_tenant_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found.")
 
@@ -691,7 +707,7 @@ def reclassify_document(
 @router.get("/knowledge-vault/documents/{doc_id}/vectors")
 def get_document_vectors(doc_id: str, x_tenant_id: str = Header(default="tenant_default")):
     """Retrieves all vector chunks, token counts, and linked list pointers for a specific document."""
-    doc = _find_doc_record(doc_id)
+    doc = _find_doc_record(doc_id, x_tenant_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found.")
 
@@ -761,7 +777,7 @@ def get_document_vectors(doc_id: str, x_tenant_id: str = Header(default="tenant_
 @router.get("/knowledge-vault/documents/{doc_id}/content")
 def get_document_content(doc_id: str, x_tenant_id: str = Header(default="tenant_default")):
     """Returns the complete unfragmented markdown/text content of the document."""
-    doc = _find_doc_record(doc_id)
+    doc = _find_doc_record(doc_id, x_tenant_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found.")
 
@@ -785,11 +801,14 @@ def get_document_content(doc_id: str, x_tenant_id: str = Header(default="tenant_
 @router.get("/knowledge-vault/documents/{doc_id}/download")
 def download_raw_document(doc_id: str, x_tenant_id: str = Header(default="tenant_default")):
     """Streams and downloads the original raw file from storage."""
+    # Tenant ownership check FIRST — raw files are keyed by doc_id only, so
+    # without this a caller could download another tenant's file by id.
+    doc = _find_doc_record(doc_id, x_tenant_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found.")
+
     raw_info = raw_document_store.get_raw_file_bytes(doc_id)
     if not raw_info:
-        doc = _find_doc_record(doc_id)
-        if not doc:
-            raise HTTPException(status_code=404, detail="Document not found.")
         text = doc.get("metadata", {}).get("preview_snippet", "")
         return Response(
             content=text.encode("utf-8"),
@@ -808,7 +827,7 @@ def download_raw_document(doc_id: str, x_tenant_id: str = Header(default="tenant
 @router.delete("/knowledge-vault/documents/{doc_id}")
 def delete_document(doc_id: str, x_tenant_id: str = Header(default="tenant_default")):
     """Deletes a document and purges all its vector embeddings and raw files."""
-    doc = _find_doc_record(doc_id)
+    doc = _find_doc_record(doc_id, x_tenant_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found.")
 
@@ -828,7 +847,7 @@ def reindex_document(
     x_tenant_id: str = Header(default="tenant_default"),
 ):
     """Re-triggers chunking and vector indexing using the stored complete document."""
-    doc = _find_doc_record(doc_id)
+    doc = _find_doc_record(doc_id, x_tenant_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found.")
 
