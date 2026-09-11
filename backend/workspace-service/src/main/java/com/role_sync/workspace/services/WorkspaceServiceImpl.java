@@ -17,7 +17,9 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -25,7 +27,9 @@ import reactor.core.scheduler.Schedulers;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 @Slf4j
@@ -38,6 +42,8 @@ public class WorkspaceServiceImpl implements WorkspaceService {
     private final WorkspaceRoleRepository workspaceRoleRepository;
     private final WorkspaceMembershipRepository workspaceMembershipRepository;
     private final WorkspaceAuthorizationService authorizationService;
+    private final WorkspaceProfileService workspaceProfileService;
+    private final PlatformTransactionManager transactionManager;
 
     @Override
     @Transactional
@@ -45,35 +51,74 @@ public class WorkspaceServiceImpl implements WorkspaceService {
         return Mono.fromCallable(() -> {
             WorkspaceProfile ownerProfile = workspaceProfileRepository.findByAuthUserId(authUserId)
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Workspace profile not found"));
-
-            Workspace workspace = Workspace.builder()
-                    .name(request.getName())
-                    .description(request.getDescription())
-                    .owner(ownerProfile)
-                    .isActive(true)
-                    .build();
-            Workspace savedWorkspace = workspaceRepository.save(workspace);
-
-            // Fetch or create standard OWNER role
-            WorkspaceRole ownerRole = workspaceRoleRepository.findByRoleName("OWNER")
-                    .orElseGet(() -> workspaceRoleRepository.save(
-                            WorkspaceRole.builder()
-                                    .roleName("OWNER")
-                                    .description("Workspace Owner")
-                                    .build()
-                    ));
-
-            // Create membership record for the owner
-            WorkspaceMembership membership = WorkspaceMembership.builder()
-                    .workspace(savedWorkspace)
-                    .profile(ownerProfile)
-                    .role(ownerRole)
-                    .isActive(true)
-                    .build();
-            workspaceMembershipRepository.save(membership);
-
-            return mapToResponse(savedWorkspace);
+            return mapToResponse(createOwnedWorkspace(ownerProfile, request.getName(), request.getDescription()));
         }).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    @Override
+    public Mono<WorkspaceResponse> ensureDefaultWorkspace(UUID authUserId) {
+        return workspaceProfileService.getProfile(authUserId) // creates the profile on first use
+                .flatMap(profile -> Mono.fromCallable(() -> new TransactionTemplate(transactionManager).execute(status -> {
+                    // Two first requests from one user (e.g. two tabs) wait on the profile row, so
+                    // the second one finds the workspace the first created.
+                    WorkspaceProfile locked = workspaceProfileRepository.lockByProfileId(profile.getProfileId())
+                            .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Workspace profile not found"));
+                    List<Workspace> existing = workspaceMembershipRepository.findActiveWorkspacesByProfileId(locked.getProfileId());
+                    if (existing == null || existing.isEmpty()) {
+                        existing = workspaceRepository.findByOwnerProfileId(locked.getProfileId());
+                    }
+                    if (existing != null && !existing.isEmpty()) {
+                        WorkspaceResponse response = mapToResponse(existing.get(0));
+                        response.setRole(rolesFor(locked.getProfileId()).getOrDefault(response.getWorkspaceId(), "OWNER"));
+                        return response;
+                    }
+                    log.info("Provisioning a default workspace for user {}", authUserId);
+                    WorkspaceResponse created = mapToResponse(createOwnedWorkspace(locked,
+                            defaultWorkspaceName(locked.getFirstName()),
+                            "Default workspace created automatically on first sign-in."));
+                    created.setRole("OWNER");
+                    return created;
+                })).subscribeOn(Schedulers.boundedElastic()));
+    }
+
+    private Map<UUID, String> rolesFor(UUID profileId) {
+        Map<UUID, String> roles = new HashMap<>();
+        for (Object[] row : workspaceMembershipRepository.findActiveRolesByProfileId(profileId)) {
+            roles.put((UUID) row[0], (String) row[1]);
+        }
+        return roles;
+    }
+
+    /** Same naming as the account-activation provisioning in {@code AuthEventConsumer}. */
+    static String defaultWorkspaceName(String firstName) {
+        return firstName != null && !firstName.isBlank() ? firstName.trim() + "'s Workspace" : "Personal Workspace";
+    }
+
+    private Workspace createOwnedWorkspace(WorkspaceProfile ownerProfile, String name, String description) {
+        Workspace savedWorkspace = workspaceRepository.save(Workspace.builder()
+                .name(name)
+                .description(description)
+                .owner(ownerProfile)
+                .isActive(true)
+                .build());
+
+        // Fetch or create standard OWNER role
+        WorkspaceRole ownerRole = workspaceRoleRepository.findByRoleName("OWNER")
+                .orElseGet(() -> workspaceRoleRepository.save(
+                        WorkspaceRole.builder()
+                                .roleName("OWNER")
+                                .description("Workspace Owner")
+                                .build()
+                ));
+
+        // Create membership record for the owner
+        workspaceMembershipRepository.save(WorkspaceMembership.builder()
+                .workspace(savedWorkspace)
+                .profile(ownerProfile)
+                .role(ownerRole)
+                .isActive(true)
+                .build());
+        return savedWorkspace;
     }
 
     @Override
@@ -84,9 +129,13 @@ public class WorkspaceServiceImpl implements WorkspaceService {
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Workspace profile not found"));
 
             List<Workspace> workspaces = workspaceMembershipRepository.findActiveWorkspacesByProfileId(profile.getProfileId());
+            Map<UUID, String> roles = rolesFor(profile.getProfileId());
 
             if (workspaces == null || workspaces.isEmpty()) {
                 workspaces = workspaceRepository.findByOwnerProfileId(profile.getProfileId());
+                if (workspaces != null) {
+                    workspaces.forEach(ws -> roles.putIfAbsent(ws.getWorkspaceId(), "OWNER"));
+                }
             }
 
             if (workspaces == null || workspaces.isEmpty()) {
@@ -96,7 +145,9 @@ public class WorkspaceServiceImpl implements WorkspaceService {
             List<WorkspaceResponse> responseList = new ArrayList<>();
             for (Workspace ws : workspaces) {
                 if (ws != null) {
-                    responseList.add(mapToResponse(ws));
+                    WorkspaceResponse response = mapToResponse(ws);
+                    response.setRole(roles.get(ws.getWorkspaceId()));
+                    responseList.add(response);
                 }
             }
             return responseList;

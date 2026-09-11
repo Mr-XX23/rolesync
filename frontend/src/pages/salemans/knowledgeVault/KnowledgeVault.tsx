@@ -24,8 +24,8 @@ import {
 export const KnowledgeVault: React.FC = () => {
   const navigate = useNavigate();
   const toast = useToast();
-  const activeUser = useAppSelector((state) => state.auth.user);
-  const userId = activeUser?.userId || 'usr_active';
+  // The vault belongs to the active workspace; reload when it changes.
+  const workspaceId = useAppSelector((state) => state.workspace.currentWorkspace?.workspaceId);
 
   // Active Calibrated RAG Parameters (configured via Settings)
   const [chunkSize, setChunkSize] = useState(512);
@@ -55,11 +55,14 @@ export const KnowledgeVault: React.FC = () => {
   // Load Vault Data
   const loadVaultData = useCallback(
     async (showToastNotice = false) => {
+      if (!workspaceId) {
+        return; // WorkspaceGate renders this page only once a workspace is active
+      }
       try {
         const [docsData, statsData, configData] = await Promise.all([
-          knowledgeVaultApi.getDocuments(userId),
-          knowledgeVaultApi.getStats(userId),
-          knowledgeVaultApi.getRagConfig(userId),
+          knowledgeVaultApi.getDocuments(),
+          knowledgeVaultApi.getStats(),
+          knowledgeVaultApi.getRagConfig(),
         ]);
         setDocuments(docsData);
         setStats(statsData);
@@ -81,7 +84,7 @@ export const KnowledgeVault: React.FC = () => {
         setIsRefreshing(false);
       }
     },
-    [userId, toast]
+    [workspaceId, toast]
   );
 
   useEffect(() => {
@@ -96,8 +99,8 @@ export const KnowledgeVault: React.FC = () => {
   // Hybrid Activity-Aware Adaptive Polling
   const pollIncompleteDocuments = useCallback(async () => {
     try {
-      const docs = await knowledgeVaultApi.getDocuments(userId);
-      const updatedStats = await knowledgeVaultApi.getStats(userId);
+      const docs = await knowledgeVaultApi.getDocuments();
+      const updatedStats = await knowledgeVaultApi.getStats();
       setDocuments(docs);
       setStats(updatedStats);
 
@@ -108,7 +111,7 @@ export const KnowledgeVault: React.FC = () => {
     } catch (e) {
       console.warn('[KnowledgeVault] Adaptive poll silent error:', e);
     }
-  }, [userId, hasIncompleteDocuments, toast]);
+  }, [hasIncompleteDocuments, toast]);
 
   useAdaptivePolling({
     callback: pollIncompleteDocuments,
@@ -159,11 +162,11 @@ export const KnowledgeVault: React.FC = () => {
         setUploadQueue((prev) => [...prev, file.name]);
 
         try {
-          const newDoc = await knowledgeVaultApi.uploadFile(file, userId);
+          const newDoc = await knowledgeVaultApi.uploadFile(file);
           setDocuments((prev) => [newDoc, ...prev.filter((d) => d.doc_id !== newDoc.doc_id)]);
           toast.success(`"${file.name}" queued for parsing & vectorization.`, 'Uploaded');
           // Refresh stats in background
-          knowledgeVaultApi.getStats(userId).then(setStats);
+          knowledgeVaultApi.getStats().then(setStats);
         } catch (err: any) {
           console.error('[KnowledgeVault] File upload error:', err);
           toast.error(err.message || `Failed to upload "${file.name}".`, 'Upload Error');
@@ -172,7 +175,7 @@ export const KnowledgeVault: React.FC = () => {
         }
       }
     },
-    [userId, toast]
+    [toast]
   );
 
   // Drag & Drop Handler
@@ -239,7 +242,7 @@ export const KnowledgeVault: React.FC = () => {
 
     try {
       await knowledgeVaultApi.deleteDocument(target.id);
-      knowledgeVaultApi.getStats(userId).then(setStats);
+      knowledgeVaultApi.getStats().then(setStats);
       toast.success(
         target.isAbort
           ? `Ingestion for "${target.name}" was aborted.`
@@ -252,7 +255,7 @@ export const KnowledgeVault: React.FC = () => {
       // Rollback on failure
       setDocuments(previousDocs);
     }
-  }, [deleteTarget, documents, userId, toast]);
+  }, [deleteTarget, documents, toast]);
 
   // Save Sales Classification
   const handleSaveSalesClassification = useCallback(
@@ -268,10 +271,10 @@ export const KnowledgeVault: React.FC = () => {
     ) => {
       const updated = await knowledgeVaultApi.updateSalesClassification(docId, data);
       setDocuments((prev) => prev.map((d) => (d.doc_id === docId ? updated : d)));
-      knowledgeVaultApi.getStats(userId).then(setStats);
+      knowledgeVaultApi.getStats().then(setStats);
       toast.success(`Updated sales intelligence for "${updated.name}".`, 'Saved');
     },
-    [userId, toast]
+    [toast]
   );
 
   // Reclassify Document with AI
@@ -279,11 +282,11 @@ export const KnowledgeVault: React.FC = () => {
     async (docId: string) => {
       const updated = await knowledgeVaultApi.reclassifyDocument(docId);
       setDocuments((prev) => prev.map((d) => (d.doc_id === docId ? updated : d)));
-      knowledgeVaultApi.getStats(userId).then(setStats);
+      knowledgeVaultApi.getStats().then(setStats);
       toast.success(`Re-classified "${updated.name}" as ${updated.category}.`, 'AI Classified');
       return updated;
     },
-    [userId, toast]
+    [toast]
   );
 
   // Filter & Search Documents
@@ -411,7 +414,7 @@ export const KnowledgeVault: React.FC = () => {
         onClose={() => setIsUrlModalOpen(false)}
         onSuccess={(newDoc) => {
           setDocuments((prev) => [newDoc, ...prev.filter((d) => d.doc_id !== newDoc.doc_id)]);
-          knowledgeVaultApi.getStats(userId).then(setStats);
+          knowledgeVaultApi.getStats().then(setStats);
         }}
       />
 

@@ -213,11 +213,10 @@ def _knowledge_routes() -> dict[str, object]:
         f"{_KV}/doc_battle/content": {"full_text": "Intro.\n\nGlobex charges per seat, which gets expensive past 50 users."},
         f"{_KV}/doc_security/content": {"full_text": "We are SOC 2 Type II certified."},
         f"{_KV}/doc_other/content": {"full_text": "Office closed for Dashain."},
-        f"{_KV}/doc_foreign/content": {"full_text": "someone else's document"},
     }
 
 
-async def test_knowledge_search_ranks_the_users_documents_and_returns_matching_passages():
+async def test_knowledge_search_ranks_the_workspaces_documents_and_returns_matching_passages():
     seen: list[httpx.Request] = []
     tools = knowledge.knowledge_tools(_data_pipeline(_knowledge_routes(), seen))
 
@@ -225,10 +224,12 @@ async def test_knowledge_search_ranks_the_users_documents_and_returns_matching_p
 
     assert [doc["doc_id"] for doc in output.data["documents"]] == ["doc_battle"]  # nothing else matches at all
     assert "Globex charges per seat" in output.data["documents"][0]["passages"][0]
-    listing = seen[0]
-    assert listing.headers["X-User-Id"] == str(CTX.user_id)
-    assert "X-Tenant-Id" not in listing.headers  # vault documents live under data-pipeline's default tenant
-    assert (listing.url.params["user_id"], listing.url.params["status"]) == (str(CTX.user_id), "Indexed")
+    # The vault is shared by the workspace: every call names it (data-pipeline checks membership).
+    assert all(
+        (request.headers["X-User-Id"], request.headers["X-Tenant-Id"]) == (str(CTX.user_id), str(CTX.tenant_id))
+        for request in seen
+    )
+    assert dict(seen[0].url.params) == {"status": "Indexed"}
 
 
 def test_passages_are_the_best_matching_windows_in_document_order():
@@ -241,17 +242,17 @@ def test_passages_are_the_best_matching_windows_in_document_order():
     assert knowledge.terms("How do we price it for the Acme team?") == ["price", "acme", "team"]
 
 
-async def test_a_knowledge_document_is_only_read_if_it_belongs_to_the_user():
+async def test_a_document_outside_the_workspace_is_reported_as_not_found():
     seen: list[httpx.Request] = []
     tools = knowledge.knowledge_tools(_data_pipeline(_knowledge_routes(), seen))
     read = _tool(tools, "read_knowledge_document")
 
-    with pytest.raises(ToolAccessDenied):
-        await _invoke(read, doc_id="doc_foreign")
-    assert not any(request.url.path.endswith("/doc_foreign/content") for request in seen)
+    with pytest.raises(ToolInputError, match="no document 'doc_elsewhere'"):
+        await _invoke(read, doc_id="doc_elsewhere")  # data-pipeline answers 404 outside the workspace
 
     output = await _invoke(read, doc_id="doc_battle")
     assert output.data["text"].startswith("Intro.") and output.data["truncated"] is False
+    assert seen[-1].headers["X-Tenant-Id"] == str(CTX.tenant_id)
 
 
 async def test_data_pipeline_failures_are_ordinary_tool_failures():
@@ -290,7 +291,7 @@ async def test_catalog_search_returns_active_items_with_prices_and_discount_boun
     assert item["discount_pct"] == {"min": "0.00", "max": "15.00"}
     assert item["match"] == {"score": 40.0, "why": "name match"}
     search = seen[0]
-    assert json.loads(search.content) == {"query": "tee", "limit": 10}
+    assert json.loads(search.content) == {"query": "tee", "limit": 10, "expand": False}
     assert (search.headers["X-Tenant-Id"], search.headers["X-User-Id"]) == (str(CTX.tenant_id), str(CTX.user_id))
 
 

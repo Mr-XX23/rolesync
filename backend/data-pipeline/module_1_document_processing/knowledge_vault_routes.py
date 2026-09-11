@@ -4,11 +4,12 @@ import re
 import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Optional
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Header, BackgroundTasks, Depends
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks, Depends
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from module_1_document_processing.identity import bind_identity
+from module_1_document_processing.workspace_access import WorkspaceAccess, require_workspace_member, require_writer
 
 try:
     import pymongo
@@ -24,9 +25,10 @@ from module_3_batch_ingestion_vector.embedding_worker import EmbeddingWorker
 from module_3_batch_ingestion_vector.vector_store import VectorStore
 from module_3_batch_ingestion_vector.ingestion_pipeline import BatchIngestionPipeline
 
-# All knowledge-vault routes require the gateway-verified identity (X-User-Id).
-# Tenant-scoped document access is additionally enforced per-endpoint via
-# _find_doc_record(doc_id, x_tenant_id).
+# The knowledge vault is shared by a workspace, like the catalog. Every route requires the
+# gateway-verified identity (X-User-Id) and active membership of the workspace in X-Tenant-Id
+# (require_workspace_member); documents are looked up within that workspace only
+# (_find_doc_record(doc_id, workspace_id)). The uploader is recorded as the document's user_id.
 router = APIRouter(tags=["Knowledge Vault"], dependencies=[Depends(bind_identity)])
 
 # Storage & Engine instances
@@ -65,7 +67,6 @@ if pymongo and MONGO_URI:
 # Models
 class IngestUrlRequest(BaseModel):
     url: str
-    user_id: str = "usr_active"
     title: Optional[str] = None
     category: Optional[str] = None
     target_competitor: Optional[str] = None
@@ -84,7 +85,6 @@ class RagConfigRequest(BaseModel):
     overlap: int = Field(default=12, ge=0, le=30)
     embedding_engine: str = Field(default="RoleSync Vector Engine (1536-dim)")
     similarity_threshold: Optional[float] = Field(default=0.72, ge=0.0, le=1.0)
-    user_id: str = "usr_active"
 
 
 # Helper Functions
@@ -366,9 +366,9 @@ def _process_document_background(
 
 # Endpoints
 @router.get("/knowledge-vault/stats")
-def get_vault_stats(user_id: str = "usr_active", x_tenant_id: str = Header(default="tenant_default")):
-    """Aggregated statistics across all knowledge documents, vector chunks, and sales taxonomy categories."""
-    docs = _list_doc_records(x_tenant_id, user_id)
+def get_vault_stats(access: WorkspaceAccess = Depends(require_workspace_member)):
+    """Aggregated statistics across the workspace's knowledge documents, vector chunks, and sales taxonomy categories."""
+    docs = _list_doc_records(access.workspace_id)
     total_docs = len(docs)
     total_chunks = sum(d.get("chunks", 0) for d in docs)
     total_bytes = sum(d.get("size_bytes", 0) for d in docs)
@@ -401,14 +401,14 @@ def get_vault_stats(user_id: str = "usr_active", x_tenant_id: str = Header(defau
 
 @router.get("/knowledge-vault/documents")
 def list_documents(
-    user_id: str = "usr_active",
     status: Optional[str] = None,
     category: Optional[str] = None,
     search: Optional[str] = None,
-    x_tenant_id: str = Header(default="tenant_default"),
+    mine: bool = False,
+    access: WorkspaceAccess = Depends(require_workspace_member),
 ):
-    """Lists all knowledge vault documents with status, sales category filtering, and multi-field search."""
-    docs = _list_doc_records(x_tenant_id, user_id)
+    """Lists the workspace's knowledge documents (``mine=true``: only the caller's uploads) with status, sales category filtering, and multi-field search."""
+    docs = _list_doc_records(access.workspace_id, access.user_id if mine else "")
 
     if status and status.lower() != "all":
         docs = [d for d in docs if d.get("status", "").lower() == status.lower()]
@@ -439,12 +439,12 @@ def list_documents(
 async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    user_id: str = Form(default="usr_active"),
     category: Optional[str] = Form(default=None),
     target_competitor: Optional[str] = Form(default=None),
-    x_tenant_id: str = Header(default="tenant_default"),
+    access: WorkspaceAccess = Depends(require_workspace_member),
 ):
     """Uploads a single file (PDF, CSV, TXT, DOCX, MD, JSON), validates <=25MB, runs SalesClassifier, and processes chunks via ParserService and BatchIngestionPipeline."""
+    require_writer(access)
     filename = file.filename or "uploaded_file"
     file_ext = filename.split(".")[-1].upper() if "." in filename else "FILE"
 
@@ -494,8 +494,8 @@ async def upload_document(
         "confidence_score": prelim_classification.confidence_score,
         "created_at": now_str,
         "last_updated": now_str,
-        "tenant_id": x_tenant_id,
-        "user_id": user_id,
+        "tenant_id": access.workspace_id,
+        "user_id": access.user_id,
         "source": "USER_UPLOAD",
         "metadata": {
             "content_type": file.content_type,
@@ -510,8 +510,8 @@ async def upload_document(
     background_tasks.add_task(
         _process_document_background,
         doc_id=doc_id,
-        tenant_id=x_tenant_id,
-        user_id=user_id,
+        tenant_id=access.workspace_id,
+        user_id=access.user_id,
         raw_bytes=content_bytes,
         filename=filename,
         mime_type=file.content_type or "application/octet-stream",
@@ -531,9 +531,10 @@ async def upload_document(
 def ingest_url(
     req: IngestUrlRequest,
     background_tasks: BackgroundTasks,
-    x_tenant_id: str = Header(default="tenant_default"),
+    access: WorkspaceAccess = Depends(require_workspace_member),
 ):
     """Ingests text content from an external webpage URL and runs SalesClassifier."""
+    require_writer(access)
     url = req.url.strip()
     if not re.match(r"^https?://[^\s/$.?#].[^\s]*$", url, re.IGNORECASE):
         raise HTTPException(status_code=400, detail="Invalid URL format. Must start with http:// or https://")
@@ -587,8 +588,8 @@ def ingest_url(
         "confidence_score": prelim_classification.confidence_score,
         "created_at": now_str,
         "last_updated": now_str,
-        "tenant_id": x_tenant_id,
-        "user_id": req.user_id,
+        "tenant_id": access.workspace_id,
+        "user_id": access.user_id,
         "source": "URL_INGEST",
         "metadata": {
             "target_url": url,
@@ -603,8 +604,8 @@ def ingest_url(
     background_tasks.add_task(
         _process_document_background,
         doc_id=doc_id,
-        tenant_id=x_tenant_id,
-        user_id=req.user_id,
+        tenant_id=access.workspace_id,
+        user_id=access.user_id,
         raw_bytes=content_bytes,
         filename=doc_name,
         mime_type="text/html",
@@ -624,10 +625,11 @@ def ingest_url(
 def update_sales_classification(
     doc_id: str,
     req: UpdateClassificationRequest,
-    x_tenant_id: str = Header(default="tenant_default"),
+    access: WorkspaceAccess = Depends(require_workspace_member),
 ):
     """Allows a salesperson to manually update or override the sales taxonomy category, target competitor, tags, or summary."""
-    doc = _find_doc_record(doc_id, x_tenant_id)
+    require_writer(access)
+    doc = _find_doc_record(doc_id, access.workspace_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found.")
 
@@ -670,10 +672,11 @@ def update_sales_classification(
 @router.post("/knowledge-vault/documents/{doc_id}/reclassify")
 def reclassify_document(
     doc_id: str,
-    x_tenant_id: str = Header(default="tenant_default"),
+    access: WorkspaceAccess = Depends(require_workspace_member),
 ):
     """Re-runs the SalesClassifier (OpenRouter AI + heuristics) on an existing document."""
-    doc = _find_doc_record(doc_id, x_tenant_id)
+    require_writer(access)
+    doc = _find_doc_record(doc_id, access.workspace_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found.")
 
@@ -705,9 +708,9 @@ def reclassify_document(
 
 
 @router.get("/knowledge-vault/documents/{doc_id}/vectors")
-def get_document_vectors(doc_id: str, x_tenant_id: str = Header(default="tenant_default")):
+def get_document_vectors(doc_id: str, access: WorkspaceAccess = Depends(require_workspace_member)):
     """Retrieves all vector chunks, token counts, and linked list pointers for a specific document."""
-    doc = _find_doc_record(doc_id, x_tenant_id)
+    doc = _find_doc_record(doc_id, access.workspace_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found.")
 
@@ -775,9 +778,9 @@ def get_document_vectors(doc_id: str, x_tenant_id: str = Header(default="tenant_
 
 
 @router.get("/knowledge-vault/documents/{doc_id}/content")
-def get_document_content(doc_id: str, x_tenant_id: str = Header(default="tenant_default")):
+def get_document_content(doc_id: str, access: WorkspaceAccess = Depends(require_workspace_member)):
     """Returns the complete unfragmented markdown/text content of the document."""
-    doc = _find_doc_record(doc_id, x_tenant_id)
+    doc = _find_doc_record(doc_id, access.workspace_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found.")
 
@@ -799,11 +802,11 @@ def get_document_content(doc_id: str, x_tenant_id: str = Header(default="tenant_
 
 
 @router.get("/knowledge-vault/documents/{doc_id}/download")
-def download_raw_document(doc_id: str, x_tenant_id: str = Header(default="tenant_default")):
+def download_raw_document(doc_id: str, access: WorkspaceAccess = Depends(require_workspace_member)):
     """Streams and downloads the original raw file from storage."""
-    # Tenant ownership check FIRST — raw files are keyed by doc_id only, so
-    # without this a caller could download another tenant's file by id.
-    doc = _find_doc_record(doc_id, x_tenant_id)
+    # Workspace check FIRST — raw files are keyed by doc_id only, so
+    # without this a caller could download another workspace's file by id.
+    doc = _find_doc_record(doc_id, access.workspace_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found.")
 
@@ -825,11 +828,17 @@ def download_raw_document(doc_id: str, x_tenant_id: str = Header(default="tenant
 
 
 @router.delete("/knowledge-vault/documents/{doc_id}")
-def delete_document(doc_id: str, x_tenant_id: str = Header(default="tenant_default")):
-    """Deletes a document and purges all its vector embeddings and raw files."""
-    doc = _find_doc_record(doc_id, x_tenant_id)
+def delete_document(doc_id: str, access: WorkspaceAccess = Depends(require_workspace_member)):
+    """Deletes a document and purges all its vector embeddings and raw files (uploader or workspace owner/admin)."""
+    doc = _find_doc_record(doc_id, access.workspace_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found.")
+    require_writer(access)
+    if doc.get("user_id") != access.user_id and not access.is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the person who added this document or a workspace owner/admin can delete it.",
+        )
 
     _delete_doc_record(doc_id)
     raw_document_store.delete_raw_document(doc_id)
@@ -844,10 +853,11 @@ def delete_document(doc_id: str, x_tenant_id: str = Header(default="tenant_defau
 def reindex_document(
     doc_id: str,
     background_tasks: BackgroundTasks,
-    x_tenant_id: str = Header(default="tenant_default"),
+    access: WorkspaceAccess = Depends(require_workspace_member),
 ):
     """Re-triggers chunking and vector indexing using the stored complete document."""
-    doc = _find_doc_record(doc_id, x_tenant_id)
+    require_writer(access)
+    doc = _find_doc_record(doc_id, access.workspace_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found.")
 
@@ -879,8 +889,8 @@ def reindex_document(
     background_tasks.add_task(
         _process_document_background,
         doc_id=doc_id,
-        tenant_id=x_tenant_id,
-        user_id=doc.get("user_id", "usr_active"),
+        tenant_id=access.workspace_id,
+        user_id=doc.get("user_id") or access.user_id,
         raw_bytes=content_bytes,
         filename=filename,
         mime_type=mime_type,
@@ -897,11 +907,13 @@ def reindex_document(
 
 
 @router.post("/knowledge-vault/backfill-chunks")
-def backfill_existing_chunks():
+def backfill_existing_chunks(access: WorkspaceAccess = Depends(require_workspace_member)):
     """
-    Backfills existing MongoDB vector_chunks with doc_ref_id, prev_chunk_id, next_chunk_id,
-    and category metadata from parent knowledge_documents.
+    Backfills the workspace's MongoDB vector_chunks with doc_ref_id, prev_chunk_id, next_chunk_id,
+    and category metadata from parent knowledge_documents (workspace owners/admins only).
     """
+    if not access.is_admin:
+        raise HTTPException(status_code=403, detail="Only a workspace owner/admin can backfill chunks.")
     if vector_store._collection is None:
         return {"status": "skipped", "message": "MongoDB offline."}
 
@@ -916,10 +928,13 @@ def backfill_existing_chunks():
                 continue
             doc_chunks_map.setdefault(parent_id, []).append(c)
 
-        for parent_id, chunk_list in doc_chunks_map.items():
+        for parent_id, chunk_list in list(doc_chunks_map.items()):
+            # Only this workspace's documents; other workspaces' chunks are left untouched.
+            parent_doc = _find_doc_record(parent_id, access.workspace_id)
+            if parent_doc is None:
+                doc_chunks_map.pop(parent_id)
+                continue
             total = len(chunk_list)
-            # Find parent doc for category
-            parent_doc = _find_doc_record(parent_id)
             category = parent_doc.get("category", "GENERAL_RESOURCE") if parent_doc else "GENERAL_RESOURCE"
             competitor = parent_doc.get("target_competitor") if parent_doc else None
 
@@ -963,24 +978,25 @@ def backfill_existing_chunks():
 
 
 @router.get("/knowledge-vault/config")
-def get_rag_config_endpoint(user_id: str = "usr_active", x_tenant_id: str = Header(default="tenant_default")):
-    """Returns workspace-scoped RAG parameters."""
-    cfg = _get_rag_config(x_tenant_id, user_id)
+def get_rag_config_endpoint(access: WorkspaceAccess = Depends(require_workspace_member)):
+    """Returns the caller's RAG parameters in this workspace."""
+    cfg = _get_rag_config(access.workspace_id, access.user_id)
     return {"status": "success", "config": cfg}
 
 
 @router.post("/knowledge-vault/config")
-def save_rag_config_endpoint(req: RagConfigRequest, x_tenant_id: str = Header(default="tenant_default")):
-    """Saves and updates workspace-scoped RAG parameters."""
+def save_rag_config_endpoint(req: RagConfigRequest, access: WorkspaceAccess = Depends(require_workspace_member)):
+    """Saves and updates the caller's RAG parameters in this workspace."""
+    require_writer(access)
     data = {
         "chunk_size": req.chunk_size,
         "overlap": req.overlap,
         "embedding_engine": req.embedding_engine,
         "similarity_threshold": req.similarity_threshold if req.similarity_threshold is not None else 0.72,
     }
-    _save_rag_config(x_tenant_id, req.user_id, data)
+    _save_rag_config(access.workspace_id, access.user_id, data)
     return {
         "status": "success",
         "message": "RAG configuration updated successfully.",
-        "config": _get_rag_config(x_tenant_id, req.user_id),
+        "config": _get_rag_config(access.workspace_id, access.user_id),
     }

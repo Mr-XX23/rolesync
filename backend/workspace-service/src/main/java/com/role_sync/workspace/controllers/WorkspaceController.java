@@ -36,6 +36,16 @@ public class WorkspaceController {
                 .map(workspace -> ResponseEntity.status(HttpStatus.CREATED).body(workspace));
     }
 
+    /** The caller's workspace, provisioning a personal one on first use (idempotent). */
+    @PostMapping("/default")
+    public Mono<ResponseEntity<WorkspaceResponse>> ensureDefaultWorkspace(
+            @RequestHeader(value = "X-User-Id", required = false) String userIdHeader,
+            @RequestHeader(value = "X-Auth-User-Id", required = false) String authUserIdHeader) {
+
+        UUID authUserId = resolveAuthUserId(userIdHeader, authUserIdHeader);
+        return workspaceService.ensureDefaultWorkspace(authUserId).map(ResponseEntity::ok);
+    }
+
     @GetMapping
     public Flux<WorkspaceResponse> getWorkspaces(
             @RequestHeader(value = "X-User-Id", required = false) String userIdHeader,

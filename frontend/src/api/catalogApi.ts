@@ -377,8 +377,12 @@ export interface SemanticSearchOutput {
 // ============================================================================
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const DEFAULT_TENANT_ID = '00000000-0000-0000-0000-000000000001';
 
+/**
+ * The active workspace's id, sent as `X-Tenant-Id`. Workspace pages render only after
+ * `WorkspaceGate` has loaded it. There is deliberately no shared placeholder workspace to
+ * fall back to: without a workspace the request is refused instead of mixing everyone's data.
+ */
 export function getActiveTenantId(overrideTenantId?: string): string {
   if (overrideTenantId && UUID_REGEX.test(overrideTenantId)) {
     return overrideTenantId;
@@ -393,14 +397,17 @@ export function getActiveTenantId(overrideTenantId?: string): string {
     // ignore
   }
 
-  const storedTenant =
-    localStorage.getItem('rolesync_active_workspace_id') ||
-    localStorage.getItem('rolesync_tenant_id');
+  let storedTenant: string | null = null;
+  try {
+    storedTenant = localStorage.getItem('rolesync_active_workspace_id');
+  } catch {
+    // storage unavailable
+  }
   if (storedTenant && UUID_REGEX.test(storedTenant)) {
     return storedTenant;
   }
 
-  return DEFAULT_TENANT_ID;
+  return '';
 }
 
 function getHeaders(tenantId?: string) {

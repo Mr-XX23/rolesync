@@ -32,4 +32,8 @@ public class WorkspaceResponse {
 
     @JsonProperty("updatedAt")
     private LocalDateTime updatedAt;
+
+    /** The caller's role in this workspace (OWNER, ADMIN, MEMBER, VIEWER), where known. */
+    @JsonProperty("role")
+    private String role;
 }

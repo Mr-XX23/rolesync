@@ -23,8 +23,8 @@ import { RAG_PRESETS } from './knowledgeVault/vaultUtils';
 
 export const Settings: React.FC = () => {
   const toast = useToast();
-  const activeUser = useAppSelector((state) => state.auth.user);
-  const userId = activeUser?.userId || 'usr_active';
+  // Vault settings are per person within the active workspace; reload when it changes.
+  const workspaceId = useAppSelector((state) => state.workspace.currentWorkspace?.workspaceId);
 
   // Navigation Filter Tab
   const [activeTab, setActiveTab] = useState<'all' | 'rag' | 'credentials' | 'diagnostics'>('all');
@@ -48,7 +48,7 @@ export const Settings: React.FC = () => {
     let isMounted = true;
     const loadConfig = async () => {
       try {
-        const cfg = await knowledgeVaultApi.getRagConfig(userId);
+        const cfg = await knowledgeVaultApi.getRagConfig();
         if (cfg && isMounted) {
           setChunkSize(cfg.chunk_size || 512);
           setOverlap(cfg.overlap || 12);
@@ -79,7 +79,7 @@ export const Settings: React.FC = () => {
     return () => {
       isMounted = false;
     };
-  }, [userId]);
+  }, [workspaceId]);
 
   // Apply Tuning Preset
   const handleApplyPreset = useCallback((presetKey: string) => {
@@ -110,7 +110,7 @@ export const Settings: React.FC = () => {
         embedding_engine: embeddingEngine,
         similarity_threshold: similarityThreshold,
       };
-      await knowledgeVaultApi.saveRagConfig(config, userId);
+      await knowledgeVaultApi.saveRagConfig(config);
       toast.success(
         `Chunk Size: ${chunkSize} tokens | Overlap: ${overlap}% | Similarity: ${similarityThreshold}`,
         'RAG Parameters Saved'

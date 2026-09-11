@@ -1,4 +1,5 @@
 import api from './axiosInstance';
+import { getActiveTenantId } from './catalogApi';
 
 export interface KnowledgeDocument {
   doc_id: string;
@@ -148,12 +149,21 @@ const saveLocalConfig = (config: RagConfig) => {
   }
 };
 
+/**
+ * The vault is shared by the active workspace (like the catalog): every call names it, and
+ * data-pipeline checks the signed-in user is a member. The uploader comes from the session.
+ */
+const inWorkspace = (headers: Record<string, string> = {}) => ({
+  headers: { ...headers, 'X-Tenant-Id': getActiveTenantId() },
+});
+
 export const knowledgeVaultApi = {
   // Fetch Vault Aggregated Stats
-  getStats: async (userId: string = 'usr_active'): Promise<VaultStats> => {
+  getStats: async (): Promise<VaultStats> => {
     try {
       const response = await api.get<{ status: string; stats: VaultStats }>(
-        `/data-pipeline/knowledge-vault/stats?user_id=${encodeURIComponent(userId)}`
+        '/data-pipeline/knowledge-vault/stats',
+        inWorkspace()
       );
       if (response.data?.stats) {
         return response.data.stats;
@@ -190,20 +200,16 @@ export const knowledgeVaultApi = {
   },
 
   // Fetch Documents
-  getDocuments: async (
-    userId: string = 'usr_active',
-    status?: string,
-    search?: string,
-    category?: string
-  ): Promise<KnowledgeDocument[]> => {
+  getDocuments: async (status?: string, search?: string, category?: string): Promise<KnowledgeDocument[]> => {
     try {
-      const params = new URLSearchParams({ user_id: userId });
+      const params = new URLSearchParams();
       if (status && status !== 'all') params.append('status', status);
       if (category && category !== 'all') params.append('category', category);
       if (search) params.append('search', search);
 
       const response = await api.get<{ status: string; documents: KnowledgeDocument[] }>(
-        `/data-pipeline/knowledge-vault/documents?${params.toString()}`
+        `/data-pipeline/knowledge-vault/documents?${params.toString()}`,
+        inWorkspace()
       );
       if (response.data?.documents) {
         saveLocalDocs(response.data.documents);
@@ -235,15 +241,9 @@ export const knowledgeVaultApi = {
   },
 
   // Upload Single File to real backend pipeline
-  uploadFile: async (
-    file: File,
-    userId: string = 'usr_active',
-    category?: string,
-    targetCompetitor?: string
-  ): Promise<KnowledgeDocument> => {
+  uploadFile: async (file: File, category?: string, targetCompetitor?: string): Promise<KnowledgeDocument> => {
     const formData = new FormData();
     formData.append('file', file);
-    formData.append('user_id', userId);
     if (category) formData.append('category', category);
     if (targetCompetitor) formData.append('target_competitor', targetCompetitor);
 
@@ -251,11 +251,7 @@ export const knowledgeVaultApi = {
       const response = await api.post<{ status: string; document: KnowledgeDocument }>(
         '/data-pipeline/knowledge-vault/upload',
         formData,
-        {
-          headers: {
-            'Content-Type': 'multipart/form-data',
-          },
-        }
+        inWorkspace({ 'Content-Type': 'multipart/form-data' })
       );
       if (response.data?.document) {
         const local = getLocalDocs();
@@ -278,13 +274,13 @@ export const knowledgeVaultApi = {
     url: string,
     title?: string,
     category?: string,
-    userId: string = 'usr_active',
     targetCompetitor?: string
   ): Promise<KnowledgeDocument> => {
     try {
       const response = await api.post<{ status: string; document: KnowledgeDocument }>(
         '/data-pipeline/knowledge-vault/ingest-url',
-        { url, title, category, user_id: userId, target_competitor: targetCompetitor }
+        { url, title, category, target_competitor: targetCompetitor },
+        inWorkspace()
       );
       if (response.data?.document) {
         const local = getLocalDocs();
@@ -316,7 +312,8 @@ export const knowledgeVaultApi = {
     try {
       const response = await api.patch<{ status: string; document: KnowledgeDocument }>(
         `/data-pipeline/knowledge-vault/documents/${encodeURIComponent(docId)}/sales-classification`,
-        data
+        data,
+        inWorkspace()
       );
       if (response.data?.document) {
         const local = getLocalDocs();
@@ -352,7 +349,9 @@ export const knowledgeVaultApi = {
   reclassifyDocument: async (docId: string): Promise<KnowledgeDocument> => {
     try {
       const response = await api.post<{ status: string; document: KnowledgeDocument }>(
-        `/data-pipeline/knowledge-vault/documents/${encodeURIComponent(docId)}/reclassify`
+        `/data-pipeline/knowledge-vault/documents/${encodeURIComponent(docId)}/reclassify`,
+        undefined,
+        inWorkspace()
       );
       if (response.data?.document) {
         const local = getLocalDocs();
@@ -375,7 +374,8 @@ export const knowledgeVaultApi = {
   getDocumentVectors: async (docId: string): Promise<DocumentVectorsResponse> => {
     try {
       const response = await api.get<DocumentVectorsResponse>(
-        `/data-pipeline/knowledge-vault/documents/${encodeURIComponent(docId)}/vectors`
+        `/data-pipeline/knowledge-vault/documents/${encodeURIComponent(docId)}/vectors`,
+        inWorkspace()
       );
       if (response.data?.chunks) {
         return response.data;
@@ -400,7 +400,7 @@ export const knowledgeVaultApi = {
   // Delete Document
   deleteDocument: async (docId: string): Promise<void> => {
     try {
-      await api.delete(`/data-pipeline/knowledge-vault/documents/${encodeURIComponent(docId)}`);
+      await api.delete(`/data-pipeline/knowledge-vault/documents/${encodeURIComponent(docId)}`, inWorkspace());
     } catch (err) {
       console.warn('[KnowledgeVaultApi] Delete API error:', err);
     }
@@ -412,7 +412,9 @@ export const knowledgeVaultApi = {
   reindexDocument: async (docId: string): Promise<KnowledgeDocument> => {
     try {
       const response = await api.post<{ status: string; document: KnowledgeDocument }>(
-        `/data-pipeline/knowledge-vault/documents/${encodeURIComponent(docId)}/reindex`
+        `/data-pipeline/knowledge-vault/documents/${encodeURIComponent(docId)}/reindex`,
+        undefined,
+        inWorkspace()
       );
       if (response.data?.document) {
         return response.data.document;
@@ -437,10 +439,11 @@ export const knowledgeVaultApi = {
   },
 
   // Fetch RAG Config
-  getRagConfig: async (userId: string = 'usr_active'): Promise<RagConfig> => {
+  getRagConfig: async (): Promise<RagConfig> => {
     try {
       const response = await api.get<{ status: string; config: RagConfig }>(
-        `/data-pipeline/knowledge-vault/config?user_id=${encodeURIComponent(userId)}`
+        '/data-pipeline/knowledge-vault/config',
+        inWorkspace()
       );
       if (response.data?.config) {
         saveLocalConfig(response.data.config);
@@ -453,11 +456,12 @@ export const knowledgeVaultApi = {
   },
 
   // Save RAG Config
-  saveRagConfig: async (config: RagConfig, userId: string = 'usr_active'): Promise<RagConfig> => {
+  saveRagConfig: async (config: RagConfig): Promise<RagConfig> => {
     try {
       const response = await api.post<{ status: string; config: RagConfig }>(
         '/data-pipeline/knowledge-vault/config',
-        { ...config, user_id: userId }
+        config,
+        inWorkspace()
       );
       if (response.data?.config) {
         saveLocalConfig(response.data.config);
@@ -473,17 +477,18 @@ export const knowledgeVaultApi = {
   // Get full document unfragmented content
   getDocumentFullContent: async (docId: string): Promise<DocumentContentResponse> => {
     const response = await api.get<DocumentContentResponse>(
-      `/data-pipeline/knowledge-vault/documents/${encodeURIComponent(docId)}/content`
+      `/data-pipeline/knowledge-vault/documents/${encodeURIComponent(docId)}/content`,
+      inWorkspace()
     );
     return response.data;
   },
 
   // Download raw document
   downloadRawDocument: async (docId: string, filename: string = 'document'): Promise<void> => {
-    const response = await api.get(
-      `/data-pipeline/knowledge-vault/documents/${encodeURIComponent(docId)}/download`,
-      { responseType: 'blob' }
-    );
+    const response = await api.get(`/data-pipeline/knowledge-vault/documents/${encodeURIComponent(docId)}/download`, {
+      ...inWorkspace(),
+      responseType: 'blob',
+    });
     const url = window.URL.createObjectURL(new Blob([response.data]));
     const link = document.createElement('a');
     link.href = url;
@@ -497,7 +502,9 @@ export const knowledgeVaultApi = {
   // Backfill existing chunks
   backfillExistingChunks: async (): Promise<{ status: string; updated_chunks: number }> => {
     const response = await api.post<{ status: string; updated_chunks: number }>(
-      '/data-pipeline/knowledge-vault/backfill-chunks'
+      '/data-pipeline/knowledge-vault/backfill-chunks',
+      undefined,
+      inWorkspace()
     );
     return response.data;
   },
