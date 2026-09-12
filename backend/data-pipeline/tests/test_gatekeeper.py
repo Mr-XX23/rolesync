@@ -2,10 +2,8 @@ from datetime import datetime, timezone
 from module_1_document_processing.parsing.parsed_document import ParsedDocument
 from module_2_memory_gatekeeper.category_router import CategoryRouter, DocumentCategory
 from module_2_memory_gatekeeper.lexical_checker import LexicalChecker
-from module_2_memory_gatekeeper.audit_logger import GatekeeperAuditLogger
-from module_2_memory_gatekeeper.rejected_store import RejectedStore
-from module_2_memory_gatekeeper.quarantine_queue import QuarantineQueue
 from module_2_memory_gatekeeper.gatekeeper_engine import GatekeeperEngine
+from module_2_memory_gatekeeper.gatekeeper_store import GatekeeperStore
 
 def test_category_router():
     router = CategoryRouter()
@@ -53,7 +51,8 @@ def test_lexical_checker_gibberish():
     assert "repetitive noise" in res_rep.reason
 
 def test_gatekeeper_engine():
-    engine = GatekeeperEngine()
+    store = GatekeeperStore(use_db=False)
+    engine = GatekeeperEngine(store=store)
     doc_clean = ParsedDocument(
         doc_id="tenant_a:gdrive:clean_doc", tenant_id="tenant_a", user_id="u1", source="gdrive",
         external_id="clean_doc", acl=["u1"], mime_type="text/plain",
@@ -62,6 +61,6 @@ def test_gatekeeper_engine():
     decision = engine.evaluate_document(doc_clean)
     assert decision.decision == "ACCEPTED"
     assert decision.category == DocumentCategory.MEETING_NOTES
-    logs = engine.audit_logger.get_logs_for_doc("tenant_a:gdrive:clean_doc")
+    logs = store.decisions_for_doc("tenant_a:gdrive:clean_doc", tenant_id="tenant_a")
     assert len(logs) == 1
-    assert logs[0].decision == "ACCEPTED"
+    assert logs[0]["decision"] == "ACCEPTED"
