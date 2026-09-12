@@ -16,14 +16,17 @@ approval before any real-world action.
 | 2 | Read tools: knowledge base, catalog, Gmail/Calendar/Slack/Notion reads, web search (Gemini grounding + Tavily), prospect research; reads run in parallel; sources in the UI | done |
 | 3 | Write tools (calendar, Slack, Notion, documents + quotes saved to Drive or the knowledge base, catalog + stock) and guardrails (turn limits + loop detection, retry/timeout, circuit breaker, undo with approval, approval TTL, per-workspace budgets) | done |
 | 4 | Context manager (prompt budget, summaries, offloaded results), versioned memory with optimistic locking (rep, customer, deal, conversation), deals in workspace-service, "what the agent remembers" review | done |
-| 5–6 | Sub-agents, autonomy layer | — |
+| 5 | Sub-agents: research, outreach and quote, handed work with `delegate`, each scoped at the gate, result-only back to the planner | done |
+| 6 | Autonomy layer | next |
 
 ## Layout
 
 ```
 app/
   api/            chat, sessions, SSE stream, approvals, memory, health + identity dependencies
-  engine/         orchestrator (plan → act → compensate graph), runner (start / pause / resume / recovery /
+  engine/         orchestrator (plan → act → compensate graph, and a step for each running sub-agent),
+                  delegation (sub-agents: what each is for, its prompt and what its result carries),
+                  runner (start / pause / resume / recovery /
                   approval expiry), events, run leases, workspace_record (outbox → workspace-service),
                   guardrails/ (turn limits + loop detection, saga compensation, tenant budgets)
   models/         router.py (complexity + failover), providers/ (gemini, openrouter), neutral types
@@ -48,7 +51,8 @@ app/
    folded into a running summary, what the agent remembers about the rep at the top), then asks the
    model router for the next step. Complex work goes to Gemini, with OpenRouter as failover; tokens
    stream to `GET /sessions/{id}/events`.
-3. `act` runs tool calls through the gate: reads the model asked for together run in parallel and
+3. `act` runs tool calls through the gate under the name of whoever asked (the orchestrator, or a
+   sub-agent it delegated to): reads the model asked for together run in parallel and
    never need approval; a write such as `send_email` runs alone, shows the reviewer a preview (built by
    the tool, e.g. a quote's priced lines or a catalog change's before → after), emits
    `awaiting_approval` and pauses durably in the Postgres checkpoint. If a write doesn't go through,
@@ -89,6 +93,7 @@ outcome is unknown (timeout, dropped connection) is reported as UNKNOWN and neve
 | `search_catalog`, `check_inventory` | read | data-pipeline catalog |
 | `web_search` | read | Tavily pages + Google Search grounding (Gemini) |
 | `research_prospect` | read | web search, condensed into a cited brief by the low-complexity route (OpenRouter) |
+| `delegate` | hands a piece of work to a sub-agent (the coordinator only); no approval, audited | the engine's own sub-agents |
 | `search_deals` | read | workspace-service deals |
 | `recall` | read | engine `agent.memory` |
 | `read_offloaded_result` | read: any part of a result too large to keep in the prompt, or passages matching a phrase | engine `agent.context_blob` |
@@ -108,6 +113,29 @@ executed write's result includes an `action_id`, which `undo_actions` takes.
 | Saga / compensation | `engine/guardrails/saga.py` | Handlers record how to reverse what they did; `undo_actions` reverses completed steps newest first after approval, each audited as `undo:<tool>` and marked COMPENSATED or COMPENSATION_FAILED. The automatic offer covers only the current request (`session.turn`). |
 | Approval TTL | runner maintenance sweep | Approvals past `SALES_AGENT_APPROVAL_TTL_SECONDS` expire; the session resumes with EXPIRED and is offered an undo of what its request already did. |
 | Per-workspace budgets | `api/chat.py`, `engine/guardrails/budgets.py` | Before a turn: concurrent runs per workspace, requests per user per minute, model tokens per workspace per UTC day (429 with a message). |
+
+## Sub-agents
+
+The orchestrator stays the only one that talks to the rep. When part of a request takes several steps in
+one area it calls `delegate`, the sub-agent works in its own short conversation, and only its **result**
+comes back to the planner — never its steps.
+
+| Sub-agent | Can use | Does |
+|---|---|---|
+| `research` | reads only | gathers facts from every source and writes a cited brief |
+| `outreach` | reads + communication | writes and sends email, calendar invites, Slack messages, Notion pages |
+| `quote` | reads + catalog + documents | prices from the catalog and produces the quote document |
+
+- **Scope is enforced at the gate**, not by prompting: a research sub-agent asking to send an email is
+  DENIED and audited under its own name, and no sub-agent has the `DELEGATE` scope, so none can start
+  another.
+- **Approvals still belong to the rep.** A sub-agent's write pauses the whole run, and the approval card
+  names the sub-agent that prepared it. Its conversation lives in the run's checkpoint, so the pause
+  resumes exactly where it stopped.
+- **Read-only sub-agents run side by side** (two research tasks think in one step); anything that can
+  pause runs on its own.
+- A sub-agent gets `max_steps` model steps (6) and is told to answer with what it has on its last one;
+  the turn's own limits (steps, tool calls, tokens, loop detection) cover everything on top of that.
 
 ## Context and memory
 
@@ -202,6 +230,10 @@ results offloaded and read back), and 24 concurrent `remember` calls from two re
 same customer all survive, in order, with old versions pruned. Unit tests cover every write tool's
 provider arguments and undo, document rendering, quote pricing, retries and the circuit breaker, the
 context manager, and the deal tools (idempotent create, merge on a concurrent edit, undo that keeps
-later changes). `--live` adds contract checks: Composio
+later changes). Phase 5's "done when" has its own pair: the orchestrator delegates one request across
+three sub-agents (two researching side by side, then outreach writing from their briefs), the approval
+names the sub-agent that asked, the planner only ever sees results, and every call is audited under the
+agent that made it; and a sub-agent reaching past its scope (sending, or delegating again) is refused at
+the gate with nothing queued for approval. `--live` adds contract checks: Composio
 accepts every argument the adapters send (reads, writes and undo steps), Gemini and the failover
 models accept every tool schema, and grounding, Tavily and the low-complexity route answer.

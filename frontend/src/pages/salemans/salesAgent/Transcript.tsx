@@ -1,8 +1,21 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { AlertTriangle, Brain, CheckCircle2, CircleHelp, CircleSlash, ExternalLink, Loader2, Search, Undo2, Wrench } from 'lucide-react';
+import {
+  AlertTriangle,
+  Brain,
+  CheckCircle2,
+  CircleHelp,
+  CircleSlash,
+  ExternalLink,
+  Loader2,
+  Search,
+  Undo2,
+  UsersRound,
+  Wrench,
+} from 'lucide-react';
 import type { SourceLink, TranscriptItem } from '../../../api/salesAgentApi';
 import { isAppLink, isWebLink } from './links';
+import { subagentTitle } from './subagents';
 
 const OUTCOME_TONE: Record<string, string> = {
   EXECUTED: 'text-emerald-700 dark:text-emerald-300 bg-emerald-500/10 border-emerald-500/25',
@@ -38,6 +51,7 @@ const TOOL_LABEL: Record<string, string> = {
   reserve_stock: 'Reserve stock',
   release_stock: 'Release reservation',
   undo_actions: 'Undo actions',
+  delegate: 'Hand over',
   search_deals: 'Search deals',
   create_deal: 'Create deal',
   update_deal: 'Update deal',
@@ -63,6 +77,8 @@ const WRITE_TOOLS = new Set([
   'update_deal',
 ]);
 const MEMORY_TOOLS = new Set(['remember', 'forget']);
+/** Handing part of the job to a sub-agent; its own steps stream in under its name. */
+const DELEGATE_TOOL = 'delegate';
 const WHERE_TO_CHECK: Record<string, string> = {
   send_email: ' (check your Sent folder)',
   create_calendar_event: ' (check your calendar)',
@@ -123,6 +139,10 @@ function describeCall(item: TranscriptItem): string {
       return [args.sku, args.quantity].filter((part) => part !== undefined).map(String).join(' · ');
     case 'undo_actions':
       return Array.isArray(args.action_ids) ? `${args.action_ids.length} action${args.action_ids.length === 1 ? '' : 's'}` : '';
+    case 'delegate': {
+      const worker = subagentTitle(typeof args.agent === 'string' ? args.agent : null);
+      return [worker, typeof args.task === 'string' ? args.task : ''].filter(Boolean).join(' · ');
+    }
     case 'create_deal':
       return [args.title, args.company].filter(Boolean).map(String).join(' · ');
     case 'update_deal':
@@ -209,7 +229,16 @@ export const Transcript: React.FC<{
           );
         case 'tool_call': {
           const tool = item.tool ?? '';
-          const CallIcon = tool === 'undo_actions' ? Undo2 : MEMORY_TOOLS.has(tool) ? Brain : WRITE_TOOLS.has(tool) ? Wrench : Search;
+          const CallIcon =
+            tool === 'undo_actions'
+              ? Undo2
+              : tool === DELEGATE_TOOL
+                ? UsersRound
+                : MEMORY_TOOLS.has(tool)
+                  ? Brain
+                  : WRITE_TOOLS.has(tool)
+                    ? Wrench
+                    : Search;
           return (
             <div key={index} className="flex items-center gap-2 text-xs text-muted-foreground pl-1">
               <CallIcon className="w-3.5 h-3.5 shrink-0" />

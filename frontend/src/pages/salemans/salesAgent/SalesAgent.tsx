@@ -162,8 +162,9 @@ export const SalesAgent: React.FC = () => {
           <h2 className="font-serif text-3xl font-bold text-primary">Sales Agent</h2>
           <p className="text-sm text-muted-foreground max-w-2xl leading-relaxed">
             Ask for research, outreach, documents, quotes, deals or catalog updates in plain language. The agent gathers
-            what it needs and prepares each action, and nothing changes until you approve it. It remembers what it learns
-            about you and your customers, and if a later step fails it asks before undoing what was already done.
+            what it needs, hands bigger pieces to its research, outreach and quote sub-agents, and prepares each action —
+            nothing changes until you approve it. It remembers what it learns about you and your customers, and if a
+            later step fails it asks before undoing what was already done.
           </p>
         </div>
         <Button

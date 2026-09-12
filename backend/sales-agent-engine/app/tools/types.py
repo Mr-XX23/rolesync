@@ -17,6 +17,8 @@ class ToolKind(StrEnum):
     # The agent's own memory: changes nothing outside the engine, so no approval (as decided for
     # this build, the rep reviews and deletes memories afterwards); audited like any call.
     MEMORY = "MEMORY"
+    # Handing work to a sub-agent: no approval (the sub-agent's own writes still pause), audited.
+    DELEGATE = "DELEGATE"
 
 
 class ToolScope(StrEnum):
@@ -29,6 +31,7 @@ class ToolScope(StrEnum):
     CRM = "CRM"  # deal records
     COMPENSATION = "COMPENSATION"  # undoing completed actions (the coordinator only)
     MEMORY = "MEMORY"  # saving and forgetting what the agent remembers
+    DELEGATE = "DELEGATE"  # handing work to a sub-agent (the coordinator only)
 
 
 class ToolCategory(StrEnum):

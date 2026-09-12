@@ -13,6 +13,10 @@
 - ``compensate`` runs when a write FAILED, gave no answer, or its approval expired while
   earlier actions of the same request had completed: it proposes ``undo_actions`` for those
   actions, which pauses for the rep like any write (nothing is undone without their OK).
+- ``delegate`` hands a piece of work to a sub-agent (research / outreach / quote). The sub-agent's
+  own short conversation lives in ``delegations`` in this state, so a write inside it pauses and
+  resumes like any other; only its result goes back to the planner. Its tools come from its scope
+  and are enforced at the gate, and read-only sub-agents can run side by side.
 - Guardrails: per-turn limits on model steps, tool calls and tokens, and loop detection,
   checked before each model call and before running what the model asked for. A breach
   ends the turn HALTED with an explanation instead of spinning.
@@ -25,6 +29,7 @@ import json
 import logging
 import operator
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated, Any, TypedDict
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -33,6 +38,8 @@ from app.core.clock import utcnow
 from app.core.context import AgentContext
 from app.core.enums import ToolOutcome
 from app.context.manager import ContextManager
+from app.engine.delegation import DELEGATE_TOOL, SUBAGENTS, note_call, reply_message, result_content
+from app.engine.delegation import start as start_delegation
 from app.engine.events import EventEmitter, EventType, emit_best_effort
 from app.engine.guardrails.budgets import TenantBudgets
 from app.engine.guardrails.limits import Halt, TurnLimits, check_before_step, check_calls
@@ -104,6 +111,15 @@ Deals and memory:
 - A tool result that was too long to keep shows "offloaded": call read_offloaded_result with its ref when you need
   the details.
 
+Sub-agents:
+- You are the only one who talks to the rep. When a part of the request takes several steps in one area, hand that
+  part to a sub-agent with delegate and work from its result: research (gathering facts anywhere and writing a cited
+  brief), outreach (writing and sending email, calendar invites, Slack messages, Notion pages) and quote (pricing
+  from the catalog and producing the quote document). Do single, simple steps yourself.
+- A sub-agent cannot see this conversation: put everything it needs in task, and the facts it should work from in
+  context. You get its result, not its steps, so pass on what the rep needs to see. Its actions still pause for the
+  rep's approval, and the approval card names it.
+
 Write in clear, professional, friendly language. Keep chat replies short unless the rep asks for detail.
 
 {time_context}"""
@@ -115,6 +131,16 @@ the rep what failed and what was undone or kept, then ask how they'd like to con
 _TOKEN_FLUSH_CHARS = 64
 _TOKEN_FLUSH_SECONDS = 0.1
 _COMPENSATE_ON = frozenset({ToolOutcome.FAILED, ToolOutcome.UNKNOWN, ToolOutcome.EXPIRED})
+
+
+@dataclass(frozen=True, slots=True)
+class _SubStep:
+    """What one sub-agent thought this step: what it wants to run, or its finished answer."""
+
+    delegation: dict[str, Any]
+    calls: list[dict[str, Any]]
+    answer: str | None
+    tokens: int
 
 
 class OrchestratorState(TypedDict, total=False):
@@ -129,6 +155,8 @@ class OrchestratorState(TypedDict, total=False):
     halt: dict[str, str] | None  # set when a guardrail stopped the turn
     rollback: dict[str, Any] | None  # completed actions to offer undoing, set by `act`
     wrap_up: bool  # after an undo decision: the model may only report back, not act again this turn
+    delegations: list[dict[str, Any]]  # sub-agents running right now, each with its own conversation
+    replan: bool  # a sub-agent just finished: the planner decides what to do with its result
 
 
 def turn_input(user_message: str, *, time_zone: str | None = None) -> dict[str, Any]:
@@ -144,6 +172,8 @@ def turn_input(user_message: str, *, time_zone: str | None = None) -> dict[str, 
         "halt": None,
         "rollback": None,
         "wrap_up": False,
+        "delegations": [],
+        "replan": False,
     }
     if time_zone:
         update["time_zone"] = time_zone
@@ -183,12 +213,14 @@ class Orchestrator:
             entry="plan",
             edges=[("compensate", "plan")],
             routers=[
-                ("plan", _after_plan, {"act": "act", "end": END}),
+                ("plan", _after_plan, {"act": "act", "plan": "plan", "end": END}),
                 ("act", _after_act, {"act": "act", "plan": "plan", "compensate": "compensate"}),
             ],
         )
 
     async def plan(self, state: dict[str, Any]) -> dict[str, Any]:
+        if state.get("delegations"):
+            return await self._plan_delegations(state)
         ctx = current_context()
         steps_taken = int(state.get("steps") or 0)
         tokens = int(state.get("tokens") or 0)
@@ -237,7 +269,7 @@ class Orchestrator:
         # own call ids across turns, so prefix it with the history position (stable on replay).
         position = len(history)
         calls = [
-            {**call.to_dict(), "gate_call_id": f"{position}-{index}-{call.id}"}
+            {**call.to_dict(), "gate_call_id": f"{position}-{index}-{call.id}", "agent": AGENT_NAME}
             for index, call in enumerate(message.tool_calls)
         ]
         update: dict[str, Any] = {
@@ -246,6 +278,7 @@ class Orchestrator:
             "steps": steps,
             "tokens": tokens + used,
             "final_answer": None if calls else message.content,
+            "replan": False,
         }
         if not calls:
             return update
@@ -269,10 +302,28 @@ class Orchestrator:
         pending = state["pending_calls"]
         batch = self._next_batch(pending)
         outcomes = await asyncio.gather(*(self._run_call(ctx, call) for call in batch))
-        update: dict[str, Any] = {
-            "messages": [reply.to_dict() for reply, _ in outcomes],
-            "pending_calls": pending[len(batch) :],
-        }
+        running = {str(item["id"]): dict(item) for item in state.get("delegations") or []}
+        started: list[dict[str, Any]] = []
+        messages: list[dict[str, Any]] = []
+
+        def deliver(call: dict[str, Any], reply: Message, result: ToolResult | None = None) -> None:
+            """A reply goes to whoever made the call: a sub-agent's own conversation, or the planner's."""
+            owner = running.get(str(call.get("delegation") or ""))
+            if owner is None:
+                messages.append(reply.to_dict())
+                return
+            owner["messages"] = [*owner["messages"], reply.to_dict()]
+            if result is not None:
+                note_call(owner, call["name"], result.outcome.value, result.summary, [s.to_dict() for s in result.sources])
+
+        for call, (reply, result) in zip(batch, outcomes, strict=True):
+            if call["name"] == DELEGATE_TOOL and result.outcome is ToolOutcome.EXECUTED:
+                # Its reply is the sub-agent's result, once there is one.
+                started.append(start_delegation(call, result.executed_args or call.get("arguments") or {}))
+                continue
+            deliver(call, reply, result)
+
+        update: dict[str, Any] = {"messages": messages, "pending_calls": pending[len(batch) :]}
 
         failed = next(
             (
@@ -283,14 +334,17 @@ class Orchestrator:
             None,
         )
         if failed is None:
+            update["delegations"] = [*running.values(), *started]
             return update
 
         call, result = failed
         remaining = pending[len(batch) :]
         if remaining:
             reason = f"not run: '{call['name']}' did not go through ({result.outcome.value}), so the plan needs another look"
-            update["messages"] += [_skipped_reply(item, reason).to_dict() for item in remaining]
+            for item in remaining:
+                deliver(item, _skipped_reply(item, reason))
             update["pending_calls"] = []
+        update["delegations"] = [*running.values(), *started]
         if result.outcome in _COMPENSATE_ON and call["name"] != UNDO_TOOL and self._compensator is not None:
             completed = await self._compensator.undoable_in_turn(ctx)
             if completed:
@@ -312,11 +366,18 @@ class Orchestrator:
         arguments = {"action_ids": list(rollback.get("action_ids") or []), "reason": str(rollback.get("reason") or "")}
         model_call_id = f"undo_{position}"
         await emit_best_effort(self._events, ctx.session_id, EventType.STEP_STARTED, {"step": "offering to undo"})
-        call = {"id": model_call_id, "name": UNDO_TOOL, "arguments": arguments, "gate_call_id": f"{position}-0-undo"}
+        call = {"id": model_call_id, "name": UNDO_TOOL, "arguments": arguments, "gate_call_id": f"{position}-0-undo", "agent": AGENT_NAME}
         reply, _ = await self._run_call(ctx, call)
         proposal = Message(role=Role.ASSISTANT, content="", tool_calls=(ToolCall(id=model_call_id, name=UNDO_TOOL, arguments=arguments),))
+        stopped = "stopped: an action in this request didn't go through"
+        closing = [reply_message(item, result_content(item, "", stopped=stopped)).to_dict() for item in state.get("delegations") or []]
         # Whatever the rep decided, this request is over: the model reports back and they choose what's next.
-        return {"messages": [proposal.to_dict(), reply.to_dict()], "rollback": None, "wrap_up": True}
+        return {
+            "messages": [*closing, proposal.to_dict(), reply.to_dict()],
+            "rollback": None,
+            "wrap_up": True,
+            "delegations": [],
+        }
 
     def _next_batch(self, pending: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """The next call alone, or, if it is a read, it and the reads directly after it."""
@@ -336,8 +397,9 @@ class Orchestrator:
 
     async def _run_call(self, ctx: AgentContext, call: dict[str, Any]) -> tuple[Message, ToolResult]:
         arguments = call.get("arguments") or {}
+        agent = str(call.get("agent") or AGENT_NAME)
         try:
-            result = await self._gate.call_tool(ctx, AGENT_NAME, call["name"], arguments, call_id=call["gate_call_id"])
+            result = await self._gate.call_tool(ctx, agent, call["name"], arguments, call_id=call["gate_call_id"])
         except Exception as exc:
             if is_control_flow_signal(exc):
                 raise  # an approval pause
@@ -355,7 +417,7 @@ class Orchestrator:
             await self._recorder.action_finished(
                 ctx,
                 idempotency_key=f"{ctx.session_id}:{call['gate_call_id']}",
-                agent=AGENT_NAME,
+                agent=agent,
                 tool=call["name"],
                 args=result.executed_args or arguments,  # a reviewer may have edited them
                 result=result,
@@ -366,11 +428,130 @@ class Orchestrator:
         reply = Message(role=Role.TOOL, content=content, tool_call_id=call["id"], name=call["name"])
         return reply, result
 
-    def _tool_specs(self) -> tuple[ToolSpec, ...]:
+    def _tool_specs(self, agent_name: str = AGENT_NAME) -> tuple[ToolSpec, ...]:
         return tuple(
             ToolSpec(name=d.name, description=d.description, parameters=_clean_schema(d.parameters_schema()))
-            for d in self._scopes.tools_for(AGENT_NAME, self._registry)
+            for d in self._scopes.tools_for(agent_name, self._registry)
         )
+
+    # ------------------------------------------------------------------ sub-agents
+    async def _plan_delegations(self, state: dict[str, Any]) -> dict[str, Any]:
+        """One model step for each running sub-agent. They are independent, so they think together;
+        what they then ask for is run by ``act`` under their own name."""
+        ctx = current_context()
+        running = [dict(item) for item in state.get("delegations") or []]
+        steps_taken = int(state.get("steps") or 0)
+        tokens = int(state.get("tokens") or 0)
+
+        halt = check_before_step(self._limits, steps_taken=steps_taken, tokens_used=tokens)
+        if halt is not None:
+            return self._stop_delegations(running, _halted(halt, steps=steps_taken), halt.message)
+
+        steps = steps_taken + 1
+        working = ", ".join(SUBAGENTS[item["agent"]].title for item in running)
+        await emit_best_effort(self._events, ctx.session_id, EventType.STEP_STARTED, {"step": f"{working} working", "number": steps})
+        outcomes = await asyncio.gather(*(self._subagent_step(ctx, item, state) for item in running))
+
+        used = sum(outcome.tokens for outcome in outcomes)
+        if self._budgets is not None and used:
+            await self._budgets.record_tokens(ctx.tenant_id, used)
+
+        calls: list[dict[str, Any]] = []
+        still: list[dict[str, Any]] = []
+        replies: list[dict[str, Any]] = []
+        for outcome in outcomes:
+            if outcome.calls:
+                calls += outcome.calls
+                still.append(outcome.delegation)
+                continue
+            replies.append((await self._finish_delegation(ctx, outcome.delegation, outcome.answer or "")).to_dict())
+
+        update: dict[str, Any] = {
+            "messages": replies,
+            "delegations": still,
+            "pending_calls": calls,
+            "steps": steps,
+            "tokens": tokens + used,
+            # A finished sub-agent hands its result back to the planner, which decides what happens next.
+            "replan": bool(replies),
+        }
+        if not calls:
+            return update
+
+        halt, counts = check_calls(
+            self._limits,
+            calls_made=int(state.get("tool_calls") or 0),
+            seen=state.get("call_counts") or {},
+            calls=[(call["name"], call.get("arguments")) for call in calls],
+        )
+        update |= {"tool_calls": int(state.get("tool_calls") or 0) + len(calls), "call_counts": counts}
+        if halt is not None:
+            stopped = self._stop_delegations(still, _halted(halt, steps=steps), halt.message)
+            return update | stopped | {"messages": [*replies, *stopped["messages"]]}
+        return update
+
+    async def _subagent_step(self, ctx: AgentContext, delegation: dict[str, Any], state: dict[str, Any]) -> _SubStep:
+        agent = SUBAGENTS[delegation["agent"]]
+        history = [Message.from_dict(item) for item in delegation.get("messages") or []]
+        steps = int(delegation.get("steps") or 0) + 1
+        last = steps >= agent.max_steps
+        system = f"{agent.prompt}\n\n{_time_context(state.get('time_zone'))}"
+        if self._context is not None:
+            rep = await self._context.rep_context(ctx)
+            if rep:
+                system = f"{system}\n\n{rep}"
+        if last:
+            system = f"{system}\n\nThis is your last step: answer now with what you have."
+        task = TaskSpec(
+            purpose=f"subagent:{agent.name}",
+            system=system,
+            messages=repair_history(history),
+            tools=self._tool_specs(agent.name),
+            complexity=Complexity.HIGH,
+            allow_tool_calls=not last,
+        )
+        completion = await self._router.complete(task)
+        message = completion.message
+        if last and message.tool_calls:
+            message = Message(role=Role.ASSISTANT, content=message.content.strip() or "I ran out of steps before finishing this.")
+        messages = [*(delegation.get("messages") or []), message.to_dict()]
+        updated = {**delegation, "messages": messages, "steps": steps}
+        calls = [
+            {
+                **call.to_dict(),
+                "gate_call_id": f"{delegation['id']}|{len(messages)}-{index}-{call.id}",
+                "agent": agent.name,
+                "delegation": delegation["id"],
+            }
+            for index, call in enumerate(message.tool_calls)
+        ]
+        used = completion.usage.input_tokens + completion.usage.output_tokens
+        return _SubStep(delegation=updated, calls=calls, answer=None if calls else message.content, tokens=used)
+
+    async def _finish_delegation(self, ctx: AgentContext, delegation: dict[str, Any], answer: str, stopped: str | None = None) -> Message:
+        content = result_content(delegation, answer, stopped=stopped)
+        if self._context is not None:
+            content = await self._context.keep_result(ctx, call_id=delegation["id"], tool=DELEGATE_TOOL, content=content)
+        agent = SUBAGENTS[delegation["agent"]]
+        await emit_best_effort(
+            self._events,
+            ctx.session_id,
+            EventType.TOOL_RESULT,
+            {
+                "call_id": delegation["id"],
+                "agent": agent.name,
+                "tool": DELEGATE_TOOL,
+                "outcome": "EXECUTED" if stopped is None else "FAILED",
+                "summary": f"{agent.title}: {(answer or stopped or '').strip()[:400]}",
+                "sources": delegation.get("sources") or [],
+            },
+        )
+        return reply_message(delegation, content)
+
+    def _stop_delegations(self, running: list[dict[str, Any]], stopped: dict[str, Any], reason: str) -> dict[str, Any]:
+        """End every running sub-agent because the turn is over, answering each delegate call."""
+        closing = [reply_message(item, result_content(item, "", stopped=reason)).to_dict() for item in running]
+        return stopped | {"messages": [*closing, *stopped["messages"]], "delegations": [], "pending_calls": []}
 
     async def _stream(self, session_id, task: TaskSpec) -> Completion:
         buffer: list[str] = []
@@ -490,7 +671,11 @@ def _skipped_reply(call: dict[str, Any], reason: str) -> Message:
 
 
 def _after_plan(state: dict[str, Any]) -> str:
-    return "act" if state.get("pending_calls") and not state.get("halt") else "end"
+    if state.get("halt"):
+        return "end"
+    if state.get("pending_calls"):
+        return "act"
+    return "plan" if state.get("replan") else "end"
 
 
 def _after_act(state: dict[str, Any]) -> str:

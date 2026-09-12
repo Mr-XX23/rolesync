@@ -252,6 +252,10 @@ class ContextManager:
         return None
 
     # ------------------------------------------------------------------ rep
+    async def rep_context(self, ctx: AgentContext) -> str:
+        """What is known about the rep, for a sub-agent's prompt (the planner gets it from ``prepare``)."""
+        return await self._rep_block(ctx)
+
     async def _rep_block(self, ctx: AgentContext) -> str:
         profile: RepProfile | None = None
         if self._profiles is not None:

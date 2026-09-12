@@ -20,6 +20,7 @@ from app.context.stores import BlobStore, MemoryStore
 from app.db.repositories import LedgerRepository, PendingActionRepository, SessionRepository
 from app.db.repositories.outbox import OutboxRepository
 from app.db.session import create_engine, create_sessionmaker
+from app.engine.delegation import DELEGATE_TOOL, delegate_tool
 from app.engine.events import RedisEventChannel
 from app.engine.guardrails.budgets import TenantBudgets
 from app.engine.guardrails.limits import TurnLimits
@@ -245,6 +246,8 @@ async def build_container(
         for definition in memory_tools(memory, blobs, workspaces, deals, facts_per_key=settings.memory_facts_per_key):
             if registry.get(definition.name) is None:
                 registry.register(definition)
+        if registry.get(DELEGATE_TOOL) is None:  # sub-agents are part of the engine, not of any vendor
+            registry.register(delegate_tool())
         scopes = AgentScopes()
         sessions = SessionRepository(sessionmaker)
         pending_actions = PendingActionRepository(sessionmaker)

@@ -128,7 +128,8 @@ class Settings(BaseSettings):
     model_web_grounding: str = Field("gemini-2.5-flash", validation_alias=_env("SALES_AGENT_MODEL_WEB_GROUNDING"))
 
     # --- orchestrator limits (per turn) + tenant budgets --------------------
-    max_steps_per_turn: int = Field(12, validation_alias=_env("SALES_AGENT_MAX_STEPS_PER_TURN"))
+    # Sub-agent steps count too, so a delegating turn needs more room than a direct one.
+    max_steps_per_turn: int = Field(18, validation_alias=_env("SALES_AGENT_MAX_STEPS_PER_TURN"))
     max_tool_calls_per_turn: int = Field(40, validation_alias=_env("SALES_AGENT_MAX_TOOL_CALLS_PER_TURN"))
     max_tokens_per_turn: int = Field(1_000_000, validation_alias=_env("SALES_AGENT_MAX_TOKENS_PER_TURN"))
     # the same tool with the same arguments more often than this in one turn is a loop

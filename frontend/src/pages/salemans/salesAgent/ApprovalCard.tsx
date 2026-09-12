@@ -4,6 +4,7 @@ import { Button } from '../../../components/common/Button';
 import type { Decision } from '../../../api/salesAgentApi';
 import type { ApprovalCardModel } from './chatState';
 import { describeKind, previewKind } from './approvalKinds';
+import { subagentTitle } from './subagents';
 import { PreviewBody, UndoPreview } from './ApprovalPreview';
 
 interface ApprovalCardProps {
@@ -39,6 +40,10 @@ export const ApprovalCard: React.FC<ApprovalCardProps> = ({ card, busy, onDecide
   const isEmail = kind === 'email';
   const isUndo = kind === 'undo';
   const { title, approve, icon: Icon } = describeKind(card);
+  const worker = subagentTitle(card.agent);
+  const preparedBy = worker
+    ? `The ${worker} prepared this and paused for your approval.`
+    : 'The agent paused for your approval before acting.';
   const [mode, setMode] = useState<'view' | 'edit' | 'reject'>('view');
   const [note, setNote] = useState('');
   const [to, setTo] = useState(asList(card.args.to).join(', '));
@@ -93,7 +98,7 @@ export const ApprovalCard: React.FC<ApprovalCardProps> = ({ card, busy, onDecide
             <p className="text-[11px] text-muted-foreground truncate">
               {isUndo
                 ? 'An action didn’t go through. Nothing is undone unless you say so.'
-                : card.reason ?? 'The agent paused for your approval before acting.'}
+                : (card.reason ?? preparedBy)}
             </p>
           </div>
         </div>
