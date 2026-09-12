@@ -126,6 +126,15 @@ export const EditSalesMetadataModal: React.FC<EditSalesMetadataModalProps> = ({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isSaving, isReclassifying, onClose]);
 
+  // Auto-dismiss the feedback banner (e.g. the reclassify success notice) so it
+  // doesn't linger. Not while an operation is in flight, and the timer resets
+  // whenever a new notice appears.
+  useEffect(() => {
+    if (!feedbackNotice || isSaving || isReclassifying) return;
+    const timer = setTimeout(() => setFeedbackNotice(null), 4000);
+    return () => clearTimeout(timer);
+  }, [feedbackNotice, isSaving, isReclassifying]);
+
   if (!isOpen || !document) return null;
 
   const currentCategoryMeta: SalesCategoryMeta = getSalesCategoryMeta(selectedCategory);
