@@ -31,10 +31,10 @@ DEFAULT_RAG_DB_NAME = "rolesync-micro-rag"
 def _fallback_url() -> str:
     """Last-resort local URL, built from the shared database env vars rather
     than hardcoded credentials."""
-    user = os.environ.get("DATABASE_PROVIDER_USERNAME", "postgres")
-    password = os.environ.get("DATABASE_PASSWORD", "postgres")
-    host = os.environ.get("RAG_DATABASE_HOST", "localhost")
-    port = os.environ.get("RAG_DATABASE_PORT", "5432")
+    user = os.environ.get("DATABASE_PROVIDER_USERNAME", "")
+    password = os.environ.get("DATABASE_PASSWORD", "")
+    host = os.environ.get("RAG_DATABASE_HOST", "")
+    port = os.environ.get("RAG_DATABASE_PORT", "")
     return f"postgresql://{user}:{password}@{host}:{port}/{DEFAULT_RAG_DB_NAME}"
 
 
