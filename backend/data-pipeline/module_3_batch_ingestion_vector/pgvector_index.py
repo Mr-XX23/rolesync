@@ -180,6 +180,30 @@ class PgVectorIndex:
             print(f"[PgVectorIndex] Count failed: {err}")
             return 0
 
+    def list_chunks(self, doc_id: str) -> Optional[list[dict[str, Any]]]:
+        """All chunks for a document, ordered. None means the index is unusable."""
+        if not self.available() or not doc_id:
+            return None
+        try:
+            with session_scope() as session:
+                rows = session.execute(
+                    text(
+                        f"""
+                        SELECT vector_id, doc_id, doc_ref_id, external_id, text, meta,
+                               chunk_index, total_chunks, prev_chunk_id, next_chunk_id,
+                               vector_dims(embedding) AS dimension, updated_at
+                        FROM {TABLE}
+                        WHERE doc_id = :doc_id OR doc_ref_id = :doc_id
+                        ORDER BY chunk_index
+                        """
+                    ),
+                    {"doc_id": doc_id},
+                ).mappings().all()
+            return [dict(row) for row in rows]
+        except Exception as err:
+            print(f"[PgVectorIndex] Chunk listing failed for {doc_id}: {err}")
+            return None
+
     def search(
         self,
         query_vector: list[float],

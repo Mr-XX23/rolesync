@@ -177,28 +177,30 @@ class VectorStore:
             )
             self._in_memory[node.chunk_id] = rec
             records.append(rec)
-
-            # Persist to MongoDB
-            if self._collection is not None:
-                try:
-                    self._collection.update_one(
-                        {"vector_id": node.chunk_id},
-                        {"$set": rec.to_dict()},
-                        upsert=True
-                    )
-                except Exception as err:
-                    print(f"[VectorStore] Mongo vector upsert error: {err}")
-
             count += 1
 
-        # Mirror the embeddings into the HNSW index so search is served by
-        # pgvector rather than a brute-force scan.
+        # pgvector is the chunk store: it serves both search and the chunk viewer.
+        indexed = 0
         if pgvector_index is not None and records:
             indexed = pgvector_index.upsert(records)
             if indexed:
                 print(f"[VectorStore] Indexed {indexed} embeddings into pgvector (HNSW).")
 
-        print(f"[VectorStore] Upserted {count} vector records into VectorStore (in-memory + MongoDB).")
+        # MongoDB only carries chunks when pgvector is unavailable, so the same
+        # embeddings are never stored twice.
+        if indexed == 0 and self._collection is not None:
+            for rec in records:
+                try:
+                    self._collection.update_one(
+                        {"vector_id": rec.vector_id},
+                        {"$set": rec.to_dict()},
+                        upsert=True,
+                    )
+                except Exception as err:
+                    print(f"[VectorStore] Mongo vector upsert error: {err}")
+
+        destination = "pgvector" if indexed else "MongoDB fallback"
+        print(f"[VectorStore] Upserted {count} vector records into VectorStore ({destination}).")
         return count
 
     def count_vectors(self, tenant_id: str, source: str, user_id: str = "") -> int:

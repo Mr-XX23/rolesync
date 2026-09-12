@@ -27,6 +27,7 @@ from module_1_document_processing.parsing.media_queue import MEDIA_PENDING
 from module_3_batch_ingestion_vector.chunker import HierarchicalChunker
 from module_3_batch_ingestion_vector.embedding_worker import EmbeddingWorker
 from module_3_batch_ingestion_vector.vector_store import VectorStore
+from module_3_batch_ingestion_vector.pgvector_index import pgvector_index
 from module_3_batch_ingestion_vector.ingestion_pipeline import BatchIngestionPipeline
 
 # The knowledge vault is shared by a workspace, like the catalog. Every route requires the
@@ -956,7 +957,28 @@ def get_document_vectors(doc_id: str, access: WorkspaceAccess = Depends(require_
                 "created_at": rec.updated_at.isoformat() if hasattr(rec.updated_at, "isoformat") else str(rec.updated_at),
             })
 
-    # 2. Look in MongoDB vector_chunks if empty
+    # 2. pgvector is the chunk store for anything indexed since the HNSW index
+    # landed; MongoDB below only still holds chunks written before that.
+    if not chunks and pgvector_index is not None:
+        for row in pgvector_index.list_chunks(doc_id) or []:
+            meta = dict(row.get("meta") or {})
+            updated = row.get("updated_at")
+            text_value = row.get("text", "") or ""
+            chunks.append({
+                "chunk_id": row.get("vector_id", ""),
+                "chunk_index": row.get("chunk_index", 0),
+                "doc_ref_id": row.get("doc_ref_id") or row.get("external_id") or doc_id,
+                "prev_chunk_id": row.get("prev_chunk_id"),
+                "next_chunk_id": row.get("next_chunk_id"),
+                "total_chunks": row.get("total_chunks", 0),
+                "text": text_value,
+                "token_count": meta.get("token_count", len(text_value.split())),
+                "dimension": row.get("dimension") or 0,
+                "metadata": meta,
+                "created_at": updated.isoformat() if hasattr(updated, "isoformat") else str(updated or ""),
+            })
+
+    # 3. Legacy MongoDB vector_chunks
     if not chunks and vector_store._collection is not None:
         try:
             cursor = vector_store._collection.find({
