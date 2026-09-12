@@ -30,6 +30,18 @@ const VerifyPhone: React.FC = () => {
     };
   }, [dispatch]);
 
+  // On successful verification, briefly show the "Phone Verified" screen, then
+  // send the user to the sign-in page. verifySuccess is left set until we
+  // navigate so RegistrationFlowGuard treats this as a completed flow rather
+  // than bouncing back to /register; unmount clears it.
+  useEffect(() => {
+    if (!verifySuccess) return;
+    const timer = setTimeout(() => {
+      navigate('/signin');
+    }, 2500);
+    return () => clearTimeout(timer);
+  }, [verifySuccess, navigate]);
+
   // Countdown timer logic
   useEffect(() => {
     if (countdown > 0 && !verifySuccess) {

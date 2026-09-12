@@ -7,7 +7,7 @@ interface RegistrationFlowGuardProps {
 }
 
 export const RegistrationFlowGuard: React.FC<RegistrationFlowGuardProps> = ({ children }) => {
-  const { isAuthenticated, tempUser, registrationStep } = useAppSelector((state) => state.auth);
+  const { isAuthenticated, tempUser, registrationStep, verifySuccess } = useAppSelector((state) => state.auth);
   const location = useLocation();
 
   // 1. Authenticated users shouldn't see registration/verification flows
@@ -15,7 +15,15 @@ export const RegistrationFlowGuard: React.FC<RegistrationFlowGuardProps> = ({ ch
     return <Navigate to="/select-role" replace />;
   }
 
-  // 2. If no active registration flow is in progress, send them back to start
+  // 2. A just-completed verification (e.g. phone verified) intentionally clears
+  // tempUser/registrationStep. That is a valid terminal state — let the page
+  // render its success screen and redirect to sign-in, rather than bouncing the
+  // user back to /register the instant registration completes.
+  if (verifySuccess) {
+    return <>{children}</>;
+  }
+
+  // 3. If no active registration flow is in progress, send them back to start
   if (!tempUser || !registrationStep) {
     return <Navigate to="/register" replace />;
   }
