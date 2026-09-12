@@ -265,7 +265,7 @@ export const EditSalesMetadataModal: React.FC<EditSalesMetadataModalProps> = ({
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-background/80 backdrop-blur-xs animate-in fade-in duration-200"
     >
       <div
-        className="bg-card border border-border w-full max-w-2xl rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[92vh] animate-in zoom-in-95 duration-200"
+        className="bg-card border border-border w-full max-w-3xl rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[92vh] animate-in zoom-in-95 duration-200"
         role="dialog"
       >
         {/* Header */}
@@ -293,11 +293,10 @@ export const EditSalesMetadataModal: React.FC<EditSalesMetadataModalProps> = ({
             onClick={onClose}
             disabled={isBusy}
             aria-label="Close modal"
-            className={`p-1.5 rounded-lg transition-colors ${
-              isBusy
+            className={`p-1.5 rounded-lg transition-colors ${isBusy
                 ? 'opacity-30 cursor-not-allowed text-muted-foreground'
                 : 'text-muted-foreground hover:text-foreground hover:bg-muted/80 cursor-pointer'
-            }`}
+              }`}
           >
             <X className="w-5 h-5" />
           </button>
@@ -308,11 +307,10 @@ export const EditSalesMetadataModal: React.FC<EditSalesMetadataModalProps> = ({
           {/* Feedback Notice */}
           {feedbackNotice && (
             <div
-              className={`p-3 rounded-xl border text-xs font-medium flex items-center gap-2 animate-in fade-in duration-200 ${
-                feedbackNotice.type === 'success'
+              className={`p-3 rounded-xl border text-xs font-medium flex items-center gap-2 animate-in fade-in duration-200 ${feedbackNotice.type === 'success'
                   ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-600 dark:text-emerald-400'
                   : 'bg-destructive/10 border-destructive/30 text-destructive'
-              }`}
+                }`}
             >
               {feedbackNotice.type === 'success' ? (
                 <CheckCircle2 className="w-4 h-4 shrink-0" />
@@ -384,11 +382,10 @@ export const EditSalesMetadataModal: React.FC<EditSalesMetadataModalProps> = ({
                     type="button"
                     disabled={isBusy}
                     onClick={() => setSelectedCategory(cat.id)}
-                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex flex-col gap-1.5 relative group ${
-                      isSelected
+                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex flex-col gap-1.5 relative group ${isSelected
                         ? `${cat.badgeBg} ${cat.borderColor} ring-2 ring-primary/40 shadow-xs`
                         : 'bg-background hover:bg-muted/40 border-border/70 hover:border-border'
-                    } ${isBusy ? 'opacity-50 cursor-not-allowed' : ''}`}
+                      } ${isBusy ? 'opacity-50 cursor-not-allowed' : ''}`}
                   >
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
@@ -444,11 +441,10 @@ export const EditSalesMetadataModal: React.FC<EditSalesMetadataModalProps> = ({
                       type="button"
                       disabled={isBusy}
                       onClick={() => setTargetCompetitor(isActive ? '' : c)}
-                      className={`text-[11px] font-medium px-2.5 py-1 rounded-lg border transition-all cursor-pointer ${
-                        isActive
+                      className={`text-[11px] font-medium px-2.5 py-1 rounded-lg border transition-all cursor-pointer ${isActive
                           ? 'bg-purple-500/15 text-purple-600 dark:text-purple-300 border-purple-500/40 font-semibold shadow-2xs'
                           : 'bg-muted/50 hover:bg-muted text-muted-foreground hover:text-foreground border-border/60'
-                      } ${isBusy ? 'opacity-50 cursor-not-allowed' : ''}`}
+                        } ${isBusy ? 'opacity-50 cursor-not-allowed' : ''}`}
                     >
                       {isActive ? `✓ ${c}` : `+${c}`}
                     </button>
@@ -483,11 +479,10 @@ export const EditSalesMetadataModal: React.FC<EditSalesMetadataModalProps> = ({
                       type="button"
                       disabled={isBusy}
                       onClick={() => setTargetIndustry(isActive ? '' : ind)}
-                      className={`text-[11px] font-medium px-2.5 py-1 rounded-lg border transition-all cursor-pointer ${
-                        isActive
+                      className={`text-[11px] font-medium px-2.5 py-1 rounded-lg border transition-all cursor-pointer ${isActive
                           ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-300 border-emerald-500/40 font-semibold shadow-2xs'
                           : 'bg-muted/50 hover:bg-muted text-muted-foreground hover:text-foreground border-border/60'
-                      } ${isBusy ? 'opacity-50 cursor-not-allowed' : ''}`}
+                        } ${isBusy ? 'opacity-50 cursor-not-allowed' : ''}`}
                     >
                       {isActive ? `✓ ${ind}` : `+${ind}`}
                     </button>
@@ -561,8 +556,8 @@ export const EditSalesMetadataModal: React.FC<EditSalesMetadataModalProps> = ({
                   tags.length >= 8
                     ? 'Maximum tags reached'
                     : tags.length === 0
-                    ? 'Type tag and press Enter (e.g. #objection, #soc2)...'
-                    : 'Add tag...'
+                      ? 'Type tag and press Enter (e.g. #objection, #soc2)...'
+                      : 'Add tag...'
                 }
                 value={newTagInput}
                 onChange={(e) => setNewTagInput(e.target.value)}
@@ -590,11 +585,10 @@ export const EditSalesMetadataModal: React.FC<EditSalesMetadataModalProps> = ({
                       type="button"
                       disabled={isBusy || alreadyAdded || tags.length >= 8}
                       onClick={() => handleAddTag(sug)}
-                      className={`text-[10px] font-mono px-2 py-0.5 rounded-md border transition-colors cursor-pointer ${
-                        alreadyAdded
+                      className={`text-[10px] font-mono px-2 py-0.5 rounded-md border transition-colors cursor-pointer ${alreadyAdded
                           ? 'bg-primary/10 text-primary/40 border-primary/10 cursor-not-allowed'
                           : 'bg-muted/40 hover:bg-muted text-muted-foreground hover:text-foreground border-border/50'
-                      }`}
+                        }`}
                     >
                       {alreadyAdded ? `✓ #${sug}` : `+#${sug}`}
                     </button>
