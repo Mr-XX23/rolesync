@@ -37,9 +37,8 @@ def test_direct_text_parser():
     assert "All services operating normally." in parsed.text_content
     assert parsed.parser_used == "local_text"
 
-def test_llama_parser_fallback():
-    service = LlamaParserService()
-    event = CanonicalEvent(
+def _pdf_event(metadata):
+    return CanonicalEvent(
         event_id="evt_pdf_01",
         event_type=EventType.CREATE,
         source="gdrive",
@@ -49,11 +48,34 @@ def test_llama_parser_fallback():
         raw_ref={},
         acl=["usr_02@example.com"],
         timestamp=datetime.now(timezone.utc),
-        metadata={"name": "Q3_Report.pdf", "mime_type": "application/pdf"},
+        metadata=metadata,
     )
-    parsed = service.parse(event)
+
+
+def test_llama_parser_reports_failure_when_nothing_is_extractable():
+    """A document with no retrievable content must NOT be fabricated into a
+    successful parse: the placeholder text used to be chunked, embedded and
+    returned as a search result."""
+    parsed = LlamaParserService().parse(
+        _pdf_event({"name": "Q3_Report.pdf", "mime_type": "application/pdf"})
+    )
     assert parsed.doc_id == "tenant_alpha:gdrive:file_pdf_99"
+    assert parsed.parse_status == "FAILED"
+    assert parsed.text_content == ""
+    assert "placeholder" not in (parsed.text_content or "").lower()
+
+
+def test_llama_parser_uses_content_the_connector_supplied():
+    """Text the connector already provided is real content and should parse."""
+    parsed = LlamaParserService().parse(
+        _pdf_event({
+            "name": "Q3_Report.pdf",
+            "mime_type": "application/pdf",
+            "text_content": "Quarterly revenue rose twelve percent across enterprise accounts.",
+        })
+    )
     assert parsed.parse_status == "SUCCESS"
+    assert "twelve percent" in parsed.text_content
     assert parsed.parser_used in ("llama_parse", "fallback_local")
 
 def test_parse_failure_store():

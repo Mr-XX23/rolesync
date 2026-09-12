@@ -4,7 +4,8 @@ class ParserCategory(str, Enum):
     LOCAL_TEXT = "local_text"          # Plain text, Markdown, Code, JSON
     LLAMA_DOCUMENT = "llama_document"  # PDF, Office Docs (docx, xlsx, pptx)
     LLAMA_IMAGE = "llama_image"        # PNG, JPEG, TIFF
-    AUDIO = "audio"                    # Audio transcripts
+    AUDIO = "audio"                    # Audio awaiting transcription
+    VIDEO = "video"                    # Video awaiting transcription
     UNSUPPORTED = "unsupported"
 
 class MIMERouter:
@@ -37,7 +38,10 @@ class MIMERouter:
         if mime.startswith("image/") or ext in ("png", "jpg", "jpeg", "tiff", "bmp"):
             return ParserCategory.LLAMA_IMAGE
 
-        if mime.startswith("audio/") or ext in ("mp3", "wav", "m4a", "ogg"):
+        if mime.startswith("audio/") or ext in ("mp3", "wav", "m4a", "ogg", "flac", "aac", "wma"):
             return ParserCategory.AUDIO
+
+        if mime.startswith("video/") or ext in ("mp4", "mov", "avi", "mkv", "webm", "m4v"):
+            return ParserCategory.VIDEO
 
         return ParserCategory.UNSUPPORTED

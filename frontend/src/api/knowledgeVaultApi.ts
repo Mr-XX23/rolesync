@@ -7,7 +7,9 @@ export interface KnowledgeDocument {
   type: string;
   size_bytes?: number;
   chunks: number;
-  status: 'Indexed' | 'Parsing' | 'Error';
+  // 'Rejected' = the document was read successfully but did not pass the ingestion
+  // gatekeeper (e.g. no usable text), so it was deliberately not indexed.
+  status: 'Indexed' | 'Parsing' | 'Error' | 'Rejected';
   created_at?: string;
   last_updated: string;
   source?: string;

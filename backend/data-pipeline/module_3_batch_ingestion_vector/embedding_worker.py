@@ -18,6 +18,11 @@ _GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 class EmbeddedChunk:
     node: TextNode
     vector: list[float]
+    # True when the vector is the deterministic pseudo-embedding rather than a
+    # real one. Callers must not treat these as searchable, and must not commit
+    # their delta hashes, or a transient API failure would be recorded as a
+    # successful index and could never be repaired.
+    is_fallback: bool = False
 
 
 class EmbeddingWorker:
@@ -44,7 +49,13 @@ class EmbeddingWorker:
         # id is env-driven so it is never accidentally set to a UI label.
         self.model_name = model_name
         self.api_model = os.environ.get("EMBEDDING_MODEL", "gemini-embedding-001").strip()
-        self.dimension = int(os.environ.get("EMBEDDING_DIMENSIONS", str(dimension)))
+        # Clamped to the same range the vector column is created with. Without
+        # this a larger value silently produces embeddings the table rejects, and
+        # every upsert would fall back to Mongo with no obvious cause.
+        requested = int(os.environ.get("EMBEDDING_DIMENSIONS", str(dimension)))
+        self.dimension = requested if 0 < requested <= 2000 else 1536
+        if self.dimension != requested:
+            print(f"[EmbeddingWorker] EMBEDDING_DIMENSIONS={requested} out of range (1-2000); using {self.dimension}.")
         self.api_key = os.environ.get("GEMINI_API_KEY", "").strip()
         self.task_type = os.environ.get("EMBEDDING_TASK_TYPE", "RETRIEVAL_DOCUMENT").strip()
         self.batch_size = max(1, int(os.environ.get("EMBEDDING_BATCH_SIZE", "100")))
@@ -59,7 +70,10 @@ class EmbeddingWorker:
         if not use_real:
             reason = "GEMINI_API_KEY not set" if not self.api_key else "requests unavailable"
             print(f"[EmbeddingWorker] {reason} — using deterministic pseudo-vectors (NOT semantic) for {len(nodes)} chunks.")
-            return [EmbeddedChunk(node=n, vector=self._pseudo_vector(n.chunk_hash)) for n in nodes]
+            return [
+                EmbeddedChunk(node=n, vector=self._pseudo_vector(n.chunk_hash), is_fallback=True)
+                for n in nodes
+            ]
 
         print(f"[EmbeddingWorker] Generating embeddings for {len(nodes)} chunks via {self.api_model} (dim={self.dimension}, task={self.task_type})...")
         embedded: list[EmbeddedChunk] = []
@@ -67,13 +81,17 @@ class EmbeddingWorker:
         for start in range(0, len(nodes), self.batch_size):
             batch = nodes[start:start + self.batch_size]
             vectors = self._embed_batch([n.text for n in batch])
-            if vectors is None:
-                print(f"[EmbeddingWorker] Batch at offset {start} failed — pseudo-vector fallback for {len(batch)} chunks.")
+            batch_failed = vectors is None
+            if batch_failed:
+                print(
+                    f"[EmbeddingWorker] Batch at offset {start} failed — pseudo-vector fallback for "
+                    f"{len(batch)} chunks; they will NOT be indexed and can be repaired by re-indexing."
+                )
                 vectors = [self._pseudo_vector(n.chunk_hash) for n in batch]
             else:
                 real_ok += len(batch)
             for node, vec in zip(batch, vectors):
-                embedded.append(EmbeddedChunk(node=node, vector=vec))
+                embedded.append(EmbeddedChunk(node=node, vector=vec, is_fallback=batch_failed))
 
         print(f"[EmbeddingWorker] Generated {len(embedded)} embeddings ({real_ok} real, {len(embedded) - real_ok} fallback).")
         return embedded

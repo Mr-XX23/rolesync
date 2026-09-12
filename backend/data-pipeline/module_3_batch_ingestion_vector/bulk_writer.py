@@ -22,9 +22,19 @@ class BulkWriter:
         # 1. Write vectors to VectorStore
         written_count = self.vector_store.upsert_vectors(embedded_chunks)
 
-        # 2. Commit chunk MD5 hash fingerprints to Delta Hash DB
-        nodes = [item.node for item in embedded_chunks]
-        self.delta_checker.commit_chunk_hashes(nodes)
-
-        print(f"[BulkWriter] Successfully wrote {written_count} vectors and committed hash DB state.")
+        # 2. Commit chunk fingerprints ONLY on success (arch.md: "write hash ONLY
+        # on success"). A fingerprint recorded for a chunk that was never stored
+        # makes the delta check skip it on every future run, so the chunk is lost
+        # permanently and re-indexing cannot repair it. Chunks that fell back to a
+        # pseudo-embedding are excluded for the same reason.
+        indexable = [item.node for item in embedded_chunks if not getattr(item, "is_fallback", False)]
+        durable = getattr(self.vector_store, "last_write_durable", True)
+        if indexable and durable and written_count >= len(indexable):
+            self.delta_checker.commit_chunk_hashes(indexable)
+            print(f"[BulkWriter] Successfully wrote {written_count} vectors and committed hash DB state.")
+        else:
+            print(
+                f"[BulkWriter] Persisted {written_count}/{len(indexable)} indexable chunks; "
+                "delta hashes NOT committed so a re-index can repair this."
+            )
         return written_count

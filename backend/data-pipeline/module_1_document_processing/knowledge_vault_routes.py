@@ -21,9 +21,14 @@ from module_1_document_processing.parsing.parser_service import ParserService
 from module_1_document_processing.classification.sales_classifier import SalesClassifier, VALID_SALES_CATEGORIES
 from module_1_document_processing.composio_connector.events.canonical_event import CanonicalEvent, EventType
 from module_1_document_processing.raw_document_store import raw_document_store
+from module_1_document_processing.pipeline import ingestion_guards as guards
+from module_1_document_processing.pipeline.canonical_store import CanonicalStore
+from module_1_document_processing.parsing.media_queue import MEDIA_PENDING
 from module_3_batch_ingestion_vector.chunker import HierarchicalChunker
+from module_3_batch_ingestion_vector.delta_checker import VersionedHashDB
 from module_3_batch_ingestion_vector.embedding_worker import EmbeddingWorker
 from module_3_batch_ingestion_vector.vector_store import VectorStore
+from module_3_batch_ingestion_vector.pgvector_index import pgvector_index
 from module_3_batch_ingestion_vector.ingestion_pipeline import BatchIngestionPipeline
 
 # The knowledge vault is shared by a workspace, like the catalog. Every route requires the
@@ -36,6 +41,10 @@ router = APIRouter(tags=["Knowledge Vault"], dependencies=[Depends(bind_identity
 vector_store = VectorStore()
 parser_service = ParserService()
 sales_classifier = SalesClassifier()
+# Lineage for manual uploads, so they are tracked exactly like connector events.
+canonical_store = CanonicalStore()
+# Embeds search queries (RETRIEVAL_QUERY) for semantic lookup.
+query_embedder = EmbeddingWorker()
 
 # MongoDB initialization for Knowledge Documents & RAG configs with resilient in-memory fallback
 MONGO_URI = os.environ.get("MONGODB_URI", "mongodb://mongodb:27017")
@@ -290,6 +299,13 @@ def plan_deduplication(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _delete_doc_record(doc_id: str):
+    # Read the record before removing it: the chunk fingerprints and the lineage
+    # row are keyed by the canonical id (tenant:source:doc_id), not the short id.
+    _record = _find_doc_record(doc_id) or {}
+    _tenant = _record.get("tenant_id", "")
+    _source = _record.get("source", "USER_UPLOAD")
+    _canonical_id = f"{_tenant}:{_source}:{doc_id}" if _tenant else doc_id
+
     if _docs_col is not None:
         try:
             _docs_col.delete_one({"doc_id": doc_id})
@@ -308,6 +324,22 @@ def _delete_doc_record(doc_id: str):
             })
         except Exception as e:
             print(f"[KnowledgeVault] Error purging mongo vectors: {e}")
+
+    # Clearing the chunk fingerprints is essential. Leaving them behind makes the
+    # delta check treat a later re-upload of the same file as "unchanged", so it
+    # skips embedding entirely and the document indexes with zero chunks.
+    try:
+        hash_db = VersionedHashDB()
+        for key in {_canonical_id, doc_id}:
+            hash_db.clear_document_hashes(key)
+    except Exception as e:
+        print(f"[KnowledgeVault] Error clearing chunk hashes for {doc_id}: {e}")
+
+    # Tombstone the lineage rather than erasing the audit trail.
+    try:
+        canonical_store.mark_status(_canonical_id, "DELETED")
+    except Exception as e:
+        print(f"[KnowledgeVault] Error tombstoning lineage for {doc_id}: {e}")
 
 
 def _process_document_background(
@@ -346,18 +378,55 @@ def _process_document_background(
             metadata={"name": filename, "mime_type": mime_type, "title": filename},
         )
 
+        # 2b. Record lineage so manual uploads are tracked exactly like connector events.
+        canonical_store.record_event(event, status="STAGED")
+
         # 3. Parse via ParserService (handles MIME routing, LlamaParse/LlamaIndex, DirectTextParser)
         parsed_doc = parser_service.parse_event(event, raw_bytes=raw_bytes)
         print(f"[KnowledgeVault] Parsed {doc_id} with parser={parsed_doc.parser_used}, status={parsed_doc.parse_status}")
 
-        if parsed_doc.parse_status == "FAILED":
+        # Audio/video is stored but cannot be indexed until transcription exists.
+        if parsed_doc.parse_status == MEDIA_PENDING:
+            canonical_store.record_event(event, status="MEDIA_PENDING")
+            print(f"[KnowledgeVault] Media parked for {doc_id} (transcription not implemented).")
             record = _find_doc_record(doc_id)
             if record:
-                record["status"] = "Error"
-                record["error_message"] = parsed_doc.metadata.get("error", "Failed to parse document content")
+                record["status"] = "Rejected"
+                record["chunks"] = 0
+                record["error_message"] = guards.MEDIA_PENDING_MESSAGE
                 record["last_updated"] = datetime.now(timezone.utc).isoformat()
                 _save_doc_record(record)
             return
+
+        if parsed_doc.parse_status == "FAILED":
+            canonical_store.record_event(event, status="PARSED_FAILED")
+            print(f"[KnowledgeVault] Parse failed for {doc_id}: {parsed_doc.metadata.get('error', 'unknown')}")
+            record = _find_doc_record(doc_id)
+            if record:
+                record["status"] = "Error"
+                record["error_message"] = guards.PARSE_FAILED_MESSAGE
+                record["last_updated"] = datetime.now(timezone.utc).isoformat()
+                _save_doc_record(record)
+            return
+
+        canonical_store.record_event(event, status="PARSED_SUCCESS")
+
+        # 3b. Memory gatekeeper - the same quality gate the connector path applies.
+        # Manual uploads previously bypassed this entirely.
+        gate = guards.evaluate_gatekeeper(parsed_doc)
+        if gate.decision != "ACCEPTED":
+            canonical_store.record_event(event, status=f"GATEKEEPER_{gate.decision}")
+            print(f"[KnowledgeVault] Gatekeeper {gate.decision} for {doc_id}: {gate.reason}")
+            record = _find_doc_record(doc_id)
+            if record:
+                record["status"] = "Rejected"
+                record["chunks"] = 0
+                record["error_message"] = guards.gatekeeper_message(gate)
+                record["last_updated"] = datetime.now(timezone.utc).isoformat()
+                _save_doc_record(record)
+            return
+
+        canonical_store.record_event(event, status="GATEKEEPER_ACCEPTED")
 
         # 4. Classify document into sales taxonomy (Battlecards, Pricing, Case Studies, etc.)
         classification = sales_classifier.classify(
@@ -402,6 +471,7 @@ def _process_document_background(
             parser_used=parsed_doc.parser_used,
             parse_status=parsed_doc.parse_status,
             metadata=parsed_doc.metadata,
+            source=source,
         )
 
         # 5. Hierarchical Chunker calibrated with active RAG parameters
@@ -428,10 +498,7 @@ def _process_document_background(
             if record:
                 record["status"] = "Error"
                 record["chunks"] = 0
-                record["error_message"] = (
-                    "No indexable text could be extracted from this document. It may be an "
-                    "image-only or empty file — re-upload or re-index to retry."
-                )
+                record["error_message"] = guards.NO_CONTENT_MESSAGE
                 record["last_updated"] = datetime.now(timezone.utc).isoformat()
                 _save_doc_record(record)
             print(f"[KnowledgeVault] {doc_id} produced 0 chunks; marked as Error (no extractable text).")
@@ -468,14 +535,16 @@ def _process_document_background(
             record["metadata"]["preview_snippet"] = (parsed_doc.text_content[:240] if parsed_doc.text_content else "").strip()
             _save_doc_record(record)
 
+        canonical_store.record_event(event, status="VECTOR_STORE_INDEXED")
         print(f"[KnowledgeVault] Successfully indexed {doc_id} via BatchIngestionPipeline with {written_count} chunks.")
 
     except Exception as err:
+        # The real error is logged; the user sees a generic, actionable message.
         print(f"[KnowledgeVault] Pipeline failure for {doc_id}: {err}")
         record = _find_doc_record(doc_id)
         if record:
             record["status"] = "Error"
-            record["error_message"] = str(err)
+            record["error_message"] = guards.PROCESSING_FAILED_MESSAGE
             record["last_updated"] = datetime.now(timezone.utc).isoformat()
             _save_doc_record(record)
 
@@ -506,7 +575,11 @@ def get_vault_stats(access: WorkspaceAccess = Depends(require_workspace_member))
             "total_chunks": total_chunks,
             "total_size_bytes": total_bytes,
             "active_sources_count": len(sources),
-            "vector_backend": "Atlas Vector / In-Memory",
+            "vector_backend": (
+                "pgvector (HNSW)"
+                if pgvector_index is not None and pgvector_index.available()
+                else "MongoDB / In-Memory"
+            ),
             "indexed_count": sum(1 for d in docs if d.get("status") == "Indexed"),
             "parsing_count": sum(1 for d in docs if d.get("status") == "Parsing"),
             "error_count": sum(1 for d in docs if d.get("status") == "Error"),
@@ -562,25 +635,25 @@ async def upload_document(
     """Uploads a single file (PDF, CSV, TXT, DOCX, PPTX, XLSX, MD, JSON), validates <=25MB, runs SalesClassifier, and processes chunks via ParserService and BatchIngestionPipeline."""
     require_writer(access)
     filename = file.filename or "uploaded_file"
-    file_ext = filename.split(".")[-1].upper() if "." in filename else "FILE"
 
-    # Enforce supported extensions
-    allowed_exts = {"PDF", "CSV", "TXT", "DOCX", "PPTX", "XLSX", "MD", "JSON", "TSV", "YAML", "YML"}
-    if file_ext not in allowed_exts:
+    # Read first so type, size and malware checks all run against the real bytes.
+    try:
+        content_bytes = await file.read()
+    except Exception as err:
+        print(f"[KnowledgeVault] Failed reading upload '{filename}': {err}")
         raise HTTPException(
             status_code=400,
-            detail=f"Unsupported file format '{file_ext}'. Allowed formats: {', '.join(sorted(allowed_exts))}",
+            detail="We could not read that file. Please try uploading it again.",
         )
 
-    # Read content and enforce size <= 25MB
-    content_bytes = await file.read()
-    size_bytes = len(content_bytes)
-    max_bytes = 25 * 1024 * 1024
-    if size_bytes > max_bytes:
-        raise HTTPException(
-            status_code=400,
-            detail=f"File exceeds maximum allowed size of 25MB (Current: {size_bytes / (1024 * 1024):.2f}MB)",
-        )
+    size_bytes = len(content_bytes or b"")
+
+    # The same guards every ingestion path runs: extension, size, malware/DLP.
+    try:
+        file_ext = guards.validate_upload(filename, size_bytes)
+        guards.scan_content(content_bytes, filename)
+    except guards.IngestionRejected as rejected:
+        raise HTTPException(status_code=rejected.status_code, detail=rejected.message)
 
     # Content-addressed de-duplication: the same file must not create a second row.
     content_hash = hashlib.sha256(content_bytes).hexdigest()
@@ -685,29 +758,43 @@ def ingest_url(
     if not re.match(r"^https?://[^\s/$.?#].[^\s]*$", url, re.IGNORECASE):
         raise HTTPException(status_code=400, detail="Invalid URL format. Must start with http:// or https://")
 
-    # Fetch webpage content safely
+    # Fetch webpage content safely. A failed fetch is reported to the caller instead
+    # of silently indexing a placeholder string as though it were real content.
     try:
         req_obj = urllib.request.Request(
             url,
             headers={"User-Agent": "RoleSync-Knowledge-Crawler/1.0 (+https://rolesync.ai)"},
         )
-        MAX_URL_BYTES = 5 * 1024 * 1024  # 5 MB
         with urllib.request.urlopen(req_obj, timeout=12) as response:
-            raw_bytes = response.read(MAX_URL_BYTES + 1)
-            if len(raw_bytes) > MAX_URL_BYTES:
-                raw_bytes = raw_bytes[:MAX_URL_BYTES]
-            raw_html = raw_bytes.decode("utf-8", errors="replace")
-
-        # Basic HTML clean up (strip script, style, and HTML tags)
-        cleaned_text = re.sub(r"<(script|style).*?</\1>", "", raw_html, flags=re.DOTALL | re.IGNORECASE)
-        cleaned_text = re.sub(r"<[^<]+?>", " ", cleaned_text)
-        cleaned_text = re.sub(r"\s+", " ", cleaned_text).strip()
+            raw_bytes = response.read(guards.MAX_URL_FETCH_BYTES + 1)
+        if len(raw_bytes) > guards.MAX_URL_FETCH_BYTES:
+            raw_bytes = raw_bytes[: guards.MAX_URL_FETCH_BYTES]
+        raw_html = raw_bytes.decode("utf-8", errors="replace")
     except Exception as err:
-        cleaned_text = f"Crawled webpage content for URL: {url}. (Fetch note: {str(err)})"
+        print(f"[KnowledgeVault] URL fetch failed for {url}: {err}")
+        raise HTTPException(status_code=502, detail=guards.URL_FETCH_FAILED_MESSAGE)
+
+    # Basic HTML clean up (strip script, style, and HTML tags)
+    cleaned_text = re.sub(r"<(script|style).*?</\1>", "", raw_html, flags=re.DOTALL | re.IGNORECASE)
+    cleaned_text = re.sub(r"<[^<]+?>", " ", cleaned_text)
+    cleaned_text = re.sub(r"\s+", " ", cleaned_text).strip()
+
+    if not cleaned_text:
+        raise HTTPException(
+            status_code=422,
+            detail="That page did not contain any readable text to index.",
+        )
 
     now_str = datetime.now(timezone.utc).isoformat()
     doc_name = req.title.strip() if req.title else url
     content_bytes = cleaned_text.encode("utf-8", errors="replace")
+
+    # Crawled pages are untrusted input and run the same scan as uploaded files.
+    try:
+        guards.scan_content(content_bytes, doc_name)
+    except guards.IngestionRejected as rejected:
+        raise HTTPException(status_code=rejected.status_code, detail=rejected.message)
+
     content_hash = hashlib.sha256(content_bytes).hexdigest()
 
     # Re-ingesting the same URL refreshes the existing row instead of creating a duplicate.
@@ -899,7 +986,28 @@ def get_document_vectors(doc_id: str, access: WorkspaceAccess = Depends(require_
                 "created_at": rec.updated_at.isoformat() if hasattr(rec.updated_at, "isoformat") else str(rec.updated_at),
             })
 
-    # 2. Look in MongoDB vector_chunks if empty
+    # 2. pgvector is the chunk store for anything indexed since the HNSW index
+    # landed; MongoDB below only still holds chunks written before that.
+    if not chunks and pgvector_index is not None:
+        for row in pgvector_index.list_chunks(doc_id) or []:
+            meta = dict(row.get("meta") or {})
+            updated = row.get("updated_at")
+            text_value = row.get("text", "") or ""
+            chunks.append({
+                "chunk_id": row.get("vector_id", ""),
+                "chunk_index": row.get("chunk_index", 0),
+                "doc_ref_id": row.get("doc_ref_id") or row.get("external_id") or doc_id,
+                "prev_chunk_id": row.get("prev_chunk_id"),
+                "next_chunk_id": row.get("next_chunk_id"),
+                "total_chunks": row.get("total_chunks", 0),
+                "text": text_value,
+                "token_count": meta.get("token_count", len(text_value.split())),
+                "dimension": row.get("dimension") or 0,
+                "metadata": meta,
+                "created_at": updated.isoformat() if hasattr(updated, "isoformat") else str(updated or ""),
+            })
+
+    # 3. Legacy MongoDB vector_chunks
     if not chunks and vector_store._collection is not None:
         try:
             cursor = vector_store._collection.find({
@@ -1196,6 +1304,67 @@ def deduplicate_documents(
                 else "No duplicate documents found — your vault is clean."
             )
         ),
+    }
+
+
+class VaultSearchRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=1000)
+    limit: int = Field(default=5, ge=1, le=50)
+    min_score: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+@router.post("/knowledge-vault/search")
+def search_knowledge_vault(
+    req: VaultSearchRequest,
+    access: WorkspaceAccess = Depends(require_workspace_member),
+):
+    """Semantic search across indexed chunks.
+
+    Embeds the query (RETRIEVAL_QUERY) and runs an ANN lookup against the HNSW
+    index, with the workspace and the caller's ACL applied as filters.
+    """
+    query_vector = query_embedder.embed_query(req.query)
+    if query_vector is None:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Semantic search is temporarily unavailable. Please try again, "
+                "or use keyword filters in the meantime."
+            ),
+        )
+
+    # Chunks are tagged with the owning user and the workspace they belong to.
+    user_acl = [f"tenant:{access.workspace_id}", f"user:{access.user_id}", access.user_id]
+
+    try:
+        matches = vector_store.search_similarity(
+            query_vector=query_vector,
+            tenant_id=access.workspace_id,
+            user_acl=user_acl,
+            limit=req.limit,
+            min_score=req.min_score,
+        )
+    except Exception as err:
+        print(f"[KnowledgeVault] Semantic search failed: {err}")
+        raise HTTPException(status_code=503, detail="Search failed. Please try again.")
+
+    return {
+        "status": "success",
+        "query": req.query,
+        "count": len(matches),
+        "results": [
+            {
+                "chunk_id": rec.vector_id,
+                "doc_id": rec.doc_id,
+                "doc_ref_id": rec.doc_ref_id or rec.external_id,
+                "chunk_index": rec.chunk_index,
+                "text": rec.text,
+                "score": rec.metadata.get("similarity_score"),
+                "category": rec.metadata.get("category"),
+                "document_type": rec.metadata.get("document_type"),
+            }
+            for rec in matches
+        ],
     }
 
 

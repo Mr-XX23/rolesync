@@ -20,9 +20,13 @@ from module_1_document_processing.composio_connector.connector_routes import (
     notion_sync_manager,
 )
 from module_1_document_processing.knowledge_vault_routes import router as knowledge_vault_router
+from module_1_document_processing.del_acl_and_reconc.reconciliation_routes import router as reconciliation_router
+from module_1_document_processing.del_acl_and_reconc.reconciliation_scheduler import reconciliation_scheduler
 from catalog.routes import router as catalog_router
 from catalog.database import init_catalog_db
 from catalog.csv_importer import catalog_import_worker
+from rag.database import init_rag_db
+from rag.state import set_persistence_available
 
 raw_eureka = os.environ.get("EUREKA_SERVER", "http://eureka-service:8761/eureka/")
 if "localhost" in raw_eureka or "127.0.0.1" in raw_eureka:
@@ -36,6 +40,20 @@ INSTANCE_HOST = os.environ.get("DATA_PIPELINE_HOSTNAME", "data-pipeline")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Initialize RAG pipeline persistence (canonical lineage, chunk hashes, checkpoints).
+    # Runs before any worker starts so the stores resolve to Postgres, not memory.
+    try:
+        rag_ready = init_rag_db()
+        set_persistence_available(rag_ready)
+        print(
+            "RAG persistence enabled (Postgres)."
+            if rag_ready
+            else "RAG persistence unavailable - falling back to in-memory stores."
+        )
+    except Exception as e:
+        set_persistence_available(False)
+        print(f"RAG persistence initialization error (using in-memory stores): {e}")
+
     # Start Staging Queue Worker
     await queue_worker.start()
 
@@ -48,6 +66,16 @@ async def lifespan(app: FastAPI):
     await calendar_sync_manager.start_scheduler()
     await slack_sync_manager.start_scheduler()
     await notion_sync_manager.start_scheduler()
+
+    # Reconciliation catches deletions and ACL drift that providers never emit
+    # as events. Only sources that can be listed exhaustively are swept.
+    reconciliation_scheduler.providers = {
+        "gdrive": gdrive_sync_manager,
+        "notion": notion_sync_manager,
+        # Keyed by the stored `source` value, not the connector's colloquial name.
+        "google_calendar": calendar_sync_manager,
+    }
+    await reconciliation_scheduler.start_scheduler()
 
 
     # Initialize catalog database and schema migrations
@@ -81,6 +109,7 @@ async def lifespan(app: FastAPI):
     yield
 
     # Stop Schedulers & Queue Worker & Deregister from Eureka
+    await reconciliation_scheduler.stop_scheduler()
     await notion_sync_manager.stop_scheduler()
     await slack_sync_manager.stop_scheduler()
     await calendar_sync_manager.stop_scheduler()
@@ -105,6 +134,8 @@ app.include_router(webhook_router, prefix="/api/v1")
 app.include_router(connector_router, prefix="/api/v1")
 app.include_router(knowledge_vault_router, prefix="/api/v1")
 app.include_router(knowledge_vault_router, prefix="/api/v1/data-pipeline")
+app.include_router(reconciliation_router, prefix="/api/v1")
+app.include_router(reconciliation_router, prefix="/api/v1/data-pipeline")
 app.include_router(catalog_router, prefix="/api/v1/catalog")
 app.include_router(catalog_router, prefix="/api/v1/data-pipeline/catalog")
 

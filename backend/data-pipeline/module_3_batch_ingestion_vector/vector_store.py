@@ -9,6 +9,13 @@ try:
 except ImportError:
     pymongo = None
 
+try:
+    # Optional HNSW index. Mongo remains the chunk record store; pgvector is
+    # the similarity index, so nothing the vault UI reads changes.
+    from module_3_batch_ingestion_vector.pgvector_index import pgvector_index
+except Exception:  # pragma: no cover
+    pgvector_index = None
+
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
     """Cosine similarity between two equal-length vectors; 0.0 if either is empty
@@ -100,6 +107,9 @@ class VectorStore:
         self.db_name = os.environ.get("MONGODB_DB_NAME", "rolesync_rag")
         self.collection_name = "vector_chunks"
         self._in_memory: dict[str, VectorRecord] = {}
+        # Whether the most recent upsert reached a durable store; the bulk writer
+        # refuses to commit delta hashes when it did not.
+        self.last_write_durable: bool = False
 
         self._mongo_client = None
         self._collection = None
@@ -116,8 +126,33 @@ class VectorStore:
                 print(f"[VectorStore] MongoDB offline / local mode ({err})")
                 self._collection = None
 
+    @staticmethod
+    def _record_from_row(row: dict[str, Any]) -> "VectorRecord":
+        """Build a VectorRecord from a pgvector search row (embedding not returned)."""
+        metadata = dict(row.get("meta") or {})
+        if row.get("score") is not None:
+            metadata["similarity_score"] = float(row["score"])
+        return VectorRecord(
+            vector_id=row.get("vector_id", ""),
+            doc_id=row.get("doc_id", ""),
+            tenant_id=row.get("tenant_id", ""),
+            user_id=row.get("user_id", ""),
+            source=row.get("source", ""),
+            external_id=row.get("external_id", ""),
+            text=row.get("text", ""),
+            vector=[],
+            acl=list(row.get("acl") or []),
+            chunk_index=row.get("chunk_index", 0),
+            doc_ref_id=row.get("doc_ref_id", ""),
+            prev_chunk_id=row.get("prev_chunk_id"),
+            next_chunk_id=row.get("next_chunk_id"),
+            total_chunks=row.get("total_chunks", 0),
+            metadata=metadata,
+        )
+
     def upsert_vectors(self, embedded_chunks: list[Any]) -> int:
         count = 0
+        records: list[VectorRecord] = []
         for item in embedded_chunks:
             node = item.node
             vector = item.vector
@@ -125,6 +160,12 @@ class VectorStore:
             prev_id = getattr(node, "prev_chunk_id", None)
             next_id = getattr(node, "next_chunk_id", None)
             tot = getattr(node, "total_chunks", 0)
+
+            # Flag pseudo-embeddings so they can be excluded from search and
+            # repaired later, instead of silently degrading retrieval quality.
+            chunk_metadata = dict(node.metadata or {})
+            if getattr(item, "is_fallback", False):
+                chunk_metadata["embedding_fallback"] = True
 
             rec = VectorRecord(
                 vector_id=node.chunk_id,
@@ -141,25 +182,68 @@ class VectorStore:
                 prev_chunk_id=prev_id,
                 next_chunk_id=next_id,
                 total_chunks=tot,
-                metadata=node.metadata,
+                metadata=chunk_metadata,
             )
             self._in_memory[node.chunk_id] = rec
+            records.append(rec)
+            count += 1
 
-            # Persist to MongoDB
-            if self._collection is not None:
+        # Pseudo-embeddings are never put in the search index: a transient
+        # provider outage must not quietly poison retrieval.
+        real_records = [r for r in records if not r.metadata.get("embedding_fallback")]
+        fallback_count = len(records) - len(real_records)
+
+        indexed = 0
+        if pgvector_index is not None and real_records:
+            indexed = pgvector_index.upsert(real_records)
+            if indexed:
+                print(f"[VectorStore] Indexed {indexed} embeddings into pgvector (HNSW).")
+                # pgvector owns these now. Holding full float vectors in-process
+                # for the lifetime of the worker is pure memory growth, and makes
+                # reads depend on which worker served the request.
+                for rec in real_records:
+                    self._in_memory.pop(rec.vector_id, None)
+
+        # MongoDB only carries chunks when pgvector is unavailable, so the same
+        # embeddings are never stored twice.
+        mongo_written = 0
+        if indexed == 0 and self._collection is not None:
+            for rec in records:
                 try:
                     self._collection.update_one(
-                        {"vector_id": node.chunk_id},
+                        {"vector_id": rec.vector_id},
                         {"$set": rec.to_dict()},
-                        upsert=True
+                        upsert=True,
                     )
+                    mongo_written += 1
                 except Exception as err:
                     print(f"[VectorStore] Mongo vector upsert error: {err}")
 
-            count += 1
+        # Did a DURABLE store accept the write? The caller gates its delta-hash
+        # commit on this: a fingerprint recorded for a chunk that only ever lived
+        # in this process would make the loss permanent.
+        self.last_write_durable = bool(indexed or mongo_written)
 
-        print(f"[VectorStore] Upserted {count} vector records into VectorStore (in-memory + MongoDB).")
-        return count
+        has_durable_store = self._collection is not None or (
+            pgvector_index is not None and pgvector_index.available()
+        )
+        if indexed:
+            result, destination = indexed, "pgvector"
+        elif mongo_written:
+            result, destination = mongo_written, "MongoDB fallback"
+        elif not has_durable_store:
+            # Fully degraded (tests / local dev with no datastore): chunks exist
+            # in-process only, and no hashes will be committed for them.
+            result, destination = count, "in-memory only"
+        else:
+            # A durable store exists but refused the write - surface that rather
+            # than reporting the document as successfully indexed.
+            result, destination = 0, "none"
+
+        if fallback_count:
+            print(f"[VectorStore] {fallback_count} chunk(s) used fallback embeddings and were NOT added to the search index.")
+        print(f"[VectorStore] Persisted {result}/{count} vector records ({destination}).")
+        return result
 
     def count_vectors(self, tenant_id: str, source: str, user_id: str = "") -> int:
         """Returns accurate count of stored vector records across MongoDB and memory."""
@@ -192,6 +276,9 @@ class VectorStore:
             except Exception as err:
                 print(f"[VectorStore] Mongo delete by doc_id error: {err}")
 
+        if pgvector_index is not None:
+            pgvector_index.delete_by_doc_id(doc_id)
+
         count = max(len(to_delete), mongo_deleted)
         print(f"[VectorStore] Purged {count} vectors for doc_id={doc_id}.")
         return count
@@ -215,6 +302,9 @@ class VectorStore:
             except Exception as err:
                 print(f"[VectorStore] Mongo purge error: {err}")
 
+        if pgvector_index is not None:
+            pgvector_index.delete_by_tenant_source_user(tenant_id, source, user_id)
+
         count = max(len(to_delete), mongo_deleted)
         print(f"[VectorStore] Purged {count} vectors for tenant={tenant_id}, source={source}, user={user_id}.")
         return count
@@ -235,6 +325,9 @@ class VectorStore:
                 )
             except Exception as err:
                 print(f"[VectorStore] Mongo ACL update error: {err}")
+
+        if pgvector_index is not None:
+            pgvector_index.update_acl_for_doc_id(doc_id, list(new_acl))
 
         print(f"[VectorStore] Updated ACLs for {count} vectors under doc_id={doc_id}.")
         return count
@@ -257,6 +350,22 @@ class VectorStore:
         Mongo has no $vectorSearch). Correct and fine at current volume; a
         pgvector/Atlas index is required to scale.
         """
+        # Prefer the HNSW index: tenant and ACL filtering run in SQL and only the
+        # top-k rows come back, instead of scanning every chunk in Python.
+        if pgvector_index is not None and query_vector:
+            rows = pgvector_index.search(
+                query_vector=query_vector,
+                tenant_id=tenant_id,
+                user_acl=list(user_acl),
+                limit=limit,
+                min_score=min_score,
+            )
+            if rows:
+                return [self._record_from_row(row) for row in rows]
+            # An empty result can simply mean the document was indexed before the
+            # HNSW index existed, so fall through to the legacy scan rather than
+            # reporting "no matches" for content that is genuinely there.
+
         user_set = set(user_acl)
         candidates: list[VectorRecord] = []
 
