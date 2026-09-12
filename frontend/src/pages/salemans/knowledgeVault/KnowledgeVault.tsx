@@ -8,6 +8,7 @@ import {
   type KnowledgeDocument,
   type VaultStats,
 } from '../../../api/knowledgeVaultApi';
+import { connectorApi } from '../../../api/connectorApi';
 import { useAdaptivePolling } from './useAdaptivePolling';
 import { VectorInspectorModal } from './VectorInspectorModal';
 import { IngestUrlModal } from './IngestUrlModal';
@@ -37,6 +38,7 @@ export const KnowledgeVault: React.FC = () => {
   const [stats, setStats] = useState<VaultStats | null>(null);
   const [isLoadingDocs, setIsLoadingDocs] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [connectedSources, setConnectedSources] = useState(0);
 
   // Ingestion & Drag States
   const [filter, setFilter] = useState<'all' | 'Indexed' | 'Parsing' | 'Error'>('all');
@@ -66,6 +68,21 @@ export const KnowledgeVault: React.FC = () => {
         ]);
         setDocuments(docsData);
         setStats(statsData);
+
+        // Best-effort: count of *connected* external connectors (Gmail/GDrive/…)
+        // for the "External Connectors" KPI card — this is the number of connected
+        // tools, not the number of document sources in the vault.
+        try {
+          const connRes = await connectorApi.getAllConnectorsStatus();
+          const NOT_CONNECTED = new Set(['Available', 'Configuration Required', 'Disconnected']);
+          const count = Object.values(connRes?.connections || {}).filter(
+            (c: any) => c && c.status && !NOT_CONNECTED.has(c.status)
+          ).length;
+          setConnectedSources(count);
+        } catch {
+          setConnectedSources(0);
+        }
+
         if (configData) {
           setChunkSize(configData.chunk_size || 512);
           setOverlap(configData.overlap || 12);
@@ -348,6 +365,7 @@ export const KnowledgeVault: React.FC = () => {
         indexedCount={documents.filter((d) => d.status === 'Indexed').length}
         fallbackChunks={documents.reduce((a, b) => a + (b.chunks || 0), 0)}
         fallbackBytes={documents.reduce((a, b) => a + (b.size_bytes || 0), 0)}
+        connectedSourcesCount={connectedSources}
         onConnectorsClick={() => navigate('/salesman/external-connector')}
       />
 

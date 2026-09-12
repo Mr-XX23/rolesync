@@ -9,6 +9,9 @@ interface VaultMetricsCardsProps {
   indexedCount: number;
   fallbackChunks: number;
   fallbackBytes: number;
+  // Number of external connectors actually connected (Gmail/GDrive/Notion/…),
+  // not the number of document sources in the vault.
+  connectedSourcesCount: number;
   onConnectorsClick: () => void;
 }
 
@@ -19,13 +22,14 @@ export const VaultMetricsCards: React.FC<VaultMetricsCardsProps> = React.memo(
     indexedCount,
     fallbackChunks,
     fallbackBytes,
+    connectedSourcesCount,
     onConnectorsClick,
   }) => {
     const totalDocs = stats?.total_documents ?? documentsCount;
     const activeIndexed = stats?.indexed_count ?? indexedCount;
     const totalChunks = stats?.total_chunks ?? fallbackChunks;
     const totalBytes = stats?.total_size_bytes ?? fallbackBytes;
-    const sourcesCount = stats?.active_sources_count ?? 0;
+    const sourcesCount = connectedSourcesCount;
     const backendLabel = stats?.vector_backend || 'MongoDB Vector Mesh';
 
     const battlecards = stats?.category_counts?.BATTLECARD || 0;
