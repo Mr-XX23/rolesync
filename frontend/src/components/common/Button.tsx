@@ -5,6 +5,7 @@ interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: 'primary' | 'outline' | 'destructive';
   isLoading?: boolean;
   icon?: React.ReactNode;
+  iconPosition?: 'left' | 'right';
   loadingText?: string;
 }
 
@@ -13,6 +14,7 @@ export const Button: React.FC<ButtonProps> = ({
   variant = 'primary',
   isLoading = false,
   icon,
+  iconPosition = 'right',
   loadingText,
   className = '',
   disabled,
@@ -45,8 +47,9 @@ export const Button: React.FC<ButtonProps> = ({
         </>
       ) : (
         <>
+          {icon && iconPosition === 'left' && <span className="flex items-center">{icon}</span>}
           {children}
-          {icon && <span className="flex items-center">{icon}</span>}
+          {icon && iconPosition === 'right' && <span className="flex items-center">{icon}</span>}
         </>
       )}
     </button>
