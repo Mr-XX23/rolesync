@@ -20,6 +20,8 @@ from module_1_document_processing.composio_connector.connector_routes import (
     notion_sync_manager,
 )
 from module_1_document_processing.knowledge_vault_routes import router as knowledge_vault_router
+from module_1_document_processing.del_acl_and_reconc.reconciliation_routes import router as reconciliation_router
+from module_1_document_processing.del_acl_and_reconc.reconciliation_scheduler import reconciliation_scheduler
 from catalog.routes import router as catalog_router
 from catalog.database import init_catalog_db
 from catalog.csv_importer import catalog_import_worker
@@ -65,6 +67,15 @@ async def lifespan(app: FastAPI):
     await slack_sync_manager.start_scheduler()
     await notion_sync_manager.start_scheduler()
 
+    # Reconciliation catches deletions and ACL drift that providers never emit
+    # as events. Only sources that can be listed exhaustively are swept.
+    reconciliation_scheduler.providers = {
+        "gdrive": gdrive_sync_manager,
+        "notion": notion_sync_manager,
+        "calendar": calendar_sync_manager,
+    }
+    await reconciliation_scheduler.start_scheduler()
+
 
     # Initialize catalog database and schema migrations
     try:
@@ -97,6 +108,7 @@ async def lifespan(app: FastAPI):
     yield
 
     # Stop Schedulers & Queue Worker & Deregister from Eureka
+    await reconciliation_scheduler.stop_scheduler()
     await notion_sync_manager.stop_scheduler()
     await slack_sync_manager.stop_scheduler()
     await calendar_sync_manager.stop_scheduler()
@@ -121,6 +133,8 @@ app.include_router(webhook_router, prefix="/api/v1")
 app.include_router(connector_router, prefix="/api/v1")
 app.include_router(knowledge_vault_router, prefix="/api/v1")
 app.include_router(knowledge_vault_router, prefix="/api/v1/data-pipeline")
+app.include_router(reconciliation_router, prefix="/api/v1")
+app.include_router(reconciliation_router, prefix="/api/v1/data-pipeline")
 app.include_router(catalog_router, prefix="/api/v1/catalog")
 app.include_router(catalog_router, prefix="/api/v1/data-pipeline/catalog")
 
