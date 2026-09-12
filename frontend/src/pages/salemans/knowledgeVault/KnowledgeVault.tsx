@@ -42,7 +42,7 @@ export const KnowledgeVault: React.FC = () => {
   const [connectedSources, setConnectedSources] = useState(0);
 
   // Ingestion & Drag States
-  const [filter, setFilter] = useState<'all' | 'Indexed' | 'Parsing' | 'Error'>('all');
+  const [filter, setFilter] = useState<'all' | 'Indexed' | 'Parsing' | 'Error' | 'Rejected'>('all');
   const [categoryFilter, setCategoryFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [dragActive, setDragActive] = useState(false);

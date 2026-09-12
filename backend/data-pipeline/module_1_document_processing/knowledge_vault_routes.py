@@ -21,6 +21,8 @@ from module_1_document_processing.parsing.parser_service import ParserService
 from module_1_document_processing.classification.sales_classifier import SalesClassifier, VALID_SALES_CATEGORIES
 from module_1_document_processing.composio_connector.events.canonical_event import CanonicalEvent, EventType
 from module_1_document_processing.raw_document_store import raw_document_store
+from module_1_document_processing.pipeline import ingestion_guards as guards
+from module_1_document_processing.pipeline.canonical_store import CanonicalStore
 from module_3_batch_ingestion_vector.chunker import HierarchicalChunker
 from module_3_batch_ingestion_vector.embedding_worker import EmbeddingWorker
 from module_3_batch_ingestion_vector.vector_store import VectorStore
@@ -36,6 +38,8 @@ router = APIRouter(tags=["Knowledge Vault"], dependencies=[Depends(bind_identity
 vector_store = VectorStore()
 parser_service = ParserService()
 sales_classifier = SalesClassifier()
+# Lineage for manual uploads, so they are tracked exactly like connector events.
+canonical_store = CanonicalStore()
 
 # MongoDB initialization for Knowledge Documents & RAG configs with resilient in-memory fallback
 MONGO_URI = os.environ.get("MONGODB_URI", "mongodb://mongodb:27017")
@@ -346,18 +350,42 @@ def _process_document_background(
             metadata={"name": filename, "mime_type": mime_type, "title": filename},
         )
 
+        # 2b. Record lineage so manual uploads are tracked exactly like connector events.
+        canonical_store.record_event(event, status="STAGED")
+
         # 3. Parse via ParserService (handles MIME routing, LlamaParse/LlamaIndex, DirectTextParser)
         parsed_doc = parser_service.parse_event(event, raw_bytes=raw_bytes)
         print(f"[KnowledgeVault] Parsed {doc_id} with parser={parsed_doc.parser_used}, status={parsed_doc.parse_status}")
 
         if parsed_doc.parse_status == "FAILED":
+            canonical_store.record_event(event, status="PARSED_FAILED")
+            print(f"[KnowledgeVault] Parse failed for {doc_id}: {parsed_doc.metadata.get('error', 'unknown')}")
             record = _find_doc_record(doc_id)
             if record:
                 record["status"] = "Error"
-                record["error_message"] = parsed_doc.metadata.get("error", "Failed to parse document content")
+                record["error_message"] = guards.PARSE_FAILED_MESSAGE
                 record["last_updated"] = datetime.now(timezone.utc).isoformat()
                 _save_doc_record(record)
             return
+
+        canonical_store.record_event(event, status="PARSED_SUCCESS")
+
+        # 3b. Memory gatekeeper - the same quality gate the connector path applies.
+        # Manual uploads previously bypassed this entirely.
+        gate = guards.evaluate_gatekeeper(parsed_doc)
+        if gate.decision != "ACCEPTED":
+            canonical_store.record_event(event, status=f"GATEKEEPER_{gate.decision}")
+            print(f"[KnowledgeVault] Gatekeeper {gate.decision} for {doc_id}: {gate.reason}")
+            record = _find_doc_record(doc_id)
+            if record:
+                record["status"] = "Rejected"
+                record["chunks"] = 0
+                record["error_message"] = guards.gatekeeper_message(gate)
+                record["last_updated"] = datetime.now(timezone.utc).isoformat()
+                _save_doc_record(record)
+            return
+
+        canonical_store.record_event(event, status="GATEKEEPER_ACCEPTED")
 
         # 4. Classify document into sales taxonomy (Battlecards, Pricing, Case Studies, etc.)
         classification = sales_classifier.classify(
@@ -428,10 +456,7 @@ def _process_document_background(
             if record:
                 record["status"] = "Error"
                 record["chunks"] = 0
-                record["error_message"] = (
-                    "No indexable text could be extracted from this document. It may be an "
-                    "image-only or empty file — re-upload or re-index to retry."
-                )
+                record["error_message"] = guards.NO_CONTENT_MESSAGE
                 record["last_updated"] = datetime.now(timezone.utc).isoformat()
                 _save_doc_record(record)
             print(f"[KnowledgeVault] {doc_id} produced 0 chunks; marked as Error (no extractable text).")
@@ -468,14 +493,16 @@ def _process_document_background(
             record["metadata"]["preview_snippet"] = (parsed_doc.text_content[:240] if parsed_doc.text_content else "").strip()
             _save_doc_record(record)
 
+        canonical_store.record_event(event, status="VECTOR_STORE_INDEXED")
         print(f"[KnowledgeVault] Successfully indexed {doc_id} via BatchIngestionPipeline with {written_count} chunks.")
 
     except Exception as err:
+        # The real error is logged; the user sees a generic, actionable message.
         print(f"[KnowledgeVault] Pipeline failure for {doc_id}: {err}")
         record = _find_doc_record(doc_id)
         if record:
             record["status"] = "Error"
-            record["error_message"] = str(err)
+            record["error_message"] = guards.PROCESSING_FAILED_MESSAGE
             record["last_updated"] = datetime.now(timezone.utc).isoformat()
             _save_doc_record(record)
 
@@ -562,25 +589,25 @@ async def upload_document(
     """Uploads a single file (PDF, CSV, TXT, DOCX, PPTX, XLSX, MD, JSON), validates <=25MB, runs SalesClassifier, and processes chunks via ParserService and BatchIngestionPipeline."""
     require_writer(access)
     filename = file.filename or "uploaded_file"
-    file_ext = filename.split(".")[-1].upper() if "." in filename else "FILE"
 
-    # Enforce supported extensions
-    allowed_exts = {"PDF", "CSV", "TXT", "DOCX", "PPTX", "XLSX", "MD", "JSON", "TSV", "YAML", "YML"}
-    if file_ext not in allowed_exts:
+    # Read first so type, size and malware checks all run against the real bytes.
+    try:
+        content_bytes = await file.read()
+    except Exception as err:
+        print(f"[KnowledgeVault] Failed reading upload '{filename}': {err}")
         raise HTTPException(
             status_code=400,
-            detail=f"Unsupported file format '{file_ext}'. Allowed formats: {', '.join(sorted(allowed_exts))}",
+            detail="We could not read that file. Please try uploading it again.",
         )
 
-    # Read content and enforce size <= 25MB
-    content_bytes = await file.read()
-    size_bytes = len(content_bytes)
-    max_bytes = 25 * 1024 * 1024
-    if size_bytes > max_bytes:
-        raise HTTPException(
-            status_code=400,
-            detail=f"File exceeds maximum allowed size of 25MB (Current: {size_bytes / (1024 * 1024):.2f}MB)",
-        )
+    size_bytes = len(content_bytes or b"")
+
+    # The same guards every ingestion path runs: extension, size, malware/DLP.
+    try:
+        file_ext = guards.validate_upload(filename, size_bytes)
+        guards.scan_content(content_bytes, filename)
+    except guards.IngestionRejected as rejected:
+        raise HTTPException(status_code=rejected.status_code, detail=rejected.message)
 
     # Content-addressed de-duplication: the same file must not create a second row.
     content_hash = hashlib.sha256(content_bytes).hexdigest()
@@ -685,29 +712,43 @@ def ingest_url(
     if not re.match(r"^https?://[^\s/$.?#].[^\s]*$", url, re.IGNORECASE):
         raise HTTPException(status_code=400, detail="Invalid URL format. Must start with http:// or https://")
 
-    # Fetch webpage content safely
+    # Fetch webpage content safely. A failed fetch is reported to the caller instead
+    # of silently indexing a placeholder string as though it were real content.
     try:
         req_obj = urllib.request.Request(
             url,
             headers={"User-Agent": "RoleSync-Knowledge-Crawler/1.0 (+https://rolesync.ai)"},
         )
-        MAX_URL_BYTES = 5 * 1024 * 1024  # 5 MB
         with urllib.request.urlopen(req_obj, timeout=12) as response:
-            raw_bytes = response.read(MAX_URL_BYTES + 1)
-            if len(raw_bytes) > MAX_URL_BYTES:
-                raw_bytes = raw_bytes[:MAX_URL_BYTES]
-            raw_html = raw_bytes.decode("utf-8", errors="replace")
-
-        # Basic HTML clean up (strip script, style, and HTML tags)
-        cleaned_text = re.sub(r"<(script|style).*?</\1>", "", raw_html, flags=re.DOTALL | re.IGNORECASE)
-        cleaned_text = re.sub(r"<[^<]+?>", " ", cleaned_text)
-        cleaned_text = re.sub(r"\s+", " ", cleaned_text).strip()
+            raw_bytes = response.read(guards.MAX_URL_FETCH_BYTES + 1)
+        if len(raw_bytes) > guards.MAX_URL_FETCH_BYTES:
+            raw_bytes = raw_bytes[: guards.MAX_URL_FETCH_BYTES]
+        raw_html = raw_bytes.decode("utf-8", errors="replace")
     except Exception as err:
-        cleaned_text = f"Crawled webpage content for URL: {url}. (Fetch note: {str(err)})"
+        print(f"[KnowledgeVault] URL fetch failed for {url}: {err}")
+        raise HTTPException(status_code=502, detail=guards.URL_FETCH_FAILED_MESSAGE)
+
+    # Basic HTML clean up (strip script, style, and HTML tags)
+    cleaned_text = re.sub(r"<(script|style).*?</\1>", "", raw_html, flags=re.DOTALL | re.IGNORECASE)
+    cleaned_text = re.sub(r"<[^<]+?>", " ", cleaned_text)
+    cleaned_text = re.sub(r"\s+", " ", cleaned_text).strip()
+
+    if not cleaned_text:
+        raise HTTPException(
+            status_code=422,
+            detail="That page did not contain any readable text to index.",
+        )
 
     now_str = datetime.now(timezone.utc).isoformat()
     doc_name = req.title.strip() if req.title else url
     content_bytes = cleaned_text.encode("utf-8", errors="replace")
+
+    # Crawled pages are untrusted input and run the same scan as uploaded files.
+    try:
+        guards.scan_content(content_bytes, doc_name)
+    except guards.IngestionRejected as rejected:
+        raise HTTPException(status_code=rejected.status_code, detail=rejected.message)
+
     content_hash = hashlib.sha256(content_bytes).hexdigest()
 
     # Re-ingesting the same URL refreshes the existing row instead of creating a duplicate.

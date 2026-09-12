@@ -9,6 +9,7 @@ from module_1_document_processing.del_acl_and_reconc.deletion_handler import Del
 from module_1_document_processing.del_acl_and_reconc.acl_sync import ACLSyncService
 from module_2_memory_gatekeeper.gatekeeper_engine import GatekeeperEngine
 from module_3_batch_ingestion_vector.ingestion_pipeline import BatchIngestionPipeline
+from module_1_document_processing.pipeline import ingestion_guards as guards
 
 class QueueWorker:
     """Asynchronous Queue Worker for offloading incoming webhooks and backfill items to the staging, parsing, gatekeeper, ingestion, deletion & ACL sync pipeline."""
@@ -23,12 +24,14 @@ class QueueWorker:
         gatekeeper_engine: GatekeeperEngine | None = None,
         ingestion_pipeline: BatchIngestionPipeline | None = None,
     ) -> None:
-        self.scanner = scanner or SecurityScanner()
+        # Shared singletons so the connector path and manual uploads enforce the
+        # exact same scan and gatekeeper policy.
+        self.scanner = scanner or guards.security_scanner
         self.store = store or CanonicalStore()
         self.parser_service = parser_service or ParserService()
         self.deletion_handler = deletion_handler or DeletionHandler(self.store)
         self.acl_sync = acl_sync or ACLSyncService(self.store)
-        self.gatekeeper_engine = gatekeeper_engine or GatekeeperEngine()
+        self.gatekeeper_engine = gatekeeper_engine or guards.gatekeeper_engine
         self.ingestion_pipeline = ingestion_pipeline or BatchIngestionPipeline()
 
         self._queue: asyncio.Queue[CanonicalEvent] = asyncio.Queue()

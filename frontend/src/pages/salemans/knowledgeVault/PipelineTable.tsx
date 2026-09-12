@@ -28,11 +28,11 @@ interface PipelineTableProps {
   filteredDocuments: KnowledgeDocument[];
   isLoading: boolean;
   isRefreshing: boolean;
-  filter: 'all' | 'Indexed' | 'Parsing' | 'Error';
+  filter: 'all' | 'Indexed' | 'Parsing' | 'Error' | 'Rejected';
   categoryFilter: string;
   searchQuery: string;
   hasIncompleteDocuments: boolean;
-  onFilterChange: (filter: 'all' | 'Indexed' | 'Parsing' | 'Error') => void;
+  onFilterChange: (filter: 'all' | 'Indexed' | 'Parsing' | 'Error' | 'Rejected') => void;
   onCategoryFilterChange: (category: string) => void;
   onSearchChange: (query: string) => void;
   onRefresh: () => void;
@@ -167,6 +167,7 @@ export const PipelineTable: React.FC<PipelineTableProps> = React.memo(
                 <option value="Indexed">Ready ({documents.filter((d) => d.status === 'Indexed').length})</option>
                 <option value="Parsing">Processing ({documents.filter((d) => d.status === 'Parsing').length})</option>
                 <option value="Error">Errors ({documents.filter((d) => d.status === 'Error').length})</option>
+                <option value="Rejected">Not indexed ({documents.filter((d) => d.status === 'Rejected').length})</option>
               </select>
               <ChevronDown className="w-3.5 h-3.5 absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
             </div>
@@ -410,6 +411,17 @@ export const PipelineTable: React.FC<PipelineTableProps> = React.memo(
                             <span className="text-[11px] uppercase tracking-wide animate-pulse">
                               Parsing...
                             </span>
+                          </div>
+                        ) : resource.status === 'Rejected' ? (
+                          <div
+                            className="flex items-center gap-1.5 text-amber-600 dark:text-amber-400 font-bold"
+                            title={
+                              resource.error_message ||
+                              'This document was not added to the Knowledge Vault.'
+                            }
+                          >
+                            <AlertCircle className="w-4 h-4" />
+                            <span className="text-[11px] uppercase tracking-wide">Not indexed</span>
                           </div>
                         ) : (
                           <div

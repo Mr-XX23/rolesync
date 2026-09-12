@@ -1,5 +1,18 @@
 export const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024; // 25 MB
-export const ALLOWED_EXTENSIONS = ['PDF', 'CSV', 'TXT', 'DOCX', 'MD', 'JSON', 'TSV', 'YAML', 'YML'];
+// Kept in sync with ALLOWED_UPLOAD_EXTS in the data-pipeline ingestion guards.
+export const ALLOWED_EXTENSIONS = [
+  'PDF',
+  'CSV',
+  'TXT',
+  'DOCX',
+  'PPTX',
+  'XLSX',
+  'MD',
+  'JSON',
+  'TSV',
+  'YAML',
+  'YML',
+];
 
 export interface RagPreset {
   label: string;
