@@ -1,6 +1,7 @@
 import os
 import uuid
 import re
+import hashlib
 import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -56,6 +57,9 @@ if pymongo and MONGO_URI:
         _docs_col.create_index([("tenant_id", pymongo.ASCENDING), ("user_id", pymongo.ASCENDING), ("status", pymongo.ASCENDING)])
         _docs_col.create_index([("tenant_id", pymongo.ASCENDING), ("user_id", pymongo.ASCENDING), ("created_at", pymongo.DESCENDING)])
         _docs_col.create_index([("doc_id", pymongo.ASCENDING)], unique=True)
+        # Non-unique on purpose: legacy duplicates may already share a content_hash, and a
+        # unique index would fail to build / reject their writes. Used for fast dedup lookups.
+        _docs_col.create_index([("tenant_id", pymongo.ASCENDING), ("content_hash", pymongo.ASCENDING)])
         _config_col.create_index([("tenant_id", pymongo.ASCENDING), ("user_id", pymongo.ASCENDING)], unique=True)
         print("[KnowledgeVault] Connected to MongoDB with compound indexes for knowledge_documents & configs.")
     except Exception as err:
@@ -190,6 +194,101 @@ def _list_doc_records(tenant_id: str, user_id: str = "") -> list[dict[str, Any]]
     return results
 
 
+def _is_healthy_doc(doc: dict[str, Any]) -> bool:
+    """A document is 'healthy' once it is indexed with at least one vector chunk. An errored,
+    still-parsing, or 0-chunk document is not — re-uploading it should repair it in place
+    rather than leave a broken duplicate row behind."""
+    return doc.get("status") == "Indexed" and int(doc.get("chunks", 0) or 0) > 0
+
+
+def _find_doc_by_content_hash(tenant_id: str, content_hash: str) -> Optional[dict[str, Any]]:
+    """Returns an existing document in this workspace whose raw bytes hash to the same value,
+    or None. Used to stop the same file from being ingested as a brand-new row."""
+    if not content_hash:
+        return None
+    if _docs_col is not None:
+        try:
+            doc = _docs_col.find_one({"tenant_id": tenant_id, "content_hash": content_hash})
+            if doc:
+                doc.pop("_id", None)
+                return doc
+            return None
+        except Exception as e:
+            print(f"[KnowledgeVault] Error looking up content_hash in MongoDB: {e}")
+    for d in _in_memory_docs.values():
+        if d.get("tenant_id") == tenant_id and d.get("content_hash") == content_hash:
+            return d
+    return None
+
+
+def _find_doc_by_url(tenant_id: str, url: str) -> Optional[dict[str, Any]]:
+    """Returns an existing URL document in this workspace for the same target URL, or None,
+    so re-ingesting a URL refreshes the same row instead of creating a duplicate."""
+    if not url:
+        return None
+    if _docs_col is not None:
+        try:
+            doc = _docs_col.find_one({"tenant_id": tenant_id, "metadata.target_url": url})
+            if doc:
+                doc.pop("_id", None)
+                return doc
+            return None
+        except Exception as e:
+            print(f"[KnowledgeVault] Error looking up target_url in MongoDB: {e}")
+    for d in _in_memory_docs.values():
+        if d.get("tenant_id") == tenant_id and (d.get("metadata") or {}).get("target_url") == url:
+            return d
+    return None
+
+
+def _dedup_group_key(doc: dict[str, Any]) -> str:
+    """Reconciliation grouping key: exact content hash when present, otherwise a conservative
+    (name, size, type) fingerprint for legacy rows uploaded before hashing existed."""
+    ch = doc.get("content_hash")
+    if ch:
+        return f"hash::{ch}"
+    return f"legacy::{doc.get('name', '')}::{doc.get('size_bytes', 0)}::{doc.get('type', '')}"
+
+
+def _dedup_keeper_rank(doc: dict[str, Any]) -> tuple:
+    """Ranks the copies in a duplicate group; the highest-ranked copy is kept. Prefer an
+    indexed doc, then the one with the most chunks, then the most recently created."""
+    return (
+        1 if doc.get("status") == "Indexed" else 0,
+        int(doc.get("chunks", 0) or 0),
+        doc.get("created_at", "") or "",
+    )
+
+
+def plan_deduplication(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Pure planning step: groups documents and, for each group with more than one copy,
+    returns which copy to keep and which to remove. No side effects — safe to preview."""
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for d in docs:
+        groups.setdefault(_dedup_group_key(d), []).append(d)
+
+    plan: list[dict[str, Any]] = []
+    for _key, items in groups.items():
+        if len(items) < 2:
+            continue
+        ordered = sorted(items, key=_dedup_keeper_rank, reverse=True)
+        keeper, losers = ordered[0], ordered[1:]
+        plan.append({
+            "name": keeper.get("name"),
+            "kept_doc_id": keeper.get("doc_id"),
+            "kept_chunks": int(keeper.get("chunks", 0) or 0),
+            "removed": [
+                {
+                    "doc_id": l.get("doc_id"),
+                    "chunks": int(l.get("chunks", 0) or 0),
+                    "status": l.get("status"),
+                }
+                for l in losers
+            ],
+        })
+    return plan
+
+
 def _delete_doc_record(doc_id: str):
     if _docs_col is not None:
         try:
@@ -320,6 +419,23 @@ def _process_document_background(
         # 6b. Update raw_document_store with generated chunk IDs
         chunk_ids = [f"{parsed_doc.doc_id}_chunk_{i}" for i in range(written_count)]
         raw_document_store.update_chunks(doc_id, total_chunks=written_count, chunk_ids=chunk_ids)
+
+        # 6c. A document that produced no vector chunks was parsed to empty text (image-only
+        # PDF, blank file, or a transient parser miss). Flag it as an error instead of leaving
+        # a "healthy" Indexed row with 0 chunks — re-uploading the same file repairs it in place.
+        if written_count <= 0:
+            record = _find_doc_record(doc_id)
+            if record:
+                record["status"] = "Error"
+                record["chunks"] = 0
+                record["error_message"] = (
+                    "No indexable text could be extracted from this document. It may be an "
+                    "image-only or empty file — re-upload or re-index to retry."
+                )
+                record["last_updated"] = datetime.now(timezone.utc).isoformat()
+                _save_doc_record(record)
+            print(f"[KnowledgeVault] {doc_id} produced 0 chunks; marked as Error (no extractable text).")
+            return
 
         # 7. Update document record to Indexed with full sales intelligence metadata
         record = _find_doc_record(doc_id)
@@ -466,8 +582,33 @@ async def upload_document(
             detail=f"File exceeds maximum allowed size of 25MB (Current: {size_bytes / (1024 * 1024):.2f}MB)",
         )
 
-    doc_id = f"doc_{uuid.uuid4().hex[:12]}"
+    # Content-addressed de-duplication: the same file must not create a second row.
+    content_hash = hashlib.sha256(content_bytes).hexdigest()
+    existing = _find_doc_by_content_hash(access.workspace_id, content_hash)
+    if existing is not None and _is_healthy_doc(existing):
+        # Already indexed — skip the duplicate and hand the caller back the original.
+        return {
+            "status": "duplicate",
+            "message": (
+                f"'{existing.get('name', filename)}' is already in your Knowledge Vault "
+                f"({int(existing.get('chunks', 0) or 0)} chunks indexed). Skipped duplicate upload."
+            ),
+            "document": existing,
+        }
+
     now_str = datetime.now(timezone.utc).isoformat()
+    reused_existing = existing is not None
+    if reused_existing:
+        # A prior attempt exists but never indexed cleanly (errored / 0 chunks / stuck parsing).
+        # Repair it in place under its original id instead of creating another duplicate row.
+        doc_id = existing["doc_id"]
+        created_at = existing.get("created_at", now_str)
+        owner_id = existing.get("user_id") or access.user_id
+        vector_store.delete_by_doc_id(doc_id)
+    else:
+        doc_id = f"doc_{uuid.uuid4().hex[:12]}"
+        created_at = now_str
+        owner_id = access.user_id
 
     # Pre-classify with filename to provide immediate UI feedback while parsing in background
     prelim_classification = sales_classifier.classify(
@@ -492,10 +633,11 @@ async def upload_document(
         "sales_tags": prelim_classification.sales_tags,
         "classifier_used": prelim_classification.classifier_used,
         "confidence_score": prelim_classification.confidence_score,
-        "created_at": now_str,
+        "created_at": created_at,
         "last_updated": now_str,
         "tenant_id": access.workspace_id,
-        "user_id": access.user_id,
+        "user_id": owner_id,
+        "content_hash": content_hash,
         "source": "USER_UPLOAD",
         "metadata": {
             "content_type": file.content_type,
@@ -511,7 +653,7 @@ async def upload_document(
         _process_document_background,
         doc_id=doc_id,
         tenant_id=access.workspace_id,
-        user_id=access.user_id,
+        user_id=owner_id,
         raw_bytes=content_bytes,
         filename=filename,
         mime_type=file.content_type or "application/octet-stream",
@@ -522,7 +664,11 @@ async def upload_document(
 
     return {
         "status": "success",
-        "message": f"File '{filename}' queued for parsing, classification, and vector embedding.",
+        "message": (
+            f"Existing document '{filename}' is being re-processed to repair its index."
+            if reused_existing
+            else f"File '{filename}' queued for parsing, classification, and vector embedding."
+        ),
         "document": doc_record,
     }
 
@@ -559,10 +705,23 @@ def ingest_url(
     except Exception as err:
         cleaned_text = f"Crawled webpage content for URL: {url}. (Fetch note: {str(err)})"
 
-    doc_id = f"url_{uuid.uuid4().hex[:12]}"
     now_str = datetime.now(timezone.utc).isoformat()
     doc_name = req.title.strip() if req.title else url
     content_bytes = cleaned_text.encode("utf-8", errors="replace")
+    content_hash = hashlib.sha256(content_bytes).hexdigest()
+
+    # Re-ingesting the same URL refreshes the existing row instead of creating a duplicate.
+    existing = _find_doc_by_url(access.workspace_id, url)
+    reused_existing = existing is not None
+    if reused_existing:
+        doc_id = existing["doc_id"]
+        created_at = existing.get("created_at", now_str)
+        owner_id = existing.get("user_id") or access.user_id
+        vector_store.delete_by_doc_id(doc_id)
+    else:
+        doc_id = f"url_{uuid.uuid4().hex[:12]}"
+        created_at = now_str
+        owner_id = access.user_id
 
     prelim_classification = sales_classifier.classify(
         filename=doc_name,
@@ -586,10 +745,11 @@ def ingest_url(
         "sales_tags": prelim_classification.sales_tags,
         "classifier_used": prelim_classification.classifier_used,
         "confidence_score": prelim_classification.confidence_score,
-        "created_at": now_str,
+        "created_at": created_at,
         "last_updated": now_str,
         "tenant_id": access.workspace_id,
-        "user_id": access.user_id,
+        "user_id": owner_id,
+        "content_hash": content_hash,
         "source": "URL_INGEST",
         "metadata": {
             "target_url": url,
@@ -605,7 +765,7 @@ def ingest_url(
         _process_document_background,
         doc_id=doc_id,
         tenant_id=access.workspace_id,
-        user_id=access.user_id,
+        user_id=owner_id,
         raw_bytes=content_bytes,
         filename=doc_name,
         mime_type="text/html",
@@ -616,7 +776,11 @@ def ingest_url(
 
     return {
         "status": "success",
-        "message": f"URL '{url}' queued for extraction and vector embedding.",
+        "message": (
+            f"URL '{url}' is being re-crawled to refresh the existing document."
+            if reused_existing
+            else f"URL '{url}' queued for extraction and vector embedding."
+        ),
         "document": doc_record,
     }
 
@@ -977,6 +1141,61 @@ def backfill_existing_chunks(access: WorkspaceAccess = Depends(require_workspace
         "status": "success",
         "updated_chunks": updated_count,
         "total_documents": len(doc_chunks_map),
+    }
+
+
+@router.post("/knowledge-vault/deduplicate")
+def deduplicate_documents(
+    confirm: bool = False,
+    access: WorkspaceAccess = Depends(require_workspace_member),
+):
+    """Finds duplicate documents in the workspace — same content hash, or same
+    name+size+type for legacy rows uploaded before hashing — and, on ``confirm=true``,
+    removes every copy except the best one (most chunks / newest indexed).
+
+    Defaults to a dry run so the caller can preview exactly what would be removed. The
+    destructive pass requires a workspace owner/admin because it can delete documents
+    uploaded by other members.
+    """
+    require_writer(access)
+    if confirm and not access.is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Only a workspace owner/admin can remove duplicate documents.",
+        )
+
+    docs = _list_doc_records(access.workspace_id)
+    plan = plan_deduplication(docs)
+
+    removed: list[str] = []
+    if confirm:
+        for group in plan:
+            for loser in group["removed"]:
+                did = loser.get("doc_id")
+                if not did:
+                    continue
+                _delete_doc_record(did)
+                raw_document_store.delete_raw_document(did)
+                removed.append(did)
+
+    removable = sum(len(g["removed"]) for g in plan)
+    return {
+        "status": "success",
+        "dry_run": not confirm,
+        "duplicate_groups": len(plan),
+        "removable_documents": removable,
+        "removed_documents": len(removed),
+        "details": plan,
+        "message": (
+            f"Removed {len(removed)} duplicate document(s); kept {len(plan)} original(s)."
+            if confirm
+            else (
+                f"Found {removable} duplicate document(s) across {len(plan)} group(s). "
+                "Re-run with confirm=true to remove them."
+                if removable
+                else "No duplicate documents found — your vault is clean."
+            )
+        ),
     }
 
 

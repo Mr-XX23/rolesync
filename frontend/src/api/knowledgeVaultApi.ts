@@ -94,6 +94,37 @@ export interface VaultStats {
   category_counts?: Record<string, number>;
 }
 
+// Result of an upload attempt. `duplicate` is true when the backend recognised the exact
+// same file already in the vault and skipped re-ingesting it.
+export interface UploadResult {
+  document: KnowledgeDocument;
+  duplicate: boolean;
+  message?: string;
+}
+
+export interface DedupRemovedDoc {
+  doc_id: string;
+  chunks: number;
+  status?: string;
+}
+
+export interface DedupGroup {
+  name?: string;
+  kept_doc_id?: string;
+  kept_chunks?: number;
+  removed: DedupRemovedDoc[];
+}
+
+export interface DedupResult {
+  status: string;
+  dry_run: boolean;
+  duplicate_groups: number;
+  removable_documents: number;
+  removed_documents: number;
+  details: DedupGroup[];
+  message: string;
+}
+
 // Local cache storage key
 const STORAGE_KEY = 'rolesync_knowledge_vault_docs';
 const CONFIG_KEY = 'rolesync_knowledge_vault_config';
@@ -249,22 +280,26 @@ export const knowledgeVaultApi = {
   },
 
   // Upload Single File to real backend pipeline
-  uploadFile: async (file: File, category?: string, targetCompetitor?: string): Promise<KnowledgeDocument> => {
+  uploadFile: async (file: File, category?: string, targetCompetitor?: string): Promise<UploadResult> => {
     const formData = new FormData();
     formData.append('file', file);
     if (category) formData.append('category', category);
     if (targetCompetitor) formData.append('target_competitor', targetCompetitor);
 
     try {
-      const response = await api.post<{ status: string; document: KnowledgeDocument }>(
+      const response = await api.post<{ status: string; document: KnowledgeDocument; message?: string }>(
         '/data-pipeline/knowledge-vault/upload',
         formData,
         inWorkspace({ 'Content-Type': 'multipart/form-data' })
       );
       if (response.data?.document) {
-        const local = getLocalDocs();
-        saveLocalDocs([response.data.document, ...local]);
-        return response.data.document;
+        const duplicate = response.data.status === 'duplicate';
+        // A skipped duplicate is already in the vault — don't add another cache row for it.
+        if (!duplicate) {
+          const local = getLocalDocs();
+          saveLocalDocs([response.data.document, ...local]);
+        }
+        return { document: response.data.document, duplicate, message: response.data.message };
       }
     } catch (err: any) {
       console.warn('[KnowledgeVaultApi] Upload API response error:', err);
@@ -511,6 +546,16 @@ export const knowledgeVaultApi = {
   backfillExistingChunks: async (): Promise<{ status: string; updated_chunks: number }> => {
     const response = await api.post<{ status: string; updated_chunks: number }>(
       '/data-pipeline/knowledge-vault/backfill-chunks',
+      undefined,
+      inWorkspace()
+    );
+    return response.data;
+  },
+
+  // Find (confirm=false, a dry run) or remove (confirm=true) duplicate documents in the vault.
+  deduplicateDocuments: async (confirm = false): Promise<DedupResult> => {
+    const response = await api.post<DedupResult>(
+      `/data-pipeline/knowledge-vault/deduplicate?confirm=${confirm}`,
       undefined,
       inWorkspace()
     );
