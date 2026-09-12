@@ -447,6 +447,7 @@ def _process_document_background(
             parser_used=parsed_doc.parser_used,
             parse_status=parsed_doc.parse_status,
             metadata=parsed_doc.metadata,
+            source=source,
         )
 
         # 5. Hierarchical Chunker calibrated with active RAG parameters

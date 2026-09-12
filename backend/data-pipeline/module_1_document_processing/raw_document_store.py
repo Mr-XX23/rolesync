@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from module_1_document_processing.raw_object_store import raw_object_store
+from module_1_document_processing.document_content_store import document_content_store
 
 try:
     import pymongo
@@ -74,6 +75,7 @@ class RawDocumentStore:
         parser_used: str = "local_text",
         parse_status: str = "SUCCESS",
         metadata: Optional[dict[str, Any]] = None,
+        source: str = "",
     ) -> dict[str, Any]:
         """Saves full document record to MongoDB and saves raw binary to disk."""
         now_str = datetime.now(timezone.utc).isoformat()
@@ -95,6 +97,17 @@ class RawDocumentStore:
         word_count = len(full_text_content.split()) if full_text_content else 0
         char_count = len(full_text_content) if full_text_content else 0
 
+        # The parsed text belongs in Postgres next to the chunks and lineage.
+        # Mongo keeps a copy only if that write could not be made, so the same
+        # text is never stored twice (and is not capped by the 16MB BSON limit).
+        text_in_postgres = document_content_store.save(
+            doc_id=doc_ref_id,
+            full_text=full_text_content or "",
+            tenant_id=tenant_id,
+            source=source or (metadata or {}).get("source", ""),
+            parser_used=parser_used,
+        )
+
         doc_record: dict[str, Any] = {
             "doc_ref_id": doc_ref_id,
             "tenant_id": tenant_id,
@@ -110,7 +123,7 @@ class RawDocumentStore:
             "target_industry": target_industry,
             "sales_summary": sales_summary,
             "sales_tags": sales_tags or [],
-            "full_text_content": full_text_content or "",
+            "full_text_content": "" if text_in_postgres else (full_text_content or ""),
             "raw_object_ref": storage_ref,
             "raw_file_path": file_path_str,
             # Cleared on re-save so previously inlined blobs stop bloating Mongo.
@@ -172,7 +185,11 @@ class RawDocumentStore:
         return self._in_memory.get(doc_ref_id)
 
     def get_full_text(self, doc_ref_id: str) -> Optional[str]:
-        """Returns the complete unfragmented markdown/text content."""
+        """Complete unfragmented text: Postgres first, Mongo for legacy records."""
+        text = document_content_store.get(doc_ref_id)
+        if text:
+            return text
+
         doc = self.get_raw_document(doc_ref_id)
         if doc:
             return doc.get("full_text_content", "")
@@ -216,8 +233,8 @@ class RawDocumentStore:
             except Exception as err:
                 print(f"[RawDocumentStore] Base64 decode error: {err}")
 
-        # 3. Fallback to full_text_content encoded as utf-8
-        text = doc.get("full_text_content")
+        # 3. Fallback to the parsed text encoded as utf-8
+        text = self.get_full_text(doc_ref_id) or doc.get("full_text_content")
         if text:
             return text.encode("utf-8", errors="replace"), filename, "text/markdown"
 
@@ -230,6 +247,9 @@ class RawDocumentStore:
         # Remove the stored object first, then any legacy on-disk copy.
         if doc and doc.get("raw_object_ref"):
             raw_object_store.delete(doc["raw_object_ref"])
+
+        # Erasure must cascade to the parsed text as well.
+        document_content_store.delete(doc_ref_id)
 
         if doc and doc.get("raw_file_path") and os.path.exists(doc["raw_file_path"]):
             try:

@@ -64,6 +64,27 @@ class CanonicalStore:
         return str(getattr(raw, "value", raw) or "")
 
     @staticmethod
+    def _json_safe(value, _depth: int = 0):
+        """Coerce an event payload into something JSONB accepts.
+
+        Connector metadata legitimately carries raw bytes (attachment payloads).
+        Passing those straight to a JSONB column raises
+        "Object of type bytes is not JSON serializable", which previously failed
+        the whole lineage write and silently dropped the document to in-memory.
+        """
+        if _depth > 6:
+            return "<nested>"
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            return f"<bytes len={len(bytes(value))}>"
+        if isinstance(value, dict):
+            return {str(k): CanonicalStore._json_safe(v, _depth + 1) for k, v in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return [CanonicalStore._json_safe(v, _depth + 1) for v in value]
+        return str(value)
+
+    @staticmethod
     def _row_to_staged(row) -> StagedDocument:
         return StagedDocument(
             doc_id=row.doc_id,
@@ -114,7 +135,7 @@ class CanonicalStore:
                             event_id=getattr(event, "event_id", "") or "",
                             event_type=self._event_type_str(event),
                             status=status,
-                            payload={"metadata": dict(getattr(event, "metadata", {}) or {})},
+                            payload={"metadata": self._json_safe(dict(getattr(event, "metadata", {}) or {}))},
                             created_at=now,
                         )
                     )
