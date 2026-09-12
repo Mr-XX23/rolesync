@@ -104,6 +104,31 @@ export interface AgentEvent {
 
 export type Decision = 'approve' | 'edit' | 'reject';
 
+/** Something the agent saved on its own while working (app/api/memory.py). */
+export interface MemoryFact {
+  id: string;
+  text: string;
+  saved_at: string | null;
+  saved_by_me: boolean;
+}
+
+/** What the agent remembers about the rep (private to them), a customer or a deal (shared by the workspace). */
+export interface MemoryView {
+  about: 'rep' | 'account' | 'deal';
+  key: string;
+  name: string | null;
+  facts: MemoryFact[]; // newest first
+  version: number;
+  updated_at: string | null;
+}
+
+export interface RememberedAccount {
+  key: string;
+  name: string;
+  facts: number;
+  updated_at: string | null;
+}
+
 // ============================================================================
 // API
 // ============================================================================
@@ -145,6 +170,44 @@ export const salesAgentApi = {
       { decision, args: options.args ?? null, note: options.note || null },
       { headers: tenantHeaders() }
     );
+    return response.data;
+  },
+
+  repMemory: async (): Promise<MemoryView> => {
+    const response = await api.get<MemoryView>(`${BASE}/memory/rep`, { headers: tenantHeaders() });
+    return response.data;
+  },
+
+  listRememberedAccounts: async (query?: string): Promise<RememberedAccount[]> => {
+    const response = await api.get<RememberedAccount[]>(`${BASE}/memory/accounts`, {
+      params: query?.trim() ? { q: query.trim() } : undefined,
+      headers: tenantHeaders(),
+    });
+    return response.data;
+  },
+
+  /** By the company's name as written on a deal, or by its key from the list. */
+  accountMemory: async (company: string): Promise<MemoryView> => {
+    const response = await api.get<MemoryView>(`${BASE}/memory/account`, { params: { company }, headers: tenantHeaders() });
+    return response.data;
+  },
+
+  dealMemory: async (dealId: string): Promise<MemoryView> => {
+    const response = await api.get<MemoryView>(`${BASE}/memory/deals/${encodeURIComponent(dealId)}`, { headers: tenantHeaders() });
+    return response.data;
+  },
+
+  /** Delete one remembered fact; returns what is remembered afterwards. */
+  forgetFact: async (memory: MemoryView, factId: string): Promise<MemoryView> => {
+    const owner =
+      memory.about === 'rep'
+        ? 'rep'
+        : memory.about === 'account'
+          ? `accounts/${encodeURIComponent(memory.key)}`
+          : `deals/${encodeURIComponent(memory.key)}`;
+    const response = await api.delete<MemoryView>(`${BASE}/memory/${owner}/facts/${encodeURIComponent(factId)}`, {
+      headers: tenantHeaders(),
+    });
     return response.data;
   },
 

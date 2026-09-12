@@ -6,6 +6,7 @@ import asyncio
 import json
 import operator
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Annotated, Any, TypedDict
 from uuid import UUID
@@ -87,8 +88,9 @@ def make_token(
 
 @dataclass
 class FakeWorkspaceService:
-    """Answers like workspace-service: ``GET /api/v1/workspaces`` (membership) and the
-    context / task / note upserts the engine uses to record agent work."""
+    """Answers like workspace-service: ``GET /api/v1/workspaces`` (membership), the rep's profile,
+    the context / task / note upserts the engine uses to record agent work, and deals (versioned,
+    409 on a stale ``expected_version``, only the owner or an OWNER/ADMIN deletes)."""
 
     memberships: dict[UUID, set[UUID]] = field(default_factory=dict)
     roles: dict[tuple[UUID, UUID], str] = field(default_factory=dict)  # (user, workspace) → role; default MEMBER
@@ -98,6 +100,11 @@ class FakeWorkspaceService:
     notes: dict[str, dict[str, Any]] = field(default_factory=dict)
     puts: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     fail_next_puts: list[int] = field(default_factory=list)  # status codes to answer the next PUTs with
+    profiles: dict[UUID, dict[str, Any]] = field(default_factory=dict)
+    deals: dict[str, dict[str, Any]] = field(default_factory=dict)
+    deal_requests: list[tuple[str, str, Any]] = field(default_factory=list)
+    # Runs before each deal PUT is applied (e.g. to simulate someone else's concurrent edit).
+    before_deal_put: Callable[[str, dict[str, Any]], None] | None = None
 
     def add(self, user_id: UUID, tenant_id: UUID) -> None:
         self.memberships.setdefault(user_id, set()).add(tenant_id)
@@ -108,6 +115,11 @@ class FakeWorkspaceService:
     def transport(self) -> httpx.MockTransport:
         def handler(request: httpx.Request) -> httpx.Response:
             self.calls += 1
+            if "/deals" in request.url.path:
+                return self._deals(request)
+            if request.url.path == "/api/v1/workspaces/profile":
+                profile = self.profiles.get(UUID(request.headers["X-User-Id"]))
+                return httpx.Response(200, json=profile) if profile is not None else httpx.Response(404)
             if request.method == "PUT":
                 return self._upsert(request)
             if request.url.path != "/api/v1/workspaces":
@@ -122,6 +134,67 @@ class FakeWorkspaceService:
             return httpx.Response(200, json=body)
 
         return httpx.MockTransport(handler)
+
+    def _deals(self, request: httpx.Request) -> httpx.Response:
+        parts = request.url.path.strip("/").split("/")  # api v1 workspaces {ws} deals [{id}]
+        workspace_id, deal_id = UUID(parts[3]), (parts[5] if len(parts) > 5 else None)
+        user_id = UUID(request.headers["X-User-Id"])
+        body = json.loads(request.content) if request.content else None
+        self.deal_requests.append((request.method, request.url.path, body))
+        if workspace_id not in self.memberships.get(user_id, set()):
+            return httpx.Response(403, json={"message": "You are not an active member of this workspace"})
+        role = self.roles.get((user_id, workspace_id), "MEMBER")
+        if request.method == "GET" and deal_id is None:
+            query = (request.url.params.get("q") or "").lower()
+            stage = request.url.params.get("stage")
+            mine = request.url.params.get("mine") == "true"
+            found = [
+                deal for deal in self.deals.values()
+                if deal["workspace_id"] == str(workspace_id)
+                and (not query or query in f"{deal['company']} {deal['title']}".lower())
+                and (not stage or deal["stage"] == stage)
+                and (not mine or deal["owner_profile_id"] == str(user_id))
+            ]
+            return httpx.Response(200, json=found)
+        deal = self.deals.get(str(deal_id))
+        if deal is not None and deal["workspace_id"] != str(workspace_id):
+            deal = None
+        if request.method == "GET":
+            return httpx.Response(200, json=deal) if deal is not None else httpx.Response(404, json={"message": "Deal not found"})
+        if role == "VIEWER":
+            return httpx.Response(403, json={"message": "Viewers cannot modify workspace records"})
+        if request.method == "DELETE":
+            if deal is None:
+                return httpx.Response(404, json={"message": "Deal not found"})
+            expected = request.url.params.get("expected_version")
+            if expected is not None and int(expected) != deal["version"]:
+                return httpx.Response(409, json={"message": "This deal was changed by someone else"})
+            del self.deals[str(deal_id)]
+            return httpx.Response(204)
+        assert body is not None
+        body = dict(body)  # the recorded request keeps what was sent
+        if self.before_deal_put is not None:
+            self.before_deal_put(str(deal_id), body)
+            deal = self.deals.get(str(deal_id))
+        expected = body.pop("expected_version", None)
+        if deal is None:
+            if expected is not None:
+                return httpx.Response(404, json={"message": "Deal not found"})
+            deal = {"deal_id": str(deal_id), "workspace_id": str(workspace_id), "owner_profile_id": str(user_id),
+                    "owner_name": "Rep", "version": -1}
+        elif expected is not None and expected != deal["version"]:
+            return httpx.Response(409, json={"message": "This deal was changed by someone else"})
+        amount = body.get("amount")
+        deal.update(
+            {key: body.get(key) for key in ("title", "company", "stage", "currency", "expected_close_date", "next_step", "notes")},
+            amount=float(amount) if amount is not None else None,
+            contacts=list(body.get("contacts") or []),
+            quotes=list(body.get("quotes") or []),
+            source=body.get("source") or "MANUAL",
+            version=deal["version"] + 1,
+        )
+        self.deals[str(deal_id)] = deal
+        return httpx.Response(200, json=deal)
 
     def _upsert(self, request: httpx.Request) -> httpx.Response:
         if self.fail_next_puts:

@@ -29,8 +29,9 @@ UndoHandler = Callable[[UndoInvocation], Awaitable[str]]
 # Which scopes each agent may use. The gate enforces this on every call, so e.g. the
 # research agent is rejected when it tries a COMMUNICATION tool, whatever the model asks.
 SCOPES: Mapping[str, frozenset[ToolScope]] = {
-    # Sole coordinator. Narrowed to reads + delegation once sub-agents own writes (Phase 5).
+    # Sole coordinator: every scope, plus the only one that may hand work to a sub-agent.
     "orchestrator": frozenset(ToolScope),
+    # Sub-agents (Phase 5). None of them has DELEGATE, so a sub-agent cannot start another.
     "research": frozenset({ToolScope.READ}),
     "outreach": frozenset({ToolScope.READ, ToolScope.COMMUNICATION}),
     "quote": frozenset({ToolScope.READ, ToolScope.CATALOG, ToolScope.DOCUMENT}),
@@ -58,8 +59,12 @@ class ToolDefinition:
     def __post_init__(self) -> None:
         if (self.kind is ToolKind.READ) != (self.scope is ToolScope.READ):
             raise ValueError(f"tool {self.name!r}: READ tools need scope READ and writes need a write scope")
-        if self.kind is ToolKind.READ and self.undo_handler is not None:
-            raise ValueError(f"tool {self.name!r}: a READ tool has nothing to undo")
+        if (self.kind is ToolKind.MEMORY) != (self.scope is ToolScope.MEMORY):
+            raise ValueError(f"tool {self.name!r}: MEMORY tools need scope MEMORY, and only they may have it")
+        if (self.kind is ToolKind.DELEGATE) != (self.scope is ToolScope.DELEGATE):
+            raise ValueError(f"tool {self.name!r}: DELEGATE tools need scope DELEGATE, and only they may have it")
+        if self.kind is not ToolKind.WRITE and self.undo_handler is not None:
+            raise ValueError(f"tool {self.name!r}: only a WRITE tool has something to undo")
 
     def parameters_schema(self) -> dict[str, Any]:
         return self.input_model.model_json_schema()

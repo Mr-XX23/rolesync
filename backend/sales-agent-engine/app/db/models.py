@@ -20,6 +20,9 @@ Deliberate additions to the plan's column lists (each needed for correctness):
 - ``workspace_outbox``: goals, tasks and notes live in workspace-service; the engine
   records them here first and a worker delivers them, so the agent never waits on (or
   fails because of) that service.
+- ``memory.written_by``: whose run (or app action) wrote a version, for the review panel.
+- ``context_blob``: tool results too large to keep in the conversation, stored once and
+  referenced from it (the plan's "offload large tool results to storage").
 """
 
 from __future__ import annotations
@@ -46,7 +49,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.context import RunMode
-from app.core.enums import PendingActionStatus, SagaStatus, SessionStatus, ToolOutcome
+from app.core.enums import MemoryScope, PendingActionStatus, SagaStatus, SessionStatus, ToolOutcome
 from app.db.base import Base, TimestampMixin, check_in
 
 
@@ -203,3 +206,42 @@ class WorkspaceOutbox(Base):
     last_error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class MemoryEntry(Base):
+    """One version of a memory (implementation-plan §3.5). Writes never update a row: they
+    insert ``version + 1``, and the unique key makes two concurrent writers of the same
+    version collide, so the loser re-reads and merges instead of overwriting (optimistic
+    locking). Old versions are pruned down to a short history."""
+
+    __tablename__ = "memory"
+    __table_args__ = (
+        CheckConstraint(check_in("scope", MemoryScope), name="scope"),
+        UniqueConstraint("tenant_id", "scope", "scope_key", "version", name="uq_memory_tenant_scope_key_version"),
+        Index("ix_memory_tenant_scope_updated", "tenant_id", "scope", "updated_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    scope: Mapped[str] = mapped_column(Text, nullable=False)
+    scope_key: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    written_by: Mapped[uuid.UUID | None] = mapped_column()
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class ContextBlob(Base):
+    """A tool result too large to keep in the conversation: stored once, referenced from it."""
+
+    __tablename__ = "context_blob"
+    __table_args__ = (UniqueConstraint("session_id", "call_id", name="uq_context_blob_session_call"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    session_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agent.session.id", ondelete="CASCADE"), nullable=False)
+    call_id: Mapped[str] = mapped_column(Text, nullable=False)
+    tool: Mapped[str] = mapped_column(Text, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    chars: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

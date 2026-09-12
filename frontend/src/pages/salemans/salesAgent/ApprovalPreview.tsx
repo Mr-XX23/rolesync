@@ -1,5 +1,6 @@
 import React from 'react';
 import { AlertTriangle, Undo2 } from 'lucide-react';
+import { formatMoney, stageLabel } from '../deals/dealFormat';
 import { previewKind } from './approvalKinds';
 import type { ApprovalCardModel } from './chatState';
 
@@ -164,12 +165,14 @@ const DocumentPreview: React.FC<{ preview: Preview }> = ({ preview }) => (
 const QuotePreview: React.FC<{ preview: Preview }> = ({ preview }) => {
   const customer = record(preview.customer);
   const contact = [customer.contact, customer.email].map(text).filter(Boolean).join(', ');
+  const deal = record(preview.deal);
   const currency = preview.currency;
   return (
     <div className="space-y-2 text-sm">
       <PreviewRow label="For" value={<span className="font-semibold">{text(customer.company)}</span>} />
       {contact && <PreviewRow label="Contact" value={contact} />}
       <PreviewRow label="Valid until" value={text(preview.valid_until)} />
+      {text(deal.title) && <PreviewRow label="Deal" value={`Add to ${text(deal.title)} (${text(deal.company)})`} />}
       <DataTable
         columns={['SKU', 'Item', 'Qty', 'Unit price', 'Discount', 'Total']}
         numeric={[2, 3, 4, 5]}
@@ -298,6 +301,71 @@ const ReleasePreview: React.FC<{ preview: Preview }> = ({ preview }) => (
   </div>
 );
 
+const DealCreatePreview: React.FC<{ preview: Preview }> = ({ preview }) => {
+  const deal = record(preview.deal);
+  const contacts = list(deal.contacts).map(record);
+  const value = formatMoney(deal.amount, deal.currency);
+  return (
+    <div className="space-y-2 text-sm">
+      <PreviewRow label="Deal" value={<span className="font-semibold">{text(deal.title)}</span>} />
+      <PreviewRow label="Company" value={text(deal.company)} />
+      <PreviewRow label="Stage" value={stageLabel(text(deal.stage))} />
+      {value && <PreviewRow label="Value" value={value} />}
+      {text(deal.expected_close_date) && <PreviewRow label="Close by" value={text(deal.expected_close_date)} />}
+      {text(deal.next_step) && <PreviewRow label="Next step" value={text(deal.next_step)} />}
+      {contacts.length > 0 && (
+        <DataTable
+          columns={['Contact', 'Email', 'Role']}
+          rows={contacts.map((contact) => [text(contact.name), text(contact.email), text(contact.role)])}
+        />
+      )}
+      {text(deal.notes) && <TextBlock value={text(deal.notes)} />}
+      <p className="text-xs text-muted-foreground">Everyone in the workspace will see this deal on the Deals page.</p>
+      {list(preview.warnings).length > 0 && <Warning>{list(preview.warnings).map(text).join('; ')}</Warning>}
+    </div>
+  );
+};
+
+const DEAL_FIELD_LABEL: Record<string, string> = { amount: 'value', expected_close_date: 'close date', next_step: 'next step' };
+
+function dealValue(field: string, value: unknown): unknown {
+  if (field === 'stage' && text(value)) return stageLabel(text(value));
+  if (field === 'amount' && typeof value === 'number') return value.toLocaleString();
+  return value;
+}
+
+const DealUpdatePreview: React.FC<{ preview: Preview }> = ({ preview }) => {
+  const added = list(preview.contacts_added).map(record);
+  return (
+    <div className="space-y-2 text-sm">
+      <PreviewRow label="Deal" value={<span className="font-semibold">{text(preview.title)}</span>} />
+      <PreviewRow label="Company" value={text(preview.company)} />
+      {list(preview.changes).length > 0 && (
+        <DataTable
+          columns={['Field', 'Change']}
+          rows={list(preview.changes).map((raw) => {
+            const change = record(raw);
+            const field = text(change.field);
+            return [
+              DEAL_FIELD_LABEL[field] ?? field.replace(/_/g, ' '),
+              <BeforeAfter before={dealValue(field, change.before)} after={dealValue(field, change.after)} />,
+            ];
+          })}
+        />
+      )}
+      {added.length > 0 && (
+        <PreviewRow
+          label="Contacts"
+          value={`Add ${added.map((contact) => [text(contact.name), text(contact.email)].filter(Boolean).join(' · ')).join(', ')}`}
+        />
+      )}
+      <p className="text-xs text-muted-foreground">
+        Only these fields change. If someone edits the deal before it’s saved, their other changes stay.
+      </p>
+    </div>
+  );
+};
+
 export const UndoPreview: React.FC<{
   preview: Preview;
   selected?: Set<string>;
@@ -366,6 +434,10 @@ export const PreviewBody: React.FC<{ card: ApprovalCardModel }> = ({ card }) => 
       return <DocumentPreview preview={preview} />;
     case 'quote':
       return <QuotePreview preview={preview} />;
+    case 'deal_create':
+      return <DealCreatePreview preview={preview} />;
+    case 'deal_update':
+      return <DealUpdatePreview preview={preview} />;
     case 'catalog_item':
       return <CatalogItemPreview preview={preview} />;
     case 'catalog_update':

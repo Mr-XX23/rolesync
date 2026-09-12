@@ -102,7 +102,8 @@ class ToolExecutor:
         self._sleep = sleep
 
     async def run(self, definition: ToolDefinition, invocation: ToolInvocation) -> ToolOutput:
-        default_attempts = self._read_attempts if definition.kind is ToolKind.READ else 1
+        # Memory writes are safe to repeat (a fact already known is not added twice).
+        default_attempts = 1 if definition.kind is ToolKind.WRITE else self._read_attempts
         attempts = definition.max_attempts or default_attempts
         return await self._call(definition, lambda: definition.handler(invocation), attempts)
 

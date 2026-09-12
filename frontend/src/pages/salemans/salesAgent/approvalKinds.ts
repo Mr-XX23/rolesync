@@ -1,7 +1,9 @@
 import {
   Archive,
   Boxes,
+  BriefcaseBusiness,
   CalendarPlus,
+  Handshake,
   FileText,
   Mail,
   MessageSquare,
@@ -31,6 +33,8 @@ const KINDS: Record<string, { title: string; approve: string; icon: LucideIcon }
   notion_page: { title: 'Create this Notion page?', approve: 'Approve & create', icon: FileText },
   document: { title: 'Create this document?', approve: 'Approve & create', icon: FileText },
   quote: { title: 'Create this quote?', approve: 'Approve & create', icon: Receipt },
+  deal_create: { title: 'Create this deal?', approve: 'Approve & create', icon: Handshake },
+  deal_update: { title: 'Update this deal?', approve: 'Approve & update', icon: BriefcaseBusiness },
   catalog_item: { title: 'Add this item to the catalog?', approve: 'Approve & add', icon: PackagePlus },
   catalog_update: { title: 'Update this catalog item?', approve: 'Approve & update', icon: Package },
   catalog_retire: { title: 'Retire this catalog item?', approve: 'Approve & retire', icon: Archive },
