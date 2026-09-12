@@ -21,8 +21,9 @@ from pydantic import Field, StringConstraints
 from app.core.clock import utcnow
 from app.core.context import AgentContext
 from app.platform.data_pipeline import DataPipelineClient, DataPipelineError
-from app.platform.workspace_client import WorkspaceDirectory
+from app.platform.workspace_client import DealsClient, WorkspaceDirectory, WorkspaceServiceError
 from app.tools.adapters.common import as_dict, as_list, pipeline_failure, plural, safe_filename
+from app.tools.adapters.deals import link_quote, unlink_quote
 from app.tools.adapters.documents import stored_file_result
 from app.tools.documents.render import FORMAT_LABELS, MIME_TYPES, Document, Section, Table, render
 from app.tools.documents.storage import DESTINATION_LABELS, DocumentStore
@@ -64,6 +65,7 @@ class CreateQuoteArgs(ToolInput):
     terms: str | None = Field(default=None, max_length=4000)
     format: Literal["pdf", "docx", "xlsx"] = "pdf"
     reserve_stock: bool = Field(default=False, description="Hold the quoted quantities of physical products in inventory")
+    deal_id: UUID | None = Field(default=None, description="Link the quote to this deal (from search_deals)")
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,7 +234,12 @@ def quote_document(number: str, quote: PricedQuote, args: CreateQuoteArgs) -> Do
 
 
 def quote_tools(
-    client: DataPipelineClient, store: DocumentStore, directory: WorkspaceDirectory, *, font_path: Path | None = None
+    client: DataPipelineClient,
+    store: DocumentStore,
+    directory: WorkspaceDirectory,
+    *,
+    font_path: Path | None = None,
+    deals: DealsClient | None = None,
 ) -> list[ToolDefinition]:
     async def price(ctx: AgentContext, args: CreateQuoteArgs) -> PricedQuote:
         skus = list(dict.fromkeys(item.sku for item in args.items))
@@ -307,6 +314,18 @@ def quote_tools(
         where, links, file_undo = stored_file_result(stored, what="quote")
         held_note = f"; reserved {plural(len(reservations), 'SKU')}" if reservations else ""
         label = file_undo.label + (" and release the reserved stock" if reservations else "")
+        linked_deal = None
+        if args.deal_id is not None and deals is not None:
+            # Linking is part of the record, not the quote: a failure is reported, not fatal.
+            entry = {"number": number, "total": float(quote.total), "currency": quote.currency, "link": stored.link,
+                     "created_at": utcnow().isoformat()}
+            problem = await link_quote(deals, ctx, args.deal_id, entry)
+            if problem is None:
+                linked_deal = str(args.deal_id)
+                held_note += "; linked to the deal"
+                label += " and remove it from the deal"
+            else:
+                held_note += f"; could not link it to the deal ({problem})"
         return ToolOutput(
             data={
                 "quote_number": number,
@@ -319,6 +338,7 @@ def quote_tools(
                 "lines": quote.summary_lines(),
                 "warnings": list(quote.warnings),
                 "reservations": reservations,
+                "deal_id": linked_deal,
                 **stored.to_dict(),
             },
             summary=f"Quote {number} for {args.customer_company}: {money(quote.currency, quote.total)} "
@@ -326,12 +346,20 @@ def quote_tools(
             ref_id=number,
             sources=links,
             undo=UndoPlan(
-                args={**file_undo.args, "reservation_ids": [r["reservation_id"] for r in reservations]}, label=label
+                args={
+                    **file_undo.args,
+                    "reservation_ids": [r["reservation_id"] for r in reservations],
+                    "deal_id": linked_deal,
+                    "quote_number": number,
+                },
+                label=label,
             ),
         )
 
     async def undo_quote(invocation: UndoInvocation) -> str:
         args = invocation.args
+        if args.get("deal_id") and deals is not None:
+            await unlink_quote(deals, invocation.ctx, UUID(str(args["deal_id"])), str(args.get("quote_number")))
         stuck = await release(invocation.ctx, [str(item) for item in as_list(args.get("reservation_ids"))])
         if stuck:
             raise ToolFailed(f"could not release reservations {', '.join(stuck)}", retryable=True)
@@ -345,6 +373,15 @@ def quote_tools(
         assert isinstance(args, CreateQuoteArgs)
         quote = await price(ctx, args)
         destination = await store.planned_destination(ctx)
+        deal = None
+        if args.deal_id is not None and deals is not None:
+            try:
+                found = await deals.get(ctx.user_id, ctx.tenant_id, args.deal_id)
+            except WorkspaceServiceError as exc:
+                raise ToolFailed(str(exc), retryable=exc.retryable) from exc
+            if found is None:
+                raise ToolInputError(f"there is no deal {args.deal_id} in this workspace")
+            deal = {"deal_id": str(args.deal_id), "title": found.get("title"), "company": found.get("company")}
         return {
             "kind": "quote",
             "customer": {"company": args.customer_company, "contact": args.customer_contact, "email": args.customer_email},
@@ -361,14 +398,17 @@ def quote_tools(
             "format": args.format,
             "format_label": FORMAT_LABELS[args.format],
             "destination": DESTINATION_LABELS[destination],
+            "deal": deal,
         }
 
     async def acl(ctx: AgentContext, args: ToolInput) -> None:
         assert isinstance(args, CreateQuoteArgs)
-        if args.reserve_stock:
+        if args.reserve_stock or args.deal_id is not None:
             role = await directory.role_in(ctx.user_id, ctx.tenant_id)
             if role is None or role == "VIEWER":
-                raise ToolAccessDenied("viewers can't reserve stock; create the quote without reserving it")
+                raise ToolAccessDenied(
+                    "viewers can't reserve stock or change deals; create the quote without reserving it or linking a deal"
+                )
 
     return [
         ToolDefinition(

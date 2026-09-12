@@ -33,6 +33,16 @@ class ToolOutcome(StrEnum):
     EXPIRED = "EXPIRED"  # approval TTL elapsed
 
 
+class MemoryScope(StrEnum):
+    """What a memory is about (implementation-plan §3.5). REP memory is private to its rep;
+    ACCOUNT and DEAL memory are shared by the workspace; CONVERSATION belongs to one session."""
+
+    CONVERSATION = "CONVERSATION"  # key: session id (the running summary of older turns)
+    REP = "REP"  # key: the rep's user id
+    DEAL = "DEAL"  # key: workspace-service deal id
+    ACCOUNT = "ACCOUNT"  # key: normalized customer company name
+
+
 class SagaStatus(StrEnum):
     PENDING = "PENDING"  # recorded before the side effect runs
     DONE = "DONE"

@@ -1,12 +1,14 @@
 import React, { useCallback, useEffect, useReducer, useRef, useState } from 'react';
-import { Bot, MessageSquarePlus, Send, Sparkles } from 'lucide-react';
+import { Bot, Brain, MessageSquarePlus, Send, Sparkles } from 'lucide-react';
 import { Button } from '../../../components/common/Button';
 import { useToast } from '../../../context/ToastContext';
+import { useAppSelector } from '../../../store';
 import { describeAgentError, salesAgentApi } from '../../../api/salesAgentApi';
 import type { AgentEventType, Decision, SessionStatus, SessionSummary } from '../../../api/salesAgentApi';
 import { ApprovalCard } from './ApprovalCard';
 import type { ApprovalCardModel } from './chatState';
 import { chatReducer, emptyChat } from './chatState';
+import { MemoryPanel } from './MemoryPanel';
 import { Transcript } from './Transcript';
 import { useSessionEvents } from './useSessionEvents';
 
@@ -39,6 +41,7 @@ const SUGGESTIONS = [
   'Email jane@acme.com a short thank-you for today’s demo and book a 30-minute follow-up with her next Tuesday at 3pm.',
   'Create a PDF quote for Acme: 10 seats of our Pro plan with 10% off, valid for 30 days.',
   'Put together a one-page Word summary of what our knowledge base says about competing with Globex.',
+  'Log a deal for Acme: 50 Pro seats at about $12,000, closing next month. Next step: send pricing to their CFO, Jane.',
 ];
 
 const StatusPill: React.FC<{ status: SessionStatus }> = ({ status }) => (
@@ -55,6 +58,8 @@ export const SalesAgent: React.FC = () => {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [deciding, setDeciding] = useState<string | null>(null);
+  const [memoryOpen, setMemoryOpen] = useState(false);
+  const role = useAppSelector((state) => state.workspace.currentWorkspace?.role);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   const refreshSessions = useCallback(async () => {
@@ -152,13 +157,23 @@ export const SalesAgent: React.FC = () => {
 
   return (
     <div className="h-full flex flex-col gap-6 pb-4 animate-in fade-in duration-500">
-      <section className="space-y-2">
-        <h2 className="font-serif text-3xl font-bold text-primary">Sales Agent</h2>
-        <p className="text-sm text-muted-foreground max-w-2xl leading-relaxed">
-          Ask for research, outreach, documents, quotes or catalog updates in plain language. The agent gathers what
-          it needs and prepares each action, and nothing changes until you approve it. If a later step fails, it asks
-          before undoing what was already done.
-        </p>
+      <section className="flex flex-col md:flex-row md:items-start justify-between gap-4">
+        <div className="space-y-2">
+          <h2 className="font-serif text-3xl font-bold text-primary">Sales Agent</h2>
+          <p className="text-sm text-muted-foreground max-w-2xl leading-relaxed">
+            Ask for research, outreach, documents, quotes, deals or catalog updates in plain language. The agent gathers
+            what it needs and prepares each action, and nothing changes until you approve it. It remembers what it learns
+            about you and your customers, and if a later step fails it asks before undoing what was already done.
+          </p>
+        </div>
+        <Button
+          variant="outline"
+          className="px-3.5 py-2 text-xs shrink-0"
+          onClick={() => setMemoryOpen(true)}
+          icon={<Brain className="w-3.5 h-3.5" />}
+        >
+          What it remembers
+        </Button>
       </section>
 
       <div className="flex-1 min-h-[34rem] grid grid-cols-1 lg:grid-cols-[17rem_1fr] gap-6">
@@ -301,6 +316,8 @@ export const SalesAgent: React.FC = () => {
           </form>
         </section>
       </div>
+
+      {memoryOpen && <MemoryPanel canEditShared={role !== 'VIEWER'} onClose={() => setMemoryOpen(false)} />}
     </div>
   );
 };

@@ -10,6 +10,7 @@ import {
   Settings as SettingsIcon,
   Package,
   MessagesSquare,
+  Handshake,
 } from 'lucide-react';
 import { Sidebar } from './Sidebar';
 import type { SidebarItem } from './Sidebar';
@@ -41,6 +42,12 @@ export const DashboardLayout: React.FC = () => {
               icon: MessagesSquare,
               path: '/salesman/sales-agent',
               badge: 'New',
+            },
+            {
+              id: 'deals',
+              label: 'Deals',
+              icon: Handshake,
+              path: '/salesman/deals',
             },
             {
               id: 'products',

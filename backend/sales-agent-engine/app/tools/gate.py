@@ -163,7 +163,8 @@ class ToolGate:
                 message = f"could not verify access for '{tool}': {type(exc).__name__}"
                 return await self._refuse(ctx, agent_name, tool, raw_args, call_id, ToolOutcome.FAILED, message)
 
-        if definition.kind is ToolKind.READ:
+        if definition.kind is not ToolKind.WRITE:
+            # Reads, and the agent's own memory (reviewed by the rep afterwards), run without approval.
             await self._emit_call(ctx, agent_name, definition, parsed, call_id)
             return await self._execute_read(ctx, agent_name, definition, parsed, call_id)
         return await self._write(ctx, agent_name, definition, parsed, call_id)

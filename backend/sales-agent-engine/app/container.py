@@ -15,6 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.autonomy.policy import AutonomyPolicy, EscalateAllPolicy
 from app.config import CHECKPOINT_SCHEMA, Settings
+from app.context.manager import ContextBudget, ContextManager
+from app.context.stores import BlobStore, MemoryStore
 from app.db.repositories import LedgerRepository, PendingActionRepository, SessionRepository
 from app.db.repositories.outbox import OutboxRepository
 from app.db.session import create_engine, create_sessionmaker
@@ -38,13 +40,15 @@ from app.platform.jwt_verifier import AccessTokenVerifier, SigningKeys
 from app.platform.langgraph_runtime import GraphApprovalPort, GraphRuntime, GraphSpec, open_checkpointer
 from app.platform.redis import create_redis
 from app.platform.web_search import TavilySearch
-from app.platform.workspace_client import WorkspaceDirectory, WorkspaceRecordsClient
+from app.platform.workspace_client import DealsClient, RepProfileClient, WorkspaceDirectory, WorkspaceRecordsClient
 from app.tools.adapters.catalog import catalog_tools
 from app.tools.adapters.catalog_writes import catalog_write_tools
+from app.tools.adapters.deals import deal_tools
 from app.tools.adapters.documents import document_tools
 from app.tools.adapters.gmail import gmail_tools
 from app.tools.adapters.google_calendar import calendar_tools
 from app.tools.adapters.knowledge import knowledge_tools
+from app.tools.adapters.memory import memory_tools
 from app.tools.adapters.notion import notion_tools
 from app.tools.adapters.quotes import quote_tools
 from app.tools.adapters.slack import slack_tools
@@ -80,6 +84,10 @@ class Container:
     tracer: TracingClient
     budgets: TenantBudgets
     compensator: Compensator
+    memory: MemoryStore
+    blobs: BlobStore
+    context: ContextManager
+    deals: DealsClient
     runner: Any = None  # SessionRunner; tests may substitute a double
     _exit_stack: AsyncExitStack = field(default_factory=AsyncExitStack, repr=False)
 
@@ -138,6 +146,7 @@ def default_registry(
     router: ModelRouter,
     http: httpx.AsyncClient,
     workspaces: WorkspaceDirectory,
+    deals: DealsClient,
 ) -> ToolRegistry:
     definitions = []
     if connector is None:
@@ -153,6 +162,7 @@ def default_registry(
         *knowledge_tools(data_pipeline),
         *catalog_tools(data_pipeline),
         *catalog_write_tools(data_pipeline, workspaces),
+        *deal_tools(deals, workspaces),
     ]
     store = DocumentStore(
         connector=connector,
@@ -162,7 +172,7 @@ def default_registry(
     )
     definitions += [
         *document_tools(store, font_path=settings.pdf_font_path),
-        *quote_tools(data_pipeline, store, workspaces, font_path=settings.pdf_font_path),
+        *quote_tools(data_pipeline, store, workspaces, font_path=settings.pdf_font_path, deals=deals),
     ]
 
     tavily = None
@@ -219,6 +229,9 @@ async def build_container(
             key_prefix=settings.redis_key_prefix,
             cache_seconds=settings.membership_cache_seconds,
         )
+        deals = DealsClient(base_url=settings.workspace_service_url, http=http_client)
+        memory = MemoryStore(sessionmaker, versions_kept=settings.memory_versions_kept)
+        blobs = BlobStore(sessionmaker)
         if registry is None:
             if connector is None and settings.composio_api_key and settings.composio_api_key.get_secret_value():
                 connector = ConnectorClient(
@@ -226,8 +239,12 @@ async def build_container(
                     toolkit_versions=settings.composio_versions(),
                 )
             registry = default_registry(
-                settings, connector=connector, router=model_router, http=http_client, workspaces=workspaces
+                settings, connector=connector, router=model_router, http=http_client, workspaces=workspaces, deals=deals
             )
+        # The agent's own memory is always available (it depends on nothing outside the engine).
+        for definition in memory_tools(memory, blobs, workspaces, deals, facts_per_key=settings.memory_facts_per_key):
+            if registry.get(definition.name) is None:
+                registry.register(definition)
         scopes = AgentScopes()
         sessions = SessionRepository(sessionmaker)
         pending_actions = PendingActionRepository(sessionmaker)
@@ -255,6 +272,19 @@ async def build_container(
             key_prefix=settings.redis_key_prefix,
             turns_per_minute_per_user=settings.turns_per_minute_per_user,
             tokens_per_day_per_tenant=settings.tokens_per_day_per_tenant,
+        )
+        context = ContextManager(
+            memory=memory,
+            blobs=blobs,
+            router=model_router,
+            budget=ContextBudget(
+                max_prompt_tokens=settings.context_budget_tokens,
+                keep_recent_turns=settings.context_keep_recent_turns,
+                tool_result_max_chars=settings.tool_result_max_chars,
+            ),
+            profiles=RepProfileClient(
+                base_url=settings.workspace_service_url, http=http_client, cache_seconds=settings.profile_cache_seconds
+            ),
         )
         gate = ToolGate(
             registry=registry,
@@ -302,6 +332,10 @@ async def build_container(
             tracer=tracer,
             budgets=budgets,
             compensator=compensator,
+            memory=memory,
+            blobs=blobs,
+            context=context,
+            deals=deals,
             _exit_stack=stack,
         )
         orchestrator = Orchestrator(
@@ -319,6 +353,7 @@ async def build_container(
             ),
             compensator=compensator,
             budgets=budgets,
+            context=context,
         )
         spec = graph_factory(container) if graph_factory is not None else orchestrator.graph_spec()
         container.runner = SessionRunner(

@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api import approvals, chat, health, sessions, stream
+from app.api import approvals, chat, health, memory, sessions, stream
 from app.api.errors import install_error_handlers
 from app.config import API_PREFIX, Settings, get_settings
 from app.container import Container, build_container
@@ -53,7 +53,7 @@ def create_app(settings: Settings | None = None, *, container_factory: Container
         openapi_url=f"{API_PREFIX}/openapi.json",
     )
     install_error_handlers(app)
-    for module in (health, chat, sessions, stream, approvals):
+    for module in (health, chat, sessions, stream, approvals, memory):
         app.include_router(module.router, prefix=API_PREFIX)
     return app
 

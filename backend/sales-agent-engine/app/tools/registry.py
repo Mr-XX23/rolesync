@@ -58,8 +58,10 @@ class ToolDefinition:
     def __post_init__(self) -> None:
         if (self.kind is ToolKind.READ) != (self.scope is ToolScope.READ):
             raise ValueError(f"tool {self.name!r}: READ tools need scope READ and writes need a write scope")
-        if self.kind is ToolKind.READ and self.undo_handler is not None:
-            raise ValueError(f"tool {self.name!r}: a READ tool has nothing to undo")
+        if (self.kind is ToolKind.MEMORY) != (self.scope is ToolScope.MEMORY):
+            raise ValueError(f"tool {self.name!r}: MEMORY tools need scope MEMORY, and only they may have it")
+        if self.kind is not ToolKind.WRITE and self.undo_handler is not None:
+            raise ValueError(f"tool {self.name!r}: only a WRITE tool has something to undo")
 
     def parameters_schema(self) -> dict[str, Any]:
         return self.input_model.model_json_schema()

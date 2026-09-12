@@ -32,6 +32,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from app.core.clock import utcnow
 from app.core.context import AgentContext
 from app.core.enums import ToolOutcome
+from app.context.manager import ContextManager
 from app.engine.events import EventEmitter, EventType, emit_best_effort
 from app.engine.guardrails.budgets import TenantBudgets
 from app.engine.guardrails.limits import Halt, TurnLimits, check_before_step, check_calls
@@ -89,6 +90,19 @@ Research and answers:
   catalog, within each item's discount limit.
 - Documents and quotes are saved to the rep's Google Drive, or to the workspace knowledge base when Drive isn't
   available. Share the link from the result.
+
+Deals and memory:
+- Deals are shared by the workspace. Use search_deals before create_deal so you don't create duplicates, keep a
+  deal's stage and next step current with update_deal (for example PROPOSAL once a quote is sent, WON or LOST when
+  it closes), and pass deal_id to create_quote to attach the quote to its deal.
+- You remember things between conversations. Before working on a customer, recall what is known about the company
+  (and its deal). As you learn durable facts, save them with remember without asking: the rep's preferences
+  (about=rep), and facts about a customer company such as contacts and their roles, needs, objections, budget,
+  timeline, competitors and what was quoted (about=account), or about one deal (about=deal). Account and deal
+  memories are shared with the workspace. Don't save secrets (passwords, payment details), one-off chatter, or what
+  the catalog and knowledge base already hold. If the rep says a remembered fact is wrong, forget it.
+- A tool result that was too long to keep shows "offloaded": call read_offloaded_result with its ref when you need
+  the details.
 
 Write in clear, professional, friendly language. Keep chat replies short unless the rep asks for detail.
 
@@ -149,6 +163,7 @@ class Orchestrator:
         limits: TurnLimits,
         compensator: Compensator | None = None,
         budgets: TenantBudgets | None = None,
+        context: ContextManager | None = None,
     ) -> None:
         self._router = router
         self._gate = gate
@@ -159,6 +174,7 @@ class Orchestrator:
         self._limits = limits
         self._compensator = compensator
         self._budgets = budgets
+        self._context = context
 
     def graph_spec(self) -> GraphSpec:
         return GraphSpec(
@@ -186,11 +202,25 @@ class Orchestrator:
         wrap_up = bool(state.get("wrap_up"))
         await emit_best_effort(self._events, ctx.session_id, EventType.STEP_STARTED, {"step": "planning", "number": steps})
         system = SYSTEM_PROMPT.format(time_context=_time_context(state.get("time_zone")))
+        if wrap_up:
+            system = f"{system}\n\n{WRAP_UP_NOTE}"
+        tools = self._tool_specs()
+        if self._context is not None:
+
+            async def announce_fold() -> None:
+                await emit_best_effort(
+                    self._events, ctx.session_id, EventType.STEP_STARTED, {"step": "summarizing earlier conversation"}
+                )
+
+            prepared = await self._context.prepare(ctx, history=history, system=system, tools=tools, on_fold=announce_fold)
+            system, visible = prepared.system, list(prepared.messages)
+        else:
+            visible = [Message.from_dict(item) for item in history]
         task = TaskSpec(
             purpose="plan",
-            system=f"{system}\n\n{WRAP_UP_NOTE}" if wrap_up else system,
-            messages=repair_history([Message.from_dict(item) for item in history]),
-            tools=self._tool_specs(),
+            system=system,
+            messages=repair_history(visible),
+            tools=tools,
             complexity=Complexity.HIGH,
             allow_tool_calls=not wrap_up,
         )
@@ -330,7 +360,10 @@ class Orchestrator:
                 args=result.executed_args or arguments,  # a reviewer may have edited them
                 result=result,
             )
-        reply = Message(role=Role.TOOL, content=json.dumps(result.for_model()), tool_call_id=call["id"], name=call["name"])
+        content = json.dumps(result.for_model())
+        if self._context is not None:
+            content = await self._context.keep_result(ctx, call_id=call["gate_call_id"], tool=call["name"], content=content)
+        reply = Message(role=Role.TOOL, content=content, tool_call_id=call["id"], name=call["name"])
         return reply, result
 
     def _tool_specs(self) -> tuple[ToolSpec, ...]:

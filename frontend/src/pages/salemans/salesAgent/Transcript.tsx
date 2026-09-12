@@ -1,7 +1,8 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { AlertTriangle, CheckCircle2, CircleHelp, CircleSlash, ExternalLink, Loader2, Search, Undo2, Wrench } from 'lucide-react';
+import { AlertTriangle, Brain, CheckCircle2, CircleHelp, CircleSlash, ExternalLink, Loader2, Search, Undo2, Wrench } from 'lucide-react';
 import type { SourceLink, TranscriptItem } from '../../../api/salesAgentApi';
+import { isAppLink, isWebLink } from './links';
 
 const OUTCOME_TONE: Record<string, string> = {
   EXECUTED: 'text-emerald-700 dark:text-emerald-300 bg-emerald-500/10 border-emerald-500/25',
@@ -37,6 +38,13 @@ const TOOL_LABEL: Record<string, string> = {
   reserve_stock: 'Reserve stock',
   release_stock: 'Release reservation',
   undo_actions: 'Undo actions',
+  search_deals: 'Search deals',
+  create_deal: 'Create deal',
+  update_deal: 'Update deal',
+  remember: 'Remember',
+  recall: 'Recall',
+  forget: 'Forget',
+  read_offloaded_result: 'Look in an earlier result',
 };
 const WRITE_TOOLS = new Set([
   'send_email',
@@ -51,7 +59,10 @@ const WRITE_TOOLS = new Set([
   'set_stock',
   'reserve_stock',
   'release_stock',
+  'create_deal',
+  'update_deal',
 ]);
+const MEMORY_TOOLS = new Set(['remember', 'forget']);
 const WHERE_TO_CHECK: Record<string, string> = {
   send_email: ' (check your Sent folder)',
   create_calendar_event: ' (check your calendar)',
@@ -59,6 +70,8 @@ const WHERE_TO_CHECK: Record<string, string> = {
   create_notion_page: ' (check Notion)',
   generate_document: ' (check Google Drive or the knowledge base)',
   create_quote: ' (check Google Drive or the knowledge base)',
+  create_deal: ' (check Deals)',
+  update_deal: ' (check the deal on the Deals page)',
 };
 
 function describeResult(item: TranscriptItem): string | null | undefined {
@@ -110,9 +123,21 @@ function describeCall(item: TranscriptItem): string {
       return [args.sku, args.quantity].filter((part) => part !== undefined).map(String).join(' · ');
     case 'undo_actions':
       return Array.isArray(args.action_ids) ? `${args.action_ids.length} action${args.action_ids.length === 1 ? '' : 's'}` : '';
+    case 'create_deal':
+      return [args.title, args.company].filter(Boolean).map(String).join(' · ');
+    case 'update_deal':
+      return args.stage ? `stage → ${String(args.stage)}` : '';
+    case 'remember':
+      return args.fact ? `“${String(args.fact)}”` : '';
+    case 'recall': {
+      const about = args.about === 'rep' ? 'about you' : args.about === 'accounts' ? 'customers' : String(args.company ?? args.about ?? '');
+      return [about, args.query ? `“${String(args.query)}”` : ''].filter(Boolean).join(' · ');
+    }
     case 'update_catalog_item':
     case 'retire_catalog_item':
     case 'release_stock':
+    case 'forget':
+    case 'read_offloaded_result':
       return '';
     default:
       if (typeof args.query === 'string') {
@@ -122,12 +147,9 @@ function describeCall(item: TranscriptItem): string {
   }
 }
 
-/** Links inside this app (e.g. a document saved to the knowledge vault). */
-const isAppLink = (url: string): boolean => /^\/salesman\/[\w\-/?=&.]*$/.test(url);
-
 /** Web links and links inside the app only: sources come from tool results, which include pages found on the internet. */
 function safeSources(sources: SourceLink[] | null | undefined): SourceLink[] {
-  return (sources ?? []).filter((source) => /^https?:\/\//i.test(source.url) || isAppLink(source.url)).slice(0, 5);
+  return (sources ?? []).filter((source) => isWebLink(source.url) || isAppLink(source.url)).slice(0, 5);
 }
 
 function hostOf(url: string): string | null {
@@ -140,7 +162,7 @@ function hostOf(url: string): string | null {
 
 function sourceLabel(source: SourceLink): string {
   if (isAppLink(source.url)) {
-    return `${source.title} · knowledge base`;
+    return `${source.title} · ${source.url.startsWith('/salesman/deals') ? 'deals' : 'knowledge base'}`;
   }
   const host = hostOf(source.url);
   // Google Search grounding links are redirects whose title is already the site's domain.
@@ -186,7 +208,8 @@ export const Transcript: React.FC<{
             </div>
           );
         case 'tool_call': {
-          const CallIcon = item.tool === 'undo_actions' ? Undo2 : WRITE_TOOLS.has(item.tool ?? '') ? Wrench : Search;
+          const tool = item.tool ?? '';
+          const CallIcon = tool === 'undo_actions' ? Undo2 : MEMORY_TOOLS.has(tool) ? Brain : WRITE_TOOLS.has(tool) ? Wrench : Search;
           return (
             <div key={index} className="flex items-center gap-2 text-xs text-muted-foreground pl-1">
               <CallIcon className="w-3.5 h-3.5 shrink-0" />

@@ -91,6 +91,17 @@ class Settings(BaseSettings):
     # where the chat links documents saved to the knowledge base (a frontend route)
     knowledge_vault_link: str = Field("/salesman/knowledge-vault", validation_alias=_env("SALES_AGENT_KNOWLEDGE_VAULT_LINK"))
 
+    # --- context + memory ----------------------------------------------------
+    # what one model call may carry (system prompt + tool definitions + conversation), in estimated tokens
+    context_budget_tokens: int = Field(48_000, validation_alias=_env("SALES_AGENT_CONTEXT_BUDGET_TOKENS"))
+    # turns kept word for word when older ones are summarized (the current request always is)
+    context_keep_recent_turns: int = Field(2, validation_alias=_env("SALES_AGENT_CONTEXT_KEEP_RECENT_TURNS"))
+    # tool results longer than this are stored and referenced instead of kept in the conversation
+    tool_result_max_chars: int = Field(24_000, validation_alias=_env("SALES_AGENT_TOOL_RESULT_MAX_CHARS"))
+    memory_facts_per_key: int = Field(100, validation_alias=_env("SALES_AGENT_MEMORY_FACTS_PER_KEY"))
+    memory_versions_kept: int = Field(20, validation_alias=_env("SALES_AGENT_MEMORY_VERSIONS_KEPT"))
+    profile_cache_seconds: int = Field(300, validation_alias=_env("SALES_AGENT_PROFILE_CACHE_SECONDS"))
+
     # --- event stream (SSE) ----------------------------------------------
     event_stream_maxlen: int = Field(5_000, validation_alias=_env("SALES_AGENT_EVENT_STREAM_MAXLEN"))
     event_stream_ttl_seconds: int = Field(7 * 86_400, validation_alias=_env("SALES_AGENT_EVENT_STREAM_TTL_SECONDS"))

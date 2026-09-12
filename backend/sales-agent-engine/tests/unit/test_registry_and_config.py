@@ -58,15 +58,18 @@ def _full_registry() -> ToolRegistry:
 
     from app.container import default_registry
     from app.engine.guardrails.saga import Compensator
+    from app.tools.adapters.memory import memory_tools
     from tests.support import FakeConnector
 
     router = MagicMock()
     router.can_serve.return_value = True
     settings = Settings(tavily_api_key=None, composio_api_key=None)
     registry = default_registry(
-        settings, connector=FakeConnector(), router=router, http=httpx.AsyncClient(), workspaces=AsyncMock()
+        settings, connector=FakeConnector(), router=router, http=httpx.AsyncClient(), workspaces=AsyncMock(), deals=AsyncMock()
     )
     registry.register(Compensator(ledger=MagicMock(), registry=registry, executor=MagicMock()).tool())
+    for definition in memory_tools(MagicMock(), MagicMock(), AsyncMock(), AsyncMock()):
+        registry.register(definition)
     return registry
 
 
@@ -76,7 +79,7 @@ def test_every_write_tool_shows_the_reviewer_a_preview_and_says_how_to_undo_it()
     assert set(writes) == {
         "send_email", "create_calendar_event", "send_slack_message", "create_notion_page", "generate_document",
         "create_quote", "create_catalog_item", "update_catalog_item", "set_stock", "reserve_stock", "release_stock",
-        "retire_catalog_item", "undo_actions",
+        "retire_catalog_item", "undo_actions", "create_deal", "update_deal",
     }
     assert all(d.preview is not None for d in writes.values())
     # Only these can't be reversed: a sent email, a released reservation, and an undo itself.
@@ -95,6 +98,11 @@ def test_sub_agent_scopes_stay_narrow_over_the_full_tool_set():
         "send_email", "create_calendar_event", "send_slack_message", "create_notion_page",
     }
     assert "undo_actions" in {d.name for d in scopes.tools_for("orchestrator", registry)}
+    # The agent's memory needs its own scope: no sub-agent has it yet.
+    memory = {d.name for d in registry.all() if d.kind is ToolKind.MEMORY}
+    assert memory == {"remember", "forget"}
+    assert not memory & {d.name for agent in ("research", "outreach", "quote") for d in scopes.tools_for(agent, registry)}
+    assert memory <= {d.name for d in scopes.tools_for("orchestrator", registry)}
 
 
 def test_database_urls_are_derived_safely_from_one_source():

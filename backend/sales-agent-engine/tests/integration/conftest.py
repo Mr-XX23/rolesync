@@ -68,7 +68,7 @@ async def clean(db_engine: AsyncEngine, redis) -> None:
         await conn.execute(
             text(
                 "TRUNCATE agent.audit, agent.saga_step, agent.pending_action, agent.workspace_outbox, "
-                "agent.session CASCADE"
+                "agent.memory, agent.context_blob, agent.session CASCADE"
             )
         )
         await conn.execute(

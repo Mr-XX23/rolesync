@@ -195,7 +195,7 @@ def _full_registry(settings: Settings, http: httpx.AsyncClient):
     from tests.support import FakeConnector
 
     router = ModelRouter({"gemini": object()}, routing_rules(settings), NoopTracingClient())  # never called
-    registry = default_registry(settings, connector=FakeConnector(), router=router, http=http, workspaces=AsyncMock())
+    registry = default_registry(settings, connector=FakeConnector(), router=router, http=http, workspaces=AsyncMock(), deals=AsyncMock())
     specs = tuple(ToolSpec(d.name, d.description, _clean_schema(d.parameters_schema())) for d in registry.all())
     return registry, specs
 

@@ -88,6 +88,8 @@ def describe_action(tool: str, args: Any) -> tuple[str, str]:
         "create_notion_page": (f"Notion page: {text('title')}", "NOTION_PAGE"),
         "generate_document": (f"Document: {text('title')} ({text('format')})", "DOCUMENT"),
         "create_quote": (f"Quote for {text('customer_company')}", "QUOTE"),
+        "create_deal": (f"Deal: {text('title')} ({text('company')})", "DEAL"),
+        "update_deal": ("Update deal" + (f": stage → {text('stage')}" if text("stage") else ""), "DEAL"),
         "create_catalog_item": (f"Add catalog item: {text('name')}", "CATALOG_CHANGE"),
         "update_catalog_item": ("Update catalog item", "CATALOG_CHANGE"),
         "retire_catalog_item": ("Retire catalog item", "CATALOG_CHANGE"),

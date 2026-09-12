@@ -15,20 +15,22 @@ approval before any real-world action.
 | 1 | Vertical slice: chat → orchestrator (model router: Gemini, OpenRouter failover) → `send_email` via Composio → approval pause/resume → audit; workspace records; chat UI | done |
 | 2 | Read tools: knowledge base, catalog, Gmail/Calendar/Slack/Notion reads, web search (Gemini grounding + Tavily), prospect research; reads run in parallel; sources in the UI | done |
 | 3 | Write tools (calendar, Slack, Notion, documents + quotes saved to Drive or the knowledge base, catalog + stock) and guardrails (turn limits + loop detection, retry/timeout, circuit breaker, undo with approval, approval TTL, per-workspace budgets) | done |
-| 4 | Context/memory | next |
+| 4 | Context manager (prompt budget, summaries, offloaded results), versioned memory with optimistic locking (rep, customer, deal, conversation), deals in workspace-service, "what the agent remembers" review | done |
 | 5–6 | Sub-agents, autonomy layer | — |
 
 ## Layout
 
 ```
 app/
-  api/            chat, sessions, SSE stream, approvals, health + identity dependencies
+  api/            chat, sessions, SSE stream, approvals, memory, health + identity dependencies
   engine/         orchestrator (plan → act → compensate graph), runner (start / pause / resume / recovery /
                   approval expiry), events, run leases, workspace_record (outbox → workspace-service),
                   guardrails/ (turn limits + loop detection, saga compensation, tenant budgets)
   models/         router.py (complexity + failover), providers/ (gemini, openrouter), neutral types
   tools/          gate.py (the choke point), registry.py (definitions + per-agent SCOPES), executor.py
                   (timeout, retries, circuit breaker), adapters/, documents/ (rendering + Drive/KB storage)
+  context/        manager.py (fits each prompt into the budget: summaries, compaction, offloading),
+                  stores.py (versioned memory + offloaded results), locks.py (optimistic retry)
   autonomy/       policy envelope (EscalateAllPolicy until Phase 6)
   observability/  TracingClient: LangSmith or no-op
   db/             SQLAlchemy models, repositories, Alembic migrations (schema `agent`)
@@ -42,8 +44,10 @@ app/
 ## How a chat turn runs
 
 1. `POST /chat` creates (or continues) a session and starts a background run.
-2. `plan` asks the model router for the next step. Complex work goes to Gemini, with OpenRouter as
-   failover; tokens stream to `GET /sessions/{id}/events`.
+2. `plan` fits the conversation into the prompt budget (recent requests word for word, earlier ones
+   folded into a running summary, what the agent remembers about the rep at the top), then asks the
+   model router for the next step. Complex work goes to Gemini, with OpenRouter as failover; tokens
+   stream to `GET /sessions/{id}/events`.
 3. `act` runs tool calls through the gate: reads the model asked for together run in parallel and
    never need approval; a write such as `send_email` runs alone, shows the reviewer a preview (built by
    the tool, e.g. a quote's priced lines or a catalog change's before → after), emits
@@ -73,6 +77,9 @@ outcome is unknown (timeout, dropped connection) is reported as UNKNOWN and neve
 | `create_quote` | write: catalog prices, per-line discounts within each item's limit, totals, optional stock reservation; undo removes the file and releases stock | data-pipeline catalog + document storage as above |
 | `create_catalog_item`, `update_catalog_item`, `retire_catalog_item` | write; undo retires / restores the replaced values / restores the status | data-pipeline catalog (never hard-deletes) |
 | `set_stock`, `reserve_stock`, `release_stock` | write; undo restores the count / releases the reservation (a release can't be undone) | data-pipeline inventory |
+| `create_deal` | write (approval); warns about an open deal for the same customer; undo deletes it unless it changed | workspace-service deals |
+| `update_deal` | write (approval): only the fields it names; re-applies over a concurrent edit; undo restores only fields nobody touched since | workspace-service deals |
+| `remember`, `forget` | memory: saved and deleted without approval, audited; shared memory is closed to viewers | engine `agent.memory` |
 | `undo_actions` | write: undo completed actions of the session, newest first (orchestrator only) | each tool's own undo handler |
 | `search_emails`, `read_email_thread` | read | Composio Gmail |
 | `list_calendar_events` | read | Composio Google Calendar |
@@ -82,6 +89,9 @@ outcome is unknown (timeout, dropped connection) is reported as UNKNOWN and neve
 | `search_catalog`, `check_inventory` | read | data-pipeline catalog |
 | `web_search` | read | Tavily pages + Google Search grounding (Gemini) |
 | `research_prospect` | read | web search, condensed into a cited brief by the low-complexity route (OpenRouter) |
+| `search_deals` | read | workspace-service deals |
+| `recall` | read | engine `agent.memory` |
+| `read_offloaded_result` | read: any part of a result too large to keep in the prompt, or passages matching a phrase | engine `agent.context_blob` |
 
 Connector tools are denied (not failed) when the user hasn't connected that app. Results carry
 `sources` (web pages, message and page links, or links to what a write created), which the chat UI
@@ -98,6 +108,18 @@ executed write's result includes an `action_id`, which `undo_actions` takes.
 | Saga / compensation | `engine/guardrails/saga.py` | Handlers record how to reverse what they did; `undo_actions` reverses completed steps newest first after approval, each audited as `undo:<tool>` and marked COMPENSATED or COMPENSATION_FAILED. The automatic offer covers only the current request (`session.turn`). |
 | Approval TTL | runner maintenance sweep | Approvals past `SALES_AGENT_APPROVAL_TTL_SECONDS` expire; the session resumes with EXPIRED and is offered an undo of what its request already did. |
 | Per-workspace budgets | `api/chat.py`, `engine/guardrails/budgets.py` | Before a turn: concurrent runs per workspace, requests per user per minute, model tokens per workspace per UTC day (429 with a message). |
+
+## Context and memory
+
+A long run stays inside its token budget, and two writers never overwrite each other's memory.
+
+| Piece | Where | Behaviour |
+|---|---|---|
+| Prompt budget | `context/manager.py` | Every model step is fitted to `SALES_AGENT_CONTEXT_BUDGET_TOKENS`: the last `SALES_AGENT_CONTEXT_KEEP_RECENT_TURNS` requests stay word for word (the window always starts at a request), earlier ones become a summary, and older results inside the current request are compacted to their summary plus a reference. |
+| Summaries | `context/manager.py` | Folding asks the low-complexity route, then the complex one, and falls back to a deterministic digest when no model answers, so a run never stalls on summarizing. The summary is stored as the session's CONVERSATION memory and reused by later steps. |
+| Offloaded results | `context/stores.py`, `agent.context_blob` | A result over `SALES_AGENT_TOOL_RESULT_MAX_CHARS` is stored whole and left in the conversation as its summary, a preview and a reference; `read_offloaded_result` reads it back. |
+| Memory | `context/stores.py`, `agent.memory` | What the agent learns about the rep (private to them), a customer or a deal (shared by the workspace). Each write inserts the next version; when another writer took that version first, the change is re-applied to theirs (a merge) instead of overwriting, and versions past `SALES_AGENT_MEMORY_VERSIONS_KEPT` are pruned. |
+| Review | `api/memory.py`, "What the agent remembers" in the chat UI and on each deal | The agent saves memories on its own (audited, no approval). The rep sees them and can delete any of them; only viewers can't delete shared ones. |
 
 ## Identity
 
@@ -126,6 +148,9 @@ here until it expires (up to 60 min), because revocation lives only inside auth-
 | GET | `/sessions/{id}/events` | SSE: `{type, session_id, data, ts}` envelopes; resume with `Last-Event-ID` or `?last_event_id=` |
 | GET | `/approvals?status=PENDING` | the caller's pending actions |
 | POST | `/approvals/{id}/decision` | `{"decision": "approve" \| "edit" \| "reject", "args"?, "note"?}` |
+| GET | `/memory/rep` | what the agent remembers about the caller; private to them |
+| GET | `/memory/accounts`, `/memory/account?company=`, `/memory/deals/{id}` | customer knowledge shared by the workspace |
+| DELETE | `/memory/rep/facts/{id}`, `/memory/accounts/{key}/facts/{id}`, `/memory/deals/{id}/facts/{id}` | forget one fact (shared memory: every member except viewers) |
 | GET | `/health`, `/health/ready` | liveness, and readiness (database + Redis) |
 
 Event types: `user_message` (the prompt that started a turn), `step_started`, `token` (`reset: true`
@@ -171,7 +196,12 @@ pause/resume across a restart, crash and lease-loss recovery, model failover, th
 UNKNOWN outcomes and previews that reject arguments), approvals, the workspace outbox, and Phase 3's
 "done when": a forced failure after an approved action offers an undo that compensates once approved
 (and nothing when rejected), approval expiry, halts on loops and limits, undo of earlier requests by
-`action_id`, and budgets. Unit tests cover every write tool's provider arguments and undo, document
-rendering, quote pricing, retries and the circuit breaker. `--live` adds contract checks: Composio
+`action_id`, and budgets. Phase 4's "done when" is covered too: a six-request run with a small budget
+keeps every model step inside it while the conversation grows past it (older turns summarized, large
+results offloaded and read back), and 24 concurrent `remember` calls from two reps' sessions on the
+same customer all survive, in order, with old versions pruned. Unit tests cover every write tool's
+provider arguments and undo, document rendering, quote pricing, retries and the circuit breaker, the
+context manager, and the deal tools (idempotent create, merge on a concurrent edit, undo that keeps
+later changes). `--live` adds contract checks: Composio
 accepts every argument the adapters send (reads, writes and undo steps), Gemini and the failover
 models accept every tool schema, and grounding, Tavily and the low-complexity route answer.
