@@ -41,6 +41,8 @@ parser_service = ParserService()
 sales_classifier = SalesClassifier()
 # Lineage for manual uploads, so they are tracked exactly like connector events.
 canonical_store = CanonicalStore()
+# Embeds search queries (RETRIEVAL_QUERY) for semantic lookup.
+query_embedder = EmbeddingWorker()
 
 # MongoDB initialization for Knowledge Documents & RAG configs with resilient in-memory fallback
 MONGO_URI = os.environ.get("MONGODB_URI", "mongodb://mongodb:27017")
@@ -1251,6 +1253,67 @@ def deduplicate_documents(
                 else "No duplicate documents found — your vault is clean."
             )
         ),
+    }
+
+
+class VaultSearchRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=1000)
+    limit: int = Field(default=5, ge=1, le=50)
+    min_score: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+@router.post("/knowledge-vault/search")
+def search_knowledge_vault(
+    req: VaultSearchRequest,
+    access: WorkspaceAccess = Depends(require_workspace_member),
+):
+    """Semantic search across indexed chunks.
+
+    Embeds the query (RETRIEVAL_QUERY) and runs an ANN lookup against the HNSW
+    index, with the workspace and the caller's ACL applied as filters.
+    """
+    query_vector = query_embedder.embed_query(req.query)
+    if query_vector is None:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Semantic search is temporarily unavailable. Please try again, "
+                "or use keyword filters in the meantime."
+            ),
+        )
+
+    # Chunks are tagged with the owning user and the workspace they belong to.
+    user_acl = [f"tenant:{access.workspace_id}", f"user:{access.user_id}", access.user_id]
+
+    try:
+        matches = vector_store.search_similarity(
+            query_vector=query_vector,
+            tenant_id=access.workspace_id,
+            user_acl=user_acl,
+            limit=req.limit,
+            min_score=req.min_score,
+        )
+    except Exception as err:
+        print(f"[KnowledgeVault] Semantic search failed: {err}")
+        raise HTTPException(status_code=503, detail="Search failed. Please try again.")
+
+    return {
+        "status": "success",
+        "query": req.query,
+        "count": len(matches),
+        "results": [
+            {
+                "chunk_id": rec.vector_id,
+                "doc_id": rec.doc_id,
+                "doc_ref_id": rec.doc_ref_id or rec.external_id,
+                "chunk_index": rec.chunk_index,
+                "text": rec.text,
+                "score": rec.metadata.get("similarity_score"),
+                "category": rec.metadata.get("category"),
+                "document_type": rec.metadata.get("document_type"),
+            }
+            for rec in matches
+        ],
     }
 
 

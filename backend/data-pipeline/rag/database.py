@@ -125,6 +125,70 @@ def session_scope():
         session.close()
 
 
+def embedding_dimension() -> int:
+    try:
+        value = int(os.environ.get("EMBEDDING_DIMENSIONS", "") or 1536)
+        return value if 0 < value <= 2000 else 1536  # pgvector HNSW caps at 2000 dims
+    except (TypeError, ValueError):
+        return 1536
+
+
+_VECTOR_INDEXES = (
+    f"CREATE INDEX IF NOT EXISTS ix_rag_vector_chunks_tenant ON {RAG_SCHEMA}.vector_chunks (tenant_id);",
+    f"CREATE INDEX IF NOT EXISTS ix_rag_vector_chunks_doc ON {RAG_SCHEMA}.vector_chunks (doc_id);",
+    f"CREATE INDEX IF NOT EXISTS ix_rag_vector_chunks_tenant_source ON {RAG_SCHEMA}.vector_chunks (tenant_id, source);",
+    f"CREATE INDEX IF NOT EXISTS ix_rag_vector_chunks_acl ON {RAG_SCHEMA}.vector_chunks USING gin (acl);",
+    # The actual approximate-nearest-neighbour index. Cosine ops match the
+    # L2-normalised embeddings the embedding worker produces.
+    f"CREATE INDEX IF NOT EXISTS ix_rag_vector_chunks_hnsw ON {RAG_SCHEMA}.vector_chunks "
+    f"USING hnsw (embedding vector_cosine_ops);",
+)
+
+
+def ensure_vector_schema(engine=None, dimension: int | None = None) -> bool:
+    """Create the pgvector extension, the chunk table and the HNSW index.
+
+    Returns False when the server has no pgvector build, so callers can fall
+    back to brute-force search instead of failing.
+    """
+    if engine is None:
+        engine = get_engine()
+    dim = dimension or embedding_dimension()
+
+    ddl = f"""
+        CREATE TABLE IF NOT EXISTS {RAG_SCHEMA}.vector_chunks (
+            vector_id     TEXT PRIMARY KEY,
+            doc_id        TEXT NOT NULL,
+            doc_ref_id    TEXT NOT NULL DEFAULT '',
+            tenant_id     TEXT NOT NULL DEFAULT '',
+            user_id       TEXT NOT NULL DEFAULT '',
+            source        TEXT NOT NULL DEFAULT '',
+            external_id   TEXT NOT NULL DEFAULT '',
+            text          TEXT NOT NULL DEFAULT '',
+            acl           JSONB NOT NULL DEFAULT '[]'::jsonb,
+            chunk_index   INTEGER NOT NULL DEFAULT 0,
+            total_chunks  INTEGER NOT NULL DEFAULT 0,
+            prev_chunk_id TEXT,
+            next_chunk_id TEXT,
+            meta          JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+            embedding     vector({dim}),
+            updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+    """
+
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
+            conn.execute(text(ddl))
+            for statement in _VECTOR_INDEXES:
+                conn.execute(text(statement))
+        logger.info("pgvector schema ready (%s.vector_chunks, dim=%s, HNSW cosine).", RAG_SCHEMA, dim)
+        return True
+    except Exception as err:
+        logger.warning("pgvector unavailable (%s); vector search falls back to brute force.", err)
+        return False
+
+
 def init_rag_db() -> bool:
     """Create database, schema and tables. Returns True when persistence is live."""
     if persistence_disabled():
@@ -137,6 +201,13 @@ def init_rag_db() -> bool:
             conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {RAG_SCHEMA};"))
         from rag import models  # noqa: F401  (register models on Base)
         Base.metadata.create_all(bind=engine)
+
+        # The HNSW vector index is optional: a server without pgvector still
+        # runs the pipeline, just with brute-force similarity search.
+        from rag.state import set_vector_index_available
+
+        set_vector_index_available(ensure_vector_schema(engine))
+
         logger.info("RAG database ready (schema '%s').", RAG_SCHEMA)
         return True
     except Exception as err:

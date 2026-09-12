@@ -9,6 +9,13 @@ try:
 except ImportError:
     pymongo = None
 
+try:
+    # Optional HNSW index. Mongo remains the chunk record store; pgvector is
+    # the similarity index, so nothing the vault UI reads changes.
+    from module_3_batch_ingestion_vector.pgvector_index import pgvector_index
+except Exception:  # pragma: no cover
+    pgvector_index = None
+
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
     """Cosine similarity between two equal-length vectors; 0.0 if either is empty
@@ -116,8 +123,33 @@ class VectorStore:
                 print(f"[VectorStore] MongoDB offline / local mode ({err})")
                 self._collection = None
 
+    @staticmethod
+    def _record_from_row(row: dict[str, Any]) -> "VectorRecord":
+        """Build a VectorRecord from a pgvector search row (embedding not returned)."""
+        metadata = dict(row.get("meta") or {})
+        if row.get("score") is not None:
+            metadata["similarity_score"] = float(row["score"])
+        return VectorRecord(
+            vector_id=row.get("vector_id", ""),
+            doc_id=row.get("doc_id", ""),
+            tenant_id=row.get("tenant_id", ""),
+            user_id=row.get("user_id", ""),
+            source=row.get("source", ""),
+            external_id=row.get("external_id", ""),
+            text=row.get("text", ""),
+            vector=[],
+            acl=list(row.get("acl") or []),
+            chunk_index=row.get("chunk_index", 0),
+            doc_ref_id=row.get("doc_ref_id", ""),
+            prev_chunk_id=row.get("prev_chunk_id"),
+            next_chunk_id=row.get("next_chunk_id"),
+            total_chunks=row.get("total_chunks", 0),
+            metadata=metadata,
+        )
+
     def upsert_vectors(self, embedded_chunks: list[Any]) -> int:
         count = 0
+        records: list[VectorRecord] = []
         for item in embedded_chunks:
             node = item.node
             vector = item.vector
@@ -144,6 +176,7 @@ class VectorStore:
                 metadata=node.metadata,
             )
             self._in_memory[node.chunk_id] = rec
+            records.append(rec)
 
             # Persist to MongoDB
             if self._collection is not None:
@@ -157,6 +190,13 @@ class VectorStore:
                     print(f"[VectorStore] Mongo vector upsert error: {err}")
 
             count += 1
+
+        # Mirror the embeddings into the HNSW index so search is served by
+        # pgvector rather than a brute-force scan.
+        if pgvector_index is not None and records:
+            indexed = pgvector_index.upsert(records)
+            if indexed:
+                print(f"[VectorStore] Indexed {indexed} embeddings into pgvector (HNSW).")
 
         print(f"[VectorStore] Upserted {count} vector records into VectorStore (in-memory + MongoDB).")
         return count
@@ -192,6 +232,9 @@ class VectorStore:
             except Exception as err:
                 print(f"[VectorStore] Mongo delete by doc_id error: {err}")
 
+        if pgvector_index is not None:
+            pgvector_index.delete_by_doc_id(doc_id)
+
         count = max(len(to_delete), mongo_deleted)
         print(f"[VectorStore] Purged {count} vectors for doc_id={doc_id}.")
         return count
@@ -215,6 +258,9 @@ class VectorStore:
             except Exception as err:
                 print(f"[VectorStore] Mongo purge error: {err}")
 
+        if pgvector_index is not None:
+            pgvector_index.delete_by_tenant_source_user(tenant_id, source, user_id)
+
         count = max(len(to_delete), mongo_deleted)
         print(f"[VectorStore] Purged {count} vectors for tenant={tenant_id}, source={source}, user={user_id}.")
         return count
@@ -235,6 +281,9 @@ class VectorStore:
                 )
             except Exception as err:
                 print(f"[VectorStore] Mongo ACL update error: {err}")
+
+        if pgvector_index is not None:
+            pgvector_index.update_acl_for_doc_id(doc_id, list(new_acl))
 
         print(f"[VectorStore] Updated ACLs for {count} vectors under doc_id={doc_id}.")
         return count
@@ -257,6 +306,19 @@ class VectorStore:
         Mongo has no $vectorSearch). Correct and fine at current volume; a
         pgvector/Atlas index is required to scale.
         """
+        # Prefer the HNSW index: tenant and ACL filtering run in SQL and only the
+        # top-k rows come back, instead of scanning every chunk in Python.
+        if pgvector_index is not None and query_vector:
+            rows = pgvector_index.search(
+                query_vector=query_vector,
+                tenant_id=tenant_id,
+                user_acl=list(user_acl),
+                limit=limit,
+                min_score=min_score,
+            )
+            if rows is not None:
+                return [self._record_from_row(row) for row in rows]
+
         user_set = set(user_acl)
         candidates: list[VectorRecord] = []
 
