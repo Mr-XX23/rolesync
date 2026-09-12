@@ -1,11 +1,11 @@
 import math
 import re
 from dataclasses import dataclass
-from module_1_document_processing.parsing.parsed_document import ParsedDocument
+from typing import Optional
 
-MIN_TEXT_LENGTH = 10
-MAX_SHANNON_ENTROPY = 6.0
-MIN_UNIQUE_RATIO = 0.2
+from module_1_document_processing.parsing.parsed_document import ParsedDocument
+from module_2_memory_gatekeeper.policy import GatekeeperPolicy, load_policy
+
 
 @dataclass
 class LexicalResult:
@@ -14,29 +14,55 @@ class LexicalResult:
     entropy: float = 0.0
     unique_ratio: float = 0.0
 
+
 class LexicalChecker:
-    """Lexical & Shannon Entropy Checker to filter low-quality/corrupted document memory."""
+    """Lexical & Shannon entropy checker filtering low-quality/corrupted content.
 
-    def check(self, document: ParsedDocument) -> LexicalResult:
+    Thresholds come from the active gatekeeper policy rather than module
+    constants, so they can be tuned per deployment and the decision can be
+    explained by its recorded policy version.
+    """
+
+    def __init__(self, policy: Optional[GatekeeperPolicy] = None) -> None:
+        self._policy = policy
+
+    @property
+    def policy(self) -> GatekeeperPolicy:
+        return self._policy or load_policy()
+
+    def check(self, document: ParsedDocument, policy: Optional[GatekeeperPolicy] = None) -> LexicalResult:
+        # The caller may pass the policy it is auditing against, so a single
+        # policy governs the whole decision and the recorded version is honest.
+        policy = policy or self.policy
         text = (document.text_content or "").strip()
-        if len(text) < MIN_TEXT_LENGTH:
-            return LexicalResult(is_valid=False, reason=f"Text length ({len(text)}) below minimum limit of 10 characters")
 
-        entropy = self._calculate_shannon_entropy(text)
-        if entropy > MAX_SHANNON_ENTROPY:
+        if len(text) < policy.min_text_length:
             return LexicalResult(
                 is_valid=False,
-                reason=f"High Shannon Entropy ({round(entropy, 2)} > {MAX_SHANNON_ENTROPY}) indicates corrupted/encrypted text",
+                reason=f"Text length ({len(text)}) below minimum limit of {policy.min_text_length} characters",
+            )
+
+        entropy = self._calculate_shannon_entropy(text)
+        if entropy > policy.max_shannon_entropy:
+            return LexicalResult(
+                is_valid=False,
+                reason=(
+                    f"High Shannon Entropy ({round(entropy, 2)} > {policy.max_shannon_entropy}) "
+                    "indicates corrupted/encrypted text"
+                ),
                 entropy=entropy,
             )
 
         words = re.findall(r"\b\w+\b", text.lower())
         if words:
             unique_ratio = len(set(words)) / len(words)
-            if unique_ratio < MIN_UNIQUE_RATIO:
+            if unique_ratio < policy.min_unique_ratio:
                 return LexicalResult(
                     is_valid=False,
-                    reason=f"Low unique word ratio ({round(unique_ratio, 2)} < {MIN_UNIQUE_RATIO}) indicates repetitive noise",
+                    reason=(
+                        f"Low unique word ratio ({round(unique_ratio, 2)} < {policy.min_unique_ratio}) "
+                        "indicates repetitive noise"
+                    ),
                     entropy=entropy,
                     unique_ratio=unique_ratio,
                 )

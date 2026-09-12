@@ -9,3 +9,8 @@ Set RAG_PERSISTENCE=on explicitly to run these against a real database.
 import os
 
 os.environ.setdefault("RAG_PERSISTENCE", "off")
+
+# The gatekeeper's semantic scorer makes a live Gemini call per document. Unit
+# tests stay offline and deterministic; set GATEKEEPER_SEMANTIC_ENABLED=true to
+# exercise it against the real model.
+os.environ.setdefault("GATEKEEPER_SEMANTIC_ENABLED", "false")

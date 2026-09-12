@@ -22,6 +22,7 @@ from module_1_document_processing.composio_connector.connector_routes import (
 from module_1_document_processing.knowledge_vault_routes import router as knowledge_vault_router
 from module_1_document_processing.del_acl_and_reconc.reconciliation_routes import router as reconciliation_router
 from module_1_document_processing.del_acl_and_reconc.reconciliation_scheduler import reconciliation_scheduler
+from module_2_memory_gatekeeper.gatekeeper_routes import router as gatekeeper_router
 from catalog.routes import router as catalog_router
 from catalog.database import init_catalog_db
 from catalog.csv_importer import catalog_import_worker
@@ -136,6 +137,8 @@ app.include_router(knowledge_vault_router, prefix="/api/v1")
 app.include_router(knowledge_vault_router, prefix="/api/v1/data-pipeline")
 app.include_router(reconciliation_router, prefix="/api/v1")
 app.include_router(reconciliation_router, prefix="/api/v1/data-pipeline")
+app.include_router(gatekeeper_router, prefix="/api/v1")
+app.include_router(gatekeeper_router, prefix="/api/v1/data-pipeline")
 app.include_router(catalog_router, prefix="/api/v1/catalog")
 app.include_router(catalog_router, prefix="/api/v1/data-pipeline/catalog")
 
