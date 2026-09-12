@@ -23,6 +23,7 @@ from module_1_document_processing.composio_connector.events.canonical_event impo
 from module_1_document_processing.raw_document_store import raw_document_store
 from module_1_document_processing.pipeline import ingestion_guards as guards
 from module_1_document_processing.pipeline.canonical_store import CanonicalStore
+from module_1_document_processing.parsing.media_queue import MEDIA_PENDING
 from module_3_batch_ingestion_vector.chunker import HierarchicalChunker
 from module_3_batch_ingestion_vector.embedding_worker import EmbeddingWorker
 from module_3_batch_ingestion_vector.vector_store import VectorStore
@@ -356,6 +357,19 @@ def _process_document_background(
         # 3. Parse via ParserService (handles MIME routing, LlamaParse/LlamaIndex, DirectTextParser)
         parsed_doc = parser_service.parse_event(event, raw_bytes=raw_bytes)
         print(f"[KnowledgeVault] Parsed {doc_id} with parser={parsed_doc.parser_used}, status={parsed_doc.parse_status}")
+
+        # Audio/video is stored but cannot be indexed until transcription exists.
+        if parsed_doc.parse_status == MEDIA_PENDING:
+            canonical_store.record_event(event, status="MEDIA_PENDING")
+            print(f"[KnowledgeVault] Media parked for {doc_id} (transcription not implemented).")
+            record = _find_doc_record(doc_id)
+            if record:
+                record["status"] = "Rejected"
+                record["chunks"] = 0
+                record["error_message"] = guards.MEDIA_PENDING_MESSAGE
+                record["last_updated"] = datetime.now(timezone.utc).isoformat()
+                _save_doc_record(record)
+            return
 
         if parsed_doc.parse_status == "FAILED":
             canonical_store.record_event(event, status="PARSED_FAILED")

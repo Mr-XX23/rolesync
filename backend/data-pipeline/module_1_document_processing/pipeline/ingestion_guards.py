@@ -131,3 +131,7 @@ PROCESSING_FAILED_MESSAGE = (
 URL_FETCH_FAILED_MESSAGE = (
     "We could not fetch that URL. Check that the link is public and reachable, then try again."
 )
+MEDIA_PENDING_MESSAGE = (
+    "Audio and video files are stored but cannot be searched yet - transcription "
+    "is not available. This file was not added to your Knowledge Vault."
+)

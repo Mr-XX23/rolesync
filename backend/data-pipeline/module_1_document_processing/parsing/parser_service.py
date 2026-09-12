@@ -7,6 +7,12 @@ from module_1_document_processing.parsing.parsed_document import ParsedDocument
 from module_1_document_processing.parsing.direct_text_parser import DirectTextParser
 from module_1_document_processing.parsing.llama_parser import LlamaParserService
 from module_1_document_processing.parsing.parse_failure_store import ParseFailureStore
+from module_1_document_processing.parsing.media_queue import (
+    MEDIA_PENDING,
+    MediaJob,
+    media_job_queue,
+    transcription_worker,
+)
 
 class ParserService:
     """Facade orchestrating MIME routing, document parsing, Gmail combined attachment processing, and failure recording."""
@@ -92,8 +98,47 @@ class ParserService:
                 )
             return parsed
 
+        if category in (ParserCategory.AUDIO, ParserCategory.VIDEO):
+            return self._park_media(event, doc_id, mime_type)
+
         # Default fallback
         return self.direct_parser.parse(event, raw_bytes=raw_bytes)
+
+    def _park_media(self, event: CanonicalEvent, doc_id: str, mime_type: str) -> ParsedDocument:
+        """Park audio/video until transcription exists.
+
+        Previously these fell through to the text parser, which UTF-8 decoded
+        raw media bytes into garbage and indexed it. MEDIA_PENDING keeps the
+        original file without polluting the vector store.
+        """
+        media_job_queue.enqueue(
+            MediaJob(
+                doc_id=doc_id,
+                tenant_id=event.tenant_id,
+                user_id=event.user_id,
+                source=event.source,
+                external_id=event.external_id,
+                mime_type=mime_type,
+                metadata=dict(event.metadata or {}),
+            )
+        )
+        return ParsedDocument(
+            doc_id=doc_id,
+            tenant_id=event.tenant_id,
+            user_id=event.user_id,
+            source=event.source,
+            external_id=event.external_id,
+            acl=list(event.acl),
+            mime_type=mime_type,
+            text_content="",
+            parse_status=MEDIA_PENDING,
+            parser_used="media_pending",
+            metadata={
+                "media_pending": True,
+                "transcription_provider": transcription_worker.provider,
+                "note": "Audio/video transcription is not implemented yet; file stored, not indexed.",
+            },
+        )
 
     def _parse_gmail_event(self, event: CanonicalEvent, raw_bytes: bytes | None = None) -> ParsedDocument:
         """

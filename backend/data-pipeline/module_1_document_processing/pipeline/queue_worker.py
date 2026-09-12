@@ -5,6 +5,7 @@ from module_1_document_processing.composio_connector.events.canonical_event impo
 from module_1_document_processing.security.security_scanner import SecurityScanner, ScanResult
 from module_1_document_processing.pipeline.canonical_store import CanonicalStore
 from module_1_document_processing.parsing.parser_service import ParserService
+from module_1_document_processing.parsing.media_queue import MEDIA_PENDING
 from module_1_document_processing.del_acl_and_reconc.deletion_handler import DeletionHandler
 from module_1_document_processing.del_acl_and_reconc.acl_sync import ACLSyncService
 from module_2_memory_gatekeeper.gatekeeper_engine import GatekeeperEngine
@@ -102,6 +103,14 @@ class QueueWorker:
 
         # 3. Document Parsing (Supports SUCCESS and PARTIAL_SUCCESS with skipped oversized attachments)
         parsed_doc = self.parser_service.parse_event(sanitized_event)
+
+        # Audio/video is parked, not failed: the file is kept and can be replayed
+        # once transcription is implemented.
+        if parsed_doc.parse_status == MEDIA_PENDING:
+            print(f"[QueueWorker] Media parked for doc_id={doc_id} (transcription not implemented).")
+            self.store.record_event(sanitized_event, status="MEDIA_PENDING")
+            return
+
         if parsed_doc.parse_status not in ("SUCCESS", "PARTIAL_SUCCESS"):
             print(f"[QueueWorker] Parsing failed for doc_id={doc_id}: status={parsed_doc.parse_status}")
             self.store.record_event(sanitized_event, status="PARSED_FAILED")
