@@ -1,6 +1,7 @@
 import asyncio
+import inspect
 import os
-from typing import Callable, Awaitable
+from typing import Any, Awaitable, Callable
 from module_1_document_processing.composio_connector.events.canonical_event import CanonicalEvent, EventType
 from module_1_document_processing.security.security_scanner import SecurityScanner, ScanResult
 from module_1_document_processing.pipeline.canonical_store import CanonicalStore
@@ -11,6 +12,13 @@ from module_1_document_processing.del_acl_and_reconc.acl_sync import ACLSyncServ
 from module_2_memory_gatekeeper.gatekeeper_engine import GatekeeperEngine
 from module_3_batch_ingestion_vector.ingestion_pipeline import BatchIngestionPipeline
 from module_1_document_processing.pipeline import ingestion_guards as guards
+from module_1_document_processing.pipeline.durable_queue import DurableQueue, Job, ingest_queue
+from module_1_document_processing.pipeline.job_payloads import (
+    JOB_CONNECTOR_EVENT,
+    discard_staged_bytes,
+    event_to_payload,
+    payload_to_event,
+)
 
 class QueueWorker:
     """Asynchronous Queue Worker for offloading incoming webhooks and backfill items to the staging, parsing, gatekeeper, ingestion, deletion & ACL sync pipeline."""
@@ -24,6 +32,7 @@ class QueueWorker:
         acl_sync: ACLSyncService | None = None,
         gatekeeper_engine: GatekeeperEngine | None = None,
         ingestion_pipeline: BatchIngestionPipeline | None = None,
+        queue: DurableQueue | None = None,
     ) -> None:
         # Shared singletons so the connector path and manual uploads enforce the
         # exact same scan and gatekeeper policy.
@@ -35,45 +44,104 @@ class QueueWorker:
         self.gatekeeper_engine = gatekeeper_engine or guards.gatekeeper_engine
         self.ingestion_pipeline = ingestion_pipeline or BatchIngestionPipeline()
 
-        self._queue: asyncio.Queue[CanonicalEvent] = asyncio.Queue()
-        self._worker_task: asyncio.Task | None = None
+        # Work is handed to a durable queue rather than an in-process one, so an
+        # accepted job survives a restart of this service.
+        self.queue = queue if queue is not None else ingest_queue
+        self._handlers: dict[str, Callable[[dict[str, Any]], Any]] = {
+            JOB_CONNECTOR_EVENT: self._handle_connector_event,
+        }
+        self._worker_tasks: list[asyncio.Task] = []
         self._is_running = False
+
+    def register_handler(self, kind: str, handler: Callable[[dict[str, Any]], Any]) -> None:
+        """Route a job kind to a handler. Lets other modules (the knowledge vault
+        upload path) put work on the same durable queue without importing it."""
+        self._handlers[kind] = handler
 
     async def start(self) -> None:
         if self._is_running:
             return
         self._is_running = True
-        self._worker_task = asyncio.create_task(self._worker_loop())
-        print("[QueueWorker] Asynchronous staging queue worker started.")
+
+        # Anything left in flight by a previous run goes back on the queue; this
+        # is what stops a restart from stranding documents at "Parsing".
+        reclaimed = await asyncio.to_thread(self.queue.reclaim_stale)
+
+        workers = max(1, int(os.environ.get("INGEST_QUEUE_WORKERS", "1") or 1))
+        for index in range(workers):
+            self._worker_tasks.append(asyncio.create_task(self._worker_loop(index)))
+
+        stats = await asyncio.to_thread(self.queue.stats)
+        print(
+            f"[QueueWorker] Staging queue worker started "
+            f"(backend={stats.get('backend')}, workers={workers}, reclaimed={reclaimed}, pending={stats.get('pending')})."
+        )
+        if stats.get("backend") != "redis":
+            print("[QueueWorker] WARNING: Redis unavailable - queued ingestion work will not survive a restart.")
 
     async def stop(self) -> None:
         if not self._is_running:
             return
         self._is_running = False
-        if self._worker_task:
-            self._worker_task.cancel()
+        for task in self._worker_tasks:
+            task.cancel()
+        for task in self._worker_tasks:
             try:
-                await self._worker_task
+                await task
             except asyncio.CancelledError:
                 pass
+        self._worker_tasks.clear()
         print("[QueueWorker] Queue worker stopped.")
 
-    async def enqueue(self, event: CanonicalEvent) -> None:
-        await self._queue.put(event)
-        print(f"[QueueWorker] Enqueued event_id={event.event_id} (Queue size: {self._queue.qsize()})")
+    async def enqueue(self, event: CanonicalEvent) -> Job:
+        """Accept a connector event. Returns once the job is durably queued."""
+        return await self.enqueue_job(JOB_CONNECTOR_EVENT, event_to_payload(event))
 
-    async def _worker_loop(self) -> None:
+    async def enqueue_job(self, kind: str, payload: dict[str, Any]) -> Job:
+        job = await asyncio.to_thread(self.queue.enqueue, kind, payload)
+        print(f"[QueueWorker] Enqueued {kind} job_id={job.job_id}")
+        return job
+
+    async def _worker_loop(self, index: int = 0) -> None:
         while self._is_running:
+            job: Job | None = None
             try:
-                event = await asyncio.wait_for(self._queue.get(), timeout=1.0)
-                await self._process_event(event)
-                self._queue.task_done()
-            except asyncio.TimeoutError:
-                continue
+                job = await asyncio.to_thread(self.queue.reserve, 1.0)
+                if job is None:
+                    # Nothing waiting: yield so an in-memory queue does not spin.
+                    await asyncio.sleep(0.05)
+                    continue
+                await self._dispatch(job)
+                await asyncio.to_thread(self.queue.ack, job)
             except asyncio.CancelledError:
+                # Leave the job in flight: it is reclaimed and retried on restart.
                 break
             except Exception as err:
-                print(f"[QueueWorker] Error processing queue item: {err}")
+                if job is None:
+                    print(f"[QueueWorker] Worker {index} error: {err}")
+                    await asyncio.sleep(0.5)
+                    continue
+                outcome = await asyncio.to_thread(self.queue.fail, job, str(err))
+                print(
+                    f"[QueueWorker] Job {job.job_id} ({job.kind}) failed on attempt "
+                    f"{job.attempts}/{self.queue.max_attempts}: {err} -> {outcome}"
+                )
+
+    async def _dispatch(self, job: Job) -> None:
+        handler = self._handlers.get(job.kind)
+        if handler is None:
+            raise RuntimeError(f"No handler registered for job kind '{job.kind}'")
+        result = handler(job.payload)
+        if inspect.isawaitable(result):
+            await result
+
+    async def _handle_connector_event(self, payload: dict[str, Any]) -> None:
+        event = payload_to_event(payload)
+        try:
+            await self._process_event(event)
+        finally:
+            # The staged copy exists only to carry bytes through the queue.
+            discard_staged_bytes(payload.get("staged_ref") or "")
 
     @staticmethod
     def _display_name(event: CanonicalEvent, doc_id: str) -> str:

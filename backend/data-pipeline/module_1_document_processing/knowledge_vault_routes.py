@@ -21,6 +21,13 @@ from module_1_document_processing.parsing.parser_service import ParserService
 from module_1_document_processing.classification.sales_classifier import SalesClassifier, VALID_SALES_CATEGORIES
 from module_1_document_processing.composio_connector.events.canonical_event import CanonicalEvent, EventType
 from module_1_document_processing.raw_document_store import raw_document_store
+from module_1_document_processing.pipeline.durable_queue import ingest_queue
+from module_1_document_processing.pipeline.job_payloads import (
+    JOB_DOCUMENT_INGEST,
+    discard_staged_bytes,
+    load_staged_bytes,
+    stage_bytes,
+)
 from module_1_document_processing.pipeline import ingestion_guards as guards
 from module_1_document_processing.pipeline.canonical_store import CanonicalStore
 from module_1_document_processing.parsing.media_queue import MEDIA_PENDING
@@ -624,6 +631,87 @@ def list_documents(
     }
 
 
+
+def _queue_document_job(
+    background_tasks: BackgroundTasks,
+    *,
+    doc_id: str,
+    tenant_id: str,
+    user_id: str,
+    raw_bytes: bytes,
+    filename: str,
+    mime_type: str,
+    source: str,
+    user_override_category: Optional[str] = None,
+    user_override_competitor: Optional[str] = None,
+) -> None:
+    """Hand parsing and indexing to the durable queue.
+
+    The bytes are written to the raw object store *before* this returns, so the
+    "queued for parsing" answer the caller gets is backed by something that
+    survives a restart. FastAPI BackgroundTasks remains only as the fallback for
+    when nothing durable is reachable - the old behaviour, not a silent loss.
+    """
+    staged_ref = stage_bytes(tenant_id, doc_id, raw_bytes, content_type=mime_type)
+    if staged_ref:
+        ingest_queue.enqueue(
+            JOB_DOCUMENT_INGEST,
+            {
+                "doc_id": doc_id,
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+                "filename": filename,
+                "mime_type": mime_type,
+                "source": source,
+                "staged_ref": staged_ref,
+                "user_override_category": user_override_category,
+                "user_override_competitor": user_override_competitor,
+            },
+        )
+        return
+
+    print(f"[KnowledgeVault] Could not stage {doc_id}; processing in-process instead.")
+    background_tasks.add_task(
+        _process_document_background,
+        doc_id=doc_id,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        raw_bytes=raw_bytes,
+        filename=filename,
+        mime_type=mime_type,
+        source=source,
+        user_override_category=user_override_category,
+        user_override_competitor=user_override_competitor,
+    )
+
+
+def process_document_job(payload: dict) -> None:
+    """Queue handler: reload the staged bytes and run the existing pipeline.
+
+    Raises on failure so the queue retries and, after the last attempt, keeps the
+    job in the dead-letter list instead of dropping it.
+    """
+    staged_ref = payload.get("staged_ref") or ""
+    raw_bytes = load_staged_bytes(staged_ref)
+    if raw_bytes is None:
+        raise RuntimeError(f"Staged bytes missing for {payload.get('doc_id')} ({staged_ref})")
+
+    try:
+        _process_document_background(
+            doc_id=payload.get("doc_id", ""),
+            tenant_id=payload.get("tenant_id", ""),
+            user_id=payload.get("user_id", ""),
+            raw_bytes=raw_bytes,
+            filename=payload.get("filename", ""),
+            mime_type=payload.get("mime_type", ""),
+            source=payload.get("source", "USER_UPLOAD"),
+            user_override_category=payload.get("user_override_category"),
+            user_override_competitor=payload.get("user_override_competitor"),
+        )
+    finally:
+        discard_staged_bytes(staged_ref)
+
+
 @router.post("/knowledge-vault/upload")
 async def upload_document(
     background_tasks: BackgroundTasks,
@@ -722,8 +810,8 @@ async def upload_document(
     _save_doc_record(doc_record)
 
     # Queue background parsing & vector ingestion with SalesClassifier
-    background_tasks.add_task(
-        _process_document_background,
+    _queue_document_job(
+        background_tasks,
         doc_id=doc_id,
         tenant_id=access.workspace_id,
         user_id=owner_id,
@@ -848,8 +936,8 @@ def ingest_url(
     _save_doc_record(doc_record)
 
     # Queue background processing
-    background_tasks.add_task(
-        _process_document_background,
+    _queue_document_job(
+        background_tasks,
         doc_id=doc_id,
         tenant_id=access.workspace_id,
         user_id=owner_id,
@@ -1161,8 +1249,8 @@ def reindex_document(
             filename = doc.get("name", "")
             mime_type = "text/plain"
 
-    background_tasks.add_task(
-        _process_document_background,
+    _queue_document_job(
+        background_tasks,
         doc_id=doc_id,
         tenant_id=access.workspace_id,
         user_id=doc.get("user_id") or access.user_id,

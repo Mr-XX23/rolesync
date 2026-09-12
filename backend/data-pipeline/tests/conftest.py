@@ -14,3 +14,8 @@ os.environ.setdefault("RAG_PERSISTENCE", "off")
 # tests stay offline and deterministic; set GATEKEEPER_SEMANTIC_ENABLED=true to
 # exercise it against the real model.
 os.environ.setdefault("GATEKEEPER_SEMANTIC_ENABLED", "false")
+
+# The staging queue is Redis-backed in the service. Unit tests must not depend on
+# (or write into) a live broker, so they run the in-process fallback; the Redis
+# code path is covered by injecting a fake client in test_durable_queue.py.
+os.environ.setdefault("INGEST_QUEUE_BACKEND", "memory")
