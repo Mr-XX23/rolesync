@@ -2,11 +2,29 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
 import os
+import math
 
 try:
     import pymongo
 except ImportError:
     pymongo = None
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Cosine similarity between two equal-length vectors; 0.0 if either is empty
+    or a different length (e.g. a legacy pseudo-vector vs a real embedding)."""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = 0.0
+    na = 0.0
+    nb = 0.0
+    for x, y in zip(a, b):
+        dot += x * y
+        na += x * x
+        nb += y * y
+    if na <= 0 or nb <= 0:
+        return 0.0
+    return dot / (math.sqrt(na) * math.sqrt(nb))
 
 @dataclass
 class VectorRecord:
@@ -227,14 +245,43 @@ class VectorStore:
         tenant_id: str,
         user_acl: list[str],
         limit: int = 5,
+        min_score: float = 0.0,
     ) -> list[VectorRecord]:
-        results: list[VectorRecord] = []
+        """ACL-filtered cosine-similarity search.
+
+        Ranks candidate chunks by cosine similarity to ``query_vector`` (real
+        semantic ranking) after a security ACL pre-filter. Reads from the
+        persistent Mongo collection when available, else the in-memory store.
+
+        NOTE: this is a brute-force scan (no native vector index — self-hosted
+        Mongo has no $vectorSearch). Correct and fine at current volume; a
+        pgvector/Atlas index is required to scale.
+        """
         user_set = set(user_acl)
+        candidates: list[VectorRecord] = []
 
-        for rec in self._in_memory.values():
-            if rec.tenant_id == tenant_id:
-                # Security ACL Pre-Filtering: User must match at least one ACL entry
-                if user_set.intersection(set(rec.acl)):
-                    results.append(rec)
+        if self._collection is not None:
+            try:
+                cursor = self._collection.find({"tenant_id": tenant_id})
+                for data in cursor:
+                    rec = VectorRecord.from_dict(data)
+                    if user_set.intersection(set(rec.acl)):
+                        candidates.append(rec)
+            except Exception as err:
+                print(f"[VectorStore] Mongo similarity scan error: {err}")
+                candidates = []
 
-        return results[:limit]
+        if not candidates:
+            for rec in self._in_memory.values():
+                if rec.tenant_id == tenant_id and user_set.intersection(set(rec.acl)):
+                    candidates.append(rec)
+
+        # If no usable query vector was supplied, preserve prior behaviour
+        # (return ACL-filtered candidates unranked).
+        if not query_vector:
+            return candidates[:limit]
+
+        scored = [(_cosine_similarity(query_vector, rec.vector), rec) for rec in candidates]
+        scored = [(s, rec) for s, rec in scored if s >= min_score]
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        return [rec for _, rec in scored[:limit]]
