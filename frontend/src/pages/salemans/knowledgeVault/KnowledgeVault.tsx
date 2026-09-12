@@ -48,6 +48,9 @@ export const KnowledgeVault: React.FC = () => {
   const [dragActive, setDragActive] = useState(false);
   const [uploadQueue, setUploadQueue] = useState<string[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Hard re-entry guard: a batch is uploading. Prevents a second drop/select from
+  // starting an overlapping upload run (the derived `isUploading` also disables the UI).
+  const uploadingRef = useRef(false);
 
   // Modals States
   const [inspectorDoc, setInspectorDoc] = useState<{ id: string; name: string } | null>(null);
@@ -150,16 +153,23 @@ export const KnowledgeVault: React.FC = () => {
     }
   }, []);
 
-  // Process File Uploads with validation
+  // Process File Uploads with validation. Supports selecting/dropping multiple files at once;
+  // while a batch is uploading the whole dropzone is disabled so a second run can't overlap.
   const processFiles = useCallback(
     async (files: FileList | File[]) => {
       const fileList = Array.from(files);
       if (fileList.length === 0) return;
 
+      // Ignore a new batch while one is already in flight (belt-and-braces with the disabled UI).
+      if (uploadingRef.current) {
+        toast.warning('A document upload is already in progress. Please wait for it to finish.', 'Upload in Progress');
+        return;
+      }
+
+      // Validate every file up front so invalid ones are reported without blocking the batch.
+      const validFiles: File[] = [];
       for (const file of fileList) {
         const ext = file.name.split('.').pop()?.toUpperCase() || '';
-
-        // Size Validation
         if (file.size > MAX_FILE_SIZE_BYTES) {
           toast.error(
             `File "${file.name}" exceeds the 25MB limit (${(file.size / (1024 * 1024)).toFixed(1)}MB).`,
@@ -167,8 +177,6 @@ export const KnowledgeVault: React.FC = () => {
           );
           continue;
         }
-
-        // Format Validation
         if (!ALLOWED_EXTENSIONS.includes(ext)) {
           toast.warning(
             `"${file.name}" format (.${ext.toLowerCase()}) is not supported. Supported: ${ALLOWED_EXTENSIONS.join(', ')}`,
@@ -176,33 +184,48 @@ export const KnowledgeVault: React.FC = () => {
           );
           continue;
         }
+        validFiles.push(file);
+      }
+      if (validFiles.length === 0) return;
 
-        // Add to upload queue
-        setUploadQueue((prev) => [...prev, file.name]);
+      uploadingRef.current = true;
+      // Seed the queue with the full batch so the banner shows the true "Uploading N files…" count.
+      setUploadQueue(validFiles.map((f) => f.name));
 
-        try {
-          const { document: newDoc, duplicate, message } = await knowledgeVaultApi.uploadFile(file);
-          if (duplicate) {
-            // Backend recognised an identical file already in the vault and skipped re-ingesting it.
-            setDocuments((prev) =>
-              prev.some((d) => d.doc_id === newDoc.doc_id) ? prev : [newDoc, ...prev]
-            );
-            toast.warning(
-              message || `"${file.name}" is already in your Knowledge Vault.`,
-              'Duplicate Skipped'
-            );
-          } else {
-            setDocuments((prev) => [newDoc, ...prev.filter((d) => d.doc_id !== newDoc.doc_id)]);
-            toast.success(`"${file.name}" queued for parsing & vectorization.`, 'Uploaded');
+      try {
+        // Upload one at a time so a large batch can't overwhelm the pipeline.
+        for (const file of validFiles) {
+          try {
+            const { document: newDoc, duplicate, message } = await knowledgeVaultApi.uploadFile(file);
+            if (duplicate) {
+              // Backend recognised an identical file already in the vault and skipped re-ingesting it.
+              setDocuments((prev) =>
+                prev.some((d) => d.doc_id === newDoc.doc_id) ? prev : [newDoc, ...prev]
+              );
+              toast.warning(
+                message || `"${file.name}" is already in your Knowledge Vault.`,
+                'Duplicate Skipped'
+              );
+            } else {
+              setDocuments((prev) => [newDoc, ...prev.filter((d) => d.doc_id !== newDoc.doc_id)]);
+              toast.success(`"${file.name}" queued for parsing & vectorization.`, 'Uploaded');
+            }
+          } catch (err: any) {
+            console.error('[KnowledgeVault] File upload error:', err);
+            toast.error(err.message || `Failed to upload "${file.name}".`, 'Upload Error');
+          } finally {
+            setUploadQueue((prev) => {
+              const idx = prev.indexOf(file.name);
+              if (idx === -1) return prev;
+              return [...prev.slice(0, idx), ...prev.slice(idx + 1)];
+            });
           }
-          // Refresh stats in background
-          knowledgeVaultApi.getStats().then(setStats);
-        } catch (err: any) {
-          console.error('[KnowledgeVault] File upload error:', err);
-          toast.error(err.message || `Failed to upload "${file.name}".`, 'Upload Error');
-        } finally {
-          setUploadQueue((prev) => prev.filter((name) => name !== file.name));
         }
+        // Refresh stats once the whole batch is queued.
+        knowledgeVaultApi.getStats().then(setStats);
+      } finally {
+        uploadingRef.current = false;
+        setUploadQueue([]);
       }
     },
     [toast]
@@ -354,6 +377,9 @@ export const KnowledgeVault: React.FC = () => {
     });
   }, [documents, filter, categoryFilter, searchQuery]);
 
+  // A batch is uploading — disable every upload/crawl entry point until it finishes.
+  const isUploading = uploadQueue.length > 0;
+
   return (
     <div className="space-y-8 animate-in fade-in duration-500 pb-16">
       {/* Page Header */}
@@ -395,6 +421,7 @@ export const KnowledgeVault: React.FC = () => {
       <VaultDropzone
         dragActive={dragActive}
         uploadQueue={uploadQueue}
+        isUploading={isUploading}
         fileInputRef={fileInputRef}
         onDrag={handleDrag}
         onDrop={handleDrop}
@@ -432,8 +459,9 @@ export const KnowledgeVault: React.FC = () => {
       {/* Floating Action Button for Quick URL Ingestion */}
       <button
         onClick={() => setIsUrlModalOpen(true)}
-        className="fixed bottom-8 right-8 w-14 h-14 bg-primary text-primary-foreground rounded-full shadow-lg flex items-center justify-center hover:scale-105 active:scale-95 transition-all z-40 group border border-primary/20 cursor-pointer"
-        title="Ingest Business Webpage"
+        disabled={isUploading}
+        className="fixed bottom-8 right-8 w-14 h-14 bg-primary text-primary-foreground rounded-full shadow-lg flex items-center justify-center hover:scale-105 active:scale-95 transition-all z-40 group border border-primary/20 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100 disabled:active:scale-100"
+        title={isUploading ? 'Please wait for the current upload to finish' : 'Ingest Business Webpage'}
       >
         <Globe className="w-6 h-6 transition-transform group-hover:rotate-12 duration-300" />
         <span className="absolute right-full mr-4 bg-primary text-primary-foreground font-semibold px-3 py-1.5 rounded-xl text-xs whitespace-nowrap opacity-0 group-hover:opacity-100 transition-all duration-300 scale-90 group-hover:scale-100 translate-x-2 group-hover:translate-x-0 shadow-sm pointer-events-none">
