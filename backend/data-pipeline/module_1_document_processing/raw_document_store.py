@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from module_1_document_processing.raw_object_store import raw_object_store
+
 try:
     import pymongo
 except ImportError:
@@ -76,26 +78,19 @@ class RawDocumentStore:
         """Saves full document record to MongoDB and saves raw binary to disk."""
         now_str = datetime.now(timezone.utc).isoformat()
         clean_name = re.sub(r"[^\w\-.]", "_", filename)
-        file_path_str = ""
 
-        # 1. Save raw bytes to storage directory on disk if provided
+        # Raw bytes go to the configured object store (MinIO / R2 / S3) with local
+        # disk as the automatic fallback, rather than being base64-inlined into
+        # MongoDB, which bloated the document collection.
+        storage_ref = ""
         if raw_bytes:
-            tenant_dir = self.storage_dir / tenant_id
-            tenant_dir.mkdir(parents=True, exist_ok=True)
-            target_path = tenant_dir / f"{doc_ref_id}_{clean_name}"
-            try:
-                target_path.write_bytes(raw_bytes)
-                file_path_str = str(target_path)
-            except Exception as err:
-                print(f"[RawDocumentStore] Warning: Could not write raw file to disk: {err}")
+            storage_ref = raw_object_store.put(
+                f"{tenant_id}/{doc_ref_id}_{clean_name}", raw_bytes, mime_type
+            ) or ""
 
-        # 2. Base64 encode for in-db storage if raw file is <= 10MB
-        raw_b64 = None
-        if raw_bytes and len(raw_bytes) <= 10 * 1024 * 1024:
-            try:
-                raw_b64 = base64.b64encode(raw_bytes).decode("utf-8")
-            except Exception:
-                pass
+        # Legacy readers expect raw_file_path; keep it populated when the object
+        # actually landed on local disk. Object-store records use raw_object_ref.
+        file_path_str = storage_ref if storage_ref and not storage_ref.startswith("s3://") else ""
 
         word_count = len(full_text_content.split()) if full_text_content else 0
         char_count = len(full_text_content) if full_text_content else 0
@@ -116,8 +111,10 @@ class RawDocumentStore:
             "sales_summary": sales_summary,
             "sales_tags": sales_tags or [],
             "full_text_content": full_text_content or "",
+            "raw_object_ref": storage_ref,
             "raw_file_path": file_path_str,
-            "raw_file_base64": raw_b64,
+            # Cleared on re-save so previously inlined blobs stop bloating Mongo.
+            "raw_file_base64": None,
             "total_chunks": total_chunks,
             "chunk_ids": chunk_ids or [],
             "parser_used": parser_used,
@@ -192,9 +189,17 @@ class RawDocumentStore:
 
         filename = doc.get("filename", "document")
         mime_type = doc.get("mime_type", "application/octet-stream")
-        file_path = doc.get("raw_file_path")
 
-        # 1. Try reading from disk
+        # 1. Object store (MinIO / R2 / S3), or a local path written as a fallback.
+        storage_ref = doc.get("raw_object_ref") or ""
+        if storage_ref:
+            content = raw_object_store.get(storage_ref)
+            if content:
+                return content, filename, mime_type
+            print(f"[RawDocumentStore] Object ref {storage_ref} unreadable; trying legacy locations.")
+
+        # 2. Legacy: file written directly to the storage volume
+        file_path = doc.get("raw_file_path")
         if file_path and os.path.exists(file_path):
             try:
                 content = Path(file_path).read_bytes()
@@ -221,6 +226,11 @@ class RawDocumentStore:
     def delete_raw_document(self, doc_ref_id: str) -> bool:
         """Deletes raw document from MongoDB, disk, and in-memory cache."""
         doc = self.get_raw_document(doc_ref_id)
+
+        # Remove the stored object first, then any legacy on-disk copy.
+        if doc and doc.get("raw_object_ref"):
+            raw_object_store.delete(doc["raw_object_ref"])
+
         if doc and doc.get("raw_file_path") and os.path.exists(doc["raw_file_path"]):
             try:
                 os.remove(doc["raw_file_path"])
