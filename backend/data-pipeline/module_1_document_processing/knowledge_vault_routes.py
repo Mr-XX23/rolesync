@@ -25,6 +25,7 @@ from module_1_document_processing.pipeline import ingestion_guards as guards
 from module_1_document_processing.pipeline.canonical_store import CanonicalStore
 from module_1_document_processing.parsing.media_queue import MEDIA_PENDING
 from module_3_batch_ingestion_vector.chunker import HierarchicalChunker
+from module_3_batch_ingestion_vector.delta_checker import VersionedHashDB
 from module_3_batch_ingestion_vector.embedding_worker import EmbeddingWorker
 from module_3_batch_ingestion_vector.vector_store import VectorStore
 from module_3_batch_ingestion_vector.pgvector_index import pgvector_index
@@ -298,6 +299,13 @@ def plan_deduplication(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _delete_doc_record(doc_id: str):
+    # Read the record before removing it: the chunk fingerprints and the lineage
+    # row are keyed by the canonical id (tenant:source:doc_id), not the short id.
+    _record = _find_doc_record(doc_id) or {}
+    _tenant = _record.get("tenant_id", "")
+    _source = _record.get("source", "USER_UPLOAD")
+    _canonical_id = f"{_tenant}:{_source}:{doc_id}" if _tenant else doc_id
+
     if _docs_col is not None:
         try:
             _docs_col.delete_one({"doc_id": doc_id})
@@ -316,6 +324,22 @@ def _delete_doc_record(doc_id: str):
             })
         except Exception as e:
             print(f"[KnowledgeVault] Error purging mongo vectors: {e}")
+
+    # Clearing the chunk fingerprints is essential. Leaving them behind makes the
+    # delta check treat a later re-upload of the same file as "unchanged", so it
+    # skips embedding entirely and the document indexes with zero chunks.
+    try:
+        hash_db = VersionedHashDB()
+        for key in {_canonical_id, doc_id}:
+            hash_db.clear_document_hashes(key)
+    except Exception as e:
+        print(f"[KnowledgeVault] Error clearing chunk hashes for {doc_id}: {e}")
+
+    # Tombstone the lineage rather than erasing the audit trail.
+    try:
+        canonical_store.mark_status(_canonical_id, "DELETED")
+    except Exception as e:
+        print(f"[KnowledgeVault] Error tombstoning lineage for {doc_id}: {e}")
 
 
 def _process_document_background(
