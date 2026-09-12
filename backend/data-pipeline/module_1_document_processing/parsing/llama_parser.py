@@ -27,8 +27,33 @@ class LlamaParserService:
         Parses attachment bytes using LlamaParse or local fallback.
         Returns (parsed_markdown, parser_used, parse_status).
         """
+        # Never return invented text: some callers ignore the status and use the
+        # string directly, so a placeholder would be chunked and indexed as if it
+        # were real document content.
         if raw_bytes is None or len(raw_bytes) == 0:
-            return f"*(Empty attachment file: {filename})*", "none", "SKIPPED"
+            return "", "none", "SKIPPED"
+
+        # Attachments are untrusted input too (arch.md: "Composio output =
+        # untrusted input"), so they run the same size and malware checks as an
+        # uploaded file rather than being parsed straight away.
+        from module_1_document_processing.pipeline import ingestion_guards as _guards
+
+        scan = _guards.security_scanner.scan_raw_bytes(raw_bytes)
+        if not scan.is_safe:
+            print(f"[LlamaParserService] Rejected attachment '{filename}': {scan.reason}")
+            return "", "rejected", "FAILED"
+
+        # Audio/video must be parked, not decoded into noise. These handlers are
+        # reached before the MIME router for Gmail/Slack, so route here too.
+        from module_1_document_processing.parsing.media_queue import MEDIA_PENDING
+        from module_1_document_processing.parsing.mime_router import MIMERouter, ParserCategory
+
+        if MIMERouter().route(mime_type=mime_type, file_path=filename) in (
+            ParserCategory.AUDIO,
+            ParserCategory.VIDEO,
+        ):
+            print(f"[LlamaParserService] Attachment '{filename}' is media; parked pending transcription.")
+            return "", "media_pending", MEDIA_PENDING
 
         if self.parser is not None:
             try:
@@ -81,7 +106,10 @@ class LlamaParserService:
             except Exception as docx_err:
                 print(f"[LlamaParserService] Local docx error for {filename}: {docx_err}")
 
-        return f"*(Parsed document content placeholder for {filename})*", "fallback_local", "SUCCESS"
+        # Nothing could be extracted. Report the failure instead of fabricating
+        # content that would be embedded and returned as a search result.
+        print(f"[LlamaParserService] No text could be extracted from attachment '{filename}'.")
+        return "", "unsupported", "FAILED"
 
     def parse(self, event: CanonicalEvent, raw_bytes: bytes | None = None) -> ParsedDocument:
         doc_id = f"{event.tenant_id}:{event.source}:{event.external_id}"
@@ -118,14 +146,31 @@ class LlamaParserService:
             except Exception as err:
                 print(f"[LlamaParserService] LlamaParse cloud parsing error: {err}. Falling back to local parser.")
 
-        # Local fallback parser
+        # Local fallback parser. Content the connector already supplied (Notion
+        # blocks, Slack text) is legitimate; inventing filler text is not, so a
+        # document with nothing extractable is reported as a parse failure rather
+        # than indexed as though it had content.
         fallback_text = (
             event.metadata.get("text_content")
             or event.metadata.get("body")
             or event.metadata.get("text")
-            or event.metadata.get("name")
-            or f"Parsed document content for {filename}"
         )
+
+        if not fallback_text or not str(fallback_text).strip():
+            print(f"[LlamaParserService] No extractable content for {filename}; reporting parse failure.")
+            return ParsedDocument(
+                doc_id=doc_id,
+                tenant_id=event.tenant_id,
+                user_id=event.user_id,
+                source=event.source,
+                external_id=event.external_id,
+                acl=list(event.acl),
+                mime_type=mime_type,
+                text_content="",
+                parse_status="FAILED",
+                parser_used="fallback_local",
+                metadata={**(event.metadata or {}), "error": "No document content could be extracted"},
+            )
 
         return ParsedDocument(
             doc_id=doc_id,

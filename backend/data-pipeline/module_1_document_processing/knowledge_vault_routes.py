@@ -575,7 +575,11 @@ def get_vault_stats(access: WorkspaceAccess = Depends(require_workspace_member))
             "total_chunks": total_chunks,
             "total_size_bytes": total_bytes,
             "active_sources_count": len(sources),
-            "vector_backend": "Atlas Vector / In-Memory",
+            "vector_backend": (
+                "pgvector (HNSW)"
+                if pgvector_index is not None and pgvector_index.available()
+                else "MongoDB / In-Memory"
+            ),
             "indexed_count": sum(1 for d in docs if d.get("status") == "Indexed"),
             "parsing_count": sum(1 for d in docs if d.get("status") == "Parsing"),
             "error_count": sum(1 for d in docs if d.get("status") == "Error"),

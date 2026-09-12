@@ -198,6 +198,11 @@ class VectorStore:
             indexed = pgvector_index.upsert(real_records)
             if indexed:
                 print(f"[VectorStore] Indexed {indexed} embeddings into pgvector (HNSW).")
+                # pgvector owns these now. Holding full float vectors in-process
+                # for the lifetime of the worker is pure memory growth, and makes
+                # reads depend on which worker served the request.
+                for rec in real_records:
+                    self._in_memory.pop(rec.vector_id, None)
 
         # MongoDB only carries chunks when pgvector is unavailable, so the same
         # embeddings are never stored twice.
@@ -355,8 +360,11 @@ class VectorStore:
                 limit=limit,
                 min_score=min_score,
             )
-            if rows is not None:
+            if rows:
                 return [self._record_from_row(row) for row in rows]
+            # An empty result can simply mean the document was indexed before the
+            # HNSW index existed, so fall through to the legacy scan rather than
+            # reporting "no matches" for content that is genuinely there.
 
         user_set = set(user_acl)
         candidates: list[VectorRecord] = []

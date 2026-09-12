@@ -49,7 +49,13 @@ class EmbeddingWorker:
         # id is env-driven so it is never accidentally set to a UI label.
         self.model_name = model_name
         self.api_model = os.environ.get("EMBEDDING_MODEL", "gemini-embedding-001").strip()
-        self.dimension = int(os.environ.get("EMBEDDING_DIMENSIONS", str(dimension)))
+        # Clamped to the same range the vector column is created with. Without
+        # this a larger value silently produces embeddings the table rejects, and
+        # every upsert would fall back to Mongo with no obvious cause.
+        requested = int(os.environ.get("EMBEDDING_DIMENSIONS", str(dimension)))
+        self.dimension = requested if 0 < requested <= 2000 else 1536
+        if self.dimension != requested:
+            print(f"[EmbeddingWorker] EMBEDDING_DIMENSIONS={requested} out of range (1-2000); using {self.dimension}.")
         self.api_key = os.environ.get("GEMINI_API_KEY", "").strip()
         self.task_type = os.environ.get("EMBEDDING_TASK_TYPE", "RETRIEVAL_DOCUMENT").strip()
         self.batch_size = max(1, int(os.environ.get("EMBEDDING_BATCH_SIZE", "100")))

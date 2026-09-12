@@ -199,6 +199,18 @@ class QueueWorker:
 
         sanitized_event = scan_res.event or event
 
+        # Connector events can carry raw bytes inline (attachments, file payloads).
+        # arch.md treats Composio output as untrusted input, so those bytes get the
+        # same size and malware policy as an uploaded file rather than going
+        # straight to the parser.
+        inline_bytes = (sanitized_event.metadata or {}).get("raw_bytes")
+        if isinstance(inline_bytes, (bytes, bytearray)) and inline_bytes:
+            payload_scan = guards.security_scanner.scan_raw_bytes(bytes(inline_bytes))
+            if not payload_scan.is_safe:
+                print(f"[QueueWorker] Rejected payload for event_id={event.event_id}: {payload_scan.reason}")
+                self.store.record_event(sanitized_event, status="QUARANTINED")
+                return
+
         # Handle DELETION events
         if sanitized_event.event_type == EventType.DELETE:
             self.deletion_handler.process_deletion(sanitized_event)
@@ -213,7 +225,10 @@ class QueueWorker:
         self.store.record_event(sanitized_event, status="STAGED")
 
         # 3. Document Parsing (Supports SUCCESS and PARTIAL_SUCCESS with skipped oversized attachments)
-        parsed_doc = self.parser_service.parse_event(sanitized_event)
+        # Parsing, embedding and classification are synchronous and network-bound
+        # (LlamaParse, Gemini, OpenRouter). Running them inline would block the
+        # event loop - and therefore every other connector - for their duration.
+        parsed_doc = await asyncio.to_thread(self.parser_service.parse_event, sanitized_event)
 
         # Audio/video is parked, not failed: the file is kept and can be replayed
         # once transcription is implemented.
@@ -250,13 +265,17 @@ class QueueWorker:
                 parsed_doc.acl.append(marker)
 
         # 5. Module 3 Batch Ingestion Pipeline (Chunker -> Delta Hash -> Embedder -> VectorStore)
-        vectors_written = self.ingestion_pipeline.process_accepted_document(parsed_doc)
+        vectors_written = await asyncio.to_thread(
+            self.ingestion_pipeline.process_accepted_document, parsed_doc
+        )
         print(f"[QueueWorker] Ingestion pipeline complete for doc_id={doc_id}: Upserted {vectors_written} vectors into VectorStore.")
 
         # 5b. Give connector documents the same treatment as manual uploads:
         # retain the parsed text, classify them, and register them in the vault
         # so they are not merely searchable-but-invisible.
-        self._register_connector_document(sanitized_event, parsed_doc, vectors_written)
+        await asyncio.to_thread(
+            self._register_connector_document, sanitized_event, parsed_doc, vectors_written
+        )
 
         # 6. Mark Lineage Complete
         self.store.record_event(sanitized_event, status="VECTOR_STORE_INDEXED")

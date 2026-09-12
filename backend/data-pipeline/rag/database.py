@@ -26,7 +26,16 @@ Base = declarative_base()
 
 RAG_SCHEMA = "rag"
 DEFAULT_RAG_DB_NAME = "rolesync-micro-rag"
-_FALLBACK_URL = f"postgresql://postgres:root@localhost:5432/{DEFAULT_RAG_DB_NAME}"
+
+
+def _fallback_url() -> str:
+    """Last-resort local URL, built from the shared database env vars rather
+    than hardcoded credentials."""
+    user = os.environ.get("DATABASE_PROVIDER_USERNAME", "postgres")
+    password = os.environ.get("DATABASE_PASSWORD", "postgres")
+    host = os.environ.get("RAG_DATABASE_HOST", "localhost")
+    port = os.environ.get("RAG_DATABASE_PORT", "5432")
+    return f"postgresql://{user}:{password}@{host}:{port}/{DEFAULT_RAG_DB_NAME}"
 
 
 def get_database_url() -> str:
@@ -45,7 +54,7 @@ def get_database_url() -> str:
             except Exception:
                 url = ""
     if not url:
-        url = _FALLBACK_URL
+        url = _fallback_url()
 
     # Inside the container "localhost" is not the Postgres host.
     if os.path.exists("/.dockerenv") and "localhost" in url:
