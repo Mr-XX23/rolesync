@@ -73,10 +73,12 @@ export const IngestUrlModal: React.FC<IngestUrlModalProps> = ({
   };
 
   const handleClose = () => {
+    // Ingestion is in flight — don't allow the modal to be dismissed (backdrop,
+    // X, or Cancel) so the crawl/index job can't be orphaned mid-request.
+    if (isSubmitting) return;
     setUrl('');
     setTitle('');
     setError('');
-    setIsSubmitting(false);
     onClose();
   };
 
@@ -107,7 +109,8 @@ export const IngestUrlModal: React.FC<IngestUrlModalProps> = ({
           <button
             type="button"
             onClick={handleClose}
-            className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer"
+            disabled={isSubmitting}
+            className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
             aria-label="Close modal"
           >
             <X className="w-5 h-5" />

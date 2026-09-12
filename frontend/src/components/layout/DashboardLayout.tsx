@@ -41,7 +41,6 @@ export const DashboardLayout: React.FC = () => {
               label: 'Sales Agent',
               icon: MessagesSquare,
               path: '/salesman/sales-agent',
-              badge: 'New',
             },
             {
               id: 'deals',
@@ -60,7 +59,6 @@ export const DashboardLayout: React.FC = () => {
               label: 'Knowledge Vault',
               icon: Library,
               path: '/salesman/knowledge-vault',
-              badge: 'Live',
             },
             {
               id: 'external-connector',

@@ -121,7 +121,15 @@ const getLocalDocs = (): KnowledgeDocument[] => {
 
 const saveLocalDocs = (docs: KnowledgeDocument[]) => {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(docs));
+    // Dedupe by doc_id (keeping the first/newest occurrence) so a re-uploaded or
+    // re-fetched document can never leave a phantom duplicate row in the cache.
+    const seen = new Set<string>();
+    const unique = docs.filter((d) => {
+      if (!d.doc_id || seen.has(d.doc_id)) return false;
+      seen.add(d.doc_id);
+      return true;
+    });
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(unique));
   } catch (e) {
     console.warn('[KnowledgeVaultApi] Local storage save error:', e);
   }

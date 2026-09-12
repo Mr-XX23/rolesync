@@ -5,6 +5,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.reactive.CorsWebFilter;
 import org.springframework.web.cors.reactive.UrlBasedCorsConfigurationSource;
@@ -58,7 +60,13 @@ public class CorsConfig {
         }
     }
 
+    // Run the CORS filter BEFORE the JWT auth filter (JwtAuthenticationWebFilter is
+    // HIGHEST_PRECEDENCE + 100). Otherwise a 401 short-circuited by the auth filter
+    // is returned without CORS headers, so the browser reports an opaque "CORS/Network
+    // Error" instead of a readable 401 — which also stops the frontend's refresh-on-401
+    // interceptor from recovering an expired session.
     @Bean
+    @Order(Ordered.HIGHEST_PRECEDENCE)
     public CorsWebFilter corsWebFilter() {
         CorsConfiguration corsConfig = new CorsConfiguration();
 
