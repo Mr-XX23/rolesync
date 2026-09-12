@@ -39,17 +39,17 @@ hit at score 0.65 → raw download from MinIO → delete cascade. All green.
 | Composio create/update triggers | ✅ | |
 | Composio **delete / ACL** events | ❌ | Providers do not emit them; reconciliation is the compensating mechanism |
 | Security scanner on **manual** uploads (type, size, ClamAV hook) | ✅ | |
-| Security scanner on **connector** payloads | 🟡 | Connector path runs only `scan_and_sanitize_event` (control-char strip + `<script>` regex). **No ClamAV, size cap or type allowlist on connector payloads or attachment bytes.** See Gap 1 |
+| Security scanner on **connector** payloads | ✅ | Inline payloads and attachments run the same size + malware policy as uploads |
 | ClamAV actually scanning | 🟡 | Lazy-connects via `CLAMAV_HOST`; **no clamav service in compose**, so inert |
 | MIME router / LlamaParse / ParserService | ✅ | |
 | Raw store (S3-compatible, local fallback, legacy readable) | 🟡 | MinIO wired; **no versioning / object-lock / KMS**; connectors store no bytes |
 | Canonical DB (Postgres, ACL snapshot, lineage) | ✅ | `rag.documents` + `rag.document_events` |
 | Normalized text retained (both paths) | ✅ | `rag.document_content`; re-index no longer re-fetches from the provider |
 | Memory gatekeeper on **both** paths | ✅ | Shared `GatekeeperEngine` singleton |
-| Deletion handler / GDPR erasure | 🟡 | Vault delete cascades text + chunks + hashes + object and tombstones lineage. **Connector `DeletionHandler` still misses `document_content`, the raw object and the registry row.** See Gap 2 |
+| Deletion handler / GDPR erasure | ✅ | Both paths cascade to text, chunks, hashes, stored object and registry row, and tombstone lineage |
 | ACL sync | ✅ | Propagates to pgvector |
 | Reconciliation sweeper | ✅ | Scheduled, **off by default**, HTTP-reachable, refuses deletion inference from incomplete listings, mass-delete ratio guard |
-| Media queue / parking | 🟡 | Generic route parks audio/video; **Gmail/Slack attachments bypass MIME routing** and can index a placeholder string. See Gap 3 |
+| Media queue / parking | 🟡 | Audio/video parked on both the generic route and the attachment path; the queue itself is still process-local and undrained |
 | Transcription workers | ❌ (deliberate) | Explicit placeholder: `available()` False, `transcribe()` raises |
 | Parse failure store | 🟡 | In-memory, one instance per `ParserService`, no endpoint reads it |
 | Embeddings | ✅ | Real Gemini `gemini-embedding-001`; **not** OpenAI Batch (no 50% discount, no rate limiter) |
@@ -68,17 +68,29 @@ Found by independent audit + live E2E; all failed *quietly*, which is why the un
 5. **`data-pipeline` had no dependency on `pgvector-db`**, so starting first latched the process into in-memory mode for its entire lifetime, with only a `print` to show for it.
 6. Earlier the same day: **deleting a document left its chunk fingerprints behind**, so re-uploading the same file indexed it with 0 chunks and no error.
 
-## Remaining gaps (prioritised)
+## P1 + P2 closed (2026-09-12, `75fb1f3`)
 
-**Gap 1 — connector input is not scanned (P1, security).** `arch.md` states "Composio output = untrusted input", but connector payloads and attachment bytes never see ClamAV, a size cap or a type allowlist. Needs a design decision on how far to trust Composio-sourced bytes.
+- **Connector input is now scanned.** Inline event payloads and every attachment run the same size + malware policy as an uploaded file, and media attachments are parked rather than decoded.
+- **Two fabrication paths removed.** An unparseable attachment returned a `"placeholder"` string with status SUCCESS, and a document with nothing extractable was turned into a filler sentence — both were chunked, embedded and served as search results. Both now report a parse failure with empty text. This mattered because `gdrive_sync_manager` ignores the returned status and used the text directly.
+- **Connector erasure cascades** to `rag.document_content`, the stored original and the registry row, not just the vectors.
+- **Legacy chunks are findable again**: an empty pgvector result now falls through to the legacy scan instead of being treated as a definitive no-match.
+- **Hygiene**: chunks leave the in-process mirror once pgvector owns them (bounded memory, worker-independent reads); parsing/embedding/classification moved off the event loop; `EMBEDDING_DIMENSIONS` clamped to the column's range; real vector backend reported instead of a hardcoded label; `requests` declared; RAG fallback URL built from env rather than hardcoded credentials.
+- **The live pgvector SQL now has automated coverage** — 9 integration tests (ordering, tenant + ACL isolation, fallback exclusion, listing, deletion, ACL update) that run against a real database via `RAG_PERSISTENCE=on`, and skip otherwise.
 
-**Gap 2 — connector deletion is incomplete (P1, GDPR).** `DeletionHandler` purges canonical + hashes + vectors but leaves `rag.document_content`, the raw object and the `knowledge_documents` row.
+## Remaining gaps
 
-**Gap 3 — Gmail/Slack attachments bypass MIME routing (P1).** Those handlers run before the router, so a media attachment reaches `parse_attachment_bytes` and can return a `"Parsed document content placeholder…"` string with status SUCCESS, which is then chunked, embedded and indexed.
-
-**Gap 4 — legacy Mongo chunks are invisible to search (P1).** Search returns the pgvector result whenever it is non-`None`, including `[]`. Documents indexed before pgvector still render in the chunk viewer but cannot be found. No migration exists. (Currently moot: all RAG data was wiped 2026-09-12.)
-
-**P2 / hygiene:** unbounded in-process vector mirror; blocking classification + embedding calls on the event loop; `EMBEDDING_DIMENSIONS` can desync from the created table (`CREATE TABLE IF NOT EXISTS` makes later changes a no-op); unreachable `QUARANTINED` and vault `MEDIA_PENDING` branches; stale `"Atlas Vector / In-Memory"` label; `requests` missing from `requirements.txt`; hardcoded default credentials in the RAG fallback URL; **the live pgvector SQL has no automated coverage** (`tests/conftest.py` pins `RAG_PERSISTENCE=off`), which is why these surfaced only under live testing.
+| Gap | Priority | Note |
+|---|---|---|
+| Durable queues (Redis/Celery) | High for scale | Still in-process `asyncio.Queue`; `celery[redis]` declared but unused |
+| Observability (Grafana/Sentry, queue depth, DLQ) | High for operability | None |
+| Raw archive for connector bytes | Medium | Provider remains source of truth; normalized text *is* retained, so re-index no longer re-fetches |
+| Object versioning / lock / KMS on the raw store | Medium | MinIO holds plain objects |
+| Parse failure store | Medium | In-memory, one instance per `ParserService`, no endpoint reads it |
+| Transcription | Deliberate placeholder | Media parked; `MediaJobQueue` is process-local and not drained |
+| ClamAV daemon | Medium | Scanner wired and lazy-connecting, but no `clamav` service in compose, so malware scanning is inert |
+| Real Composio delete/ACL triggers | Low (compensated) | Reconciliation is the detector; off by default |
+| Zoom / Outlook sources | Skipped by decision | |
+| `gatekeeper_message` QUARANTINED branch | Cosmetic | `GatekeeperEngine` only returns ACCEPTED / REJECTED_LEXICAL |
 
 ## Local infrastructure (gitignored — recreate on any other machine)
 
