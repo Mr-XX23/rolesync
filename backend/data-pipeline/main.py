@@ -23,6 +23,8 @@ from module_1_document_processing.knowledge_vault_routes import router as knowle
 from catalog.routes import router as catalog_router
 from catalog.database import init_catalog_db
 from catalog.csv_importer import catalog_import_worker
+from rag.database import init_rag_db
+from rag.state import set_persistence_available
 
 raw_eureka = os.environ.get("EUREKA_SERVER", "http://eureka-service:8761/eureka/")
 if "localhost" in raw_eureka or "127.0.0.1" in raw_eureka:
@@ -36,6 +38,20 @@ INSTANCE_HOST = os.environ.get("DATA_PIPELINE_HOSTNAME", "data-pipeline")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Initialize RAG pipeline persistence (canonical lineage, chunk hashes, checkpoints).
+    # Runs before any worker starts so the stores resolve to Postgres, not memory.
+    try:
+        rag_ready = init_rag_db()
+        set_persistence_available(rag_ready)
+        print(
+            "RAG persistence enabled (Postgres)."
+            if rag_ready
+            else "RAG persistence unavailable - falling back to in-memory stores."
+        )
+    except Exception as e:
+        set_persistence_available(False)
+        print(f"RAG persistence initialization error (using in-memory stores): {e}")
+
     # Start Staging Queue Worker
     await queue_worker.start()
 

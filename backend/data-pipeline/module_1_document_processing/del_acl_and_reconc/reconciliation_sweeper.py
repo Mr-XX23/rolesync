@@ -35,10 +35,11 @@ class ReconciliationSweeper:
         live_doc_map = {doc["external_id"]: doc for doc in live_source_docs if "external_id" in doc}
         
         # Check all indexed documents for this tenant & source
-        indexed_docs = [
-            doc for doc in self.canonical_store._store.values()
-            if doc.tenant_id == tenant_id and doc.source == source and doc.status != "DELETED"
-        ]
+        indexed_docs = self.canonical_store.list_documents(
+            tenant_id=tenant_id,
+            source=source,
+            exclude_statuses=("DELETED",),
+        )
 
         report.total_checked = len(indexed_docs)
 
