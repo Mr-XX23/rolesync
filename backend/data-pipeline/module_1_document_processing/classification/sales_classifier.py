@@ -15,6 +15,88 @@ VALID_SALES_CATEGORIES = {
     "GENERAL_RESOURCE",
 }
 
+# ---------------------------------------------------------------------------
+# Dynamic content sampling for classification
+# ---------------------------------------------------------------------------
+# Defaults (all overridable via env). Kept intentionally small: the classifier
+# only needs a REPRESENTATIVE overview of a document to categorize it, never the
+# full text — this is what caps LLM token cost. max_chars is derived from a token
+# budget and must stay well within the OpenRouter model's input-context window.
+DEFAULT_CLASSIFICATION_MAX_TOKENS = 4000   # hard classification input budget (tokens)
+DEFAULT_CHARS_PER_TOKEN = 4                # rough heuristic (~4 chars per token)
+DEFAULT_MIN_CHUNK_CHARS = 500              # smallest useful sample region
+DEFAULT_MAX_REGIONS = 12                   # cap on number of sampled regions
+DEFAULT_REGION_STRIDE_CHARS = 6000         # ~one region per this many chars, before capping
+
+_SAMPLE_SEPARATOR = "\n\n[...]\n\n"
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        value = int(str(os.environ.get(name, "")).strip())
+        return value if value > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def build_classification_content(
+    text: str,
+    *,
+    max_chars: int,
+    min_chunk_chars: int = DEFAULT_MIN_CHUNK_CHARS,
+    max_regions: int = DEFAULT_MAX_REGIONS,
+    region_stride_chars: int = DEFAULT_REGION_STRIDE_CHARS,
+    separator: str = _SAMPLE_SEPARATOR,
+) -> str:
+    """
+    Build a representative, budget-bounded classification input from a document.
+
+    Strategy:
+      * Short document (<= max_chars): used in full, no sampling.
+      * Larger document: sampled DETERMINISTICALLY from evenly-spaced regions that
+        span the beginning, middle(s) and end. The number of regions scales with
+        the document size (~one per region_stride_chars) up to max_regions, and the
+        total sampled length (including separators) never exceeds max_chars.
+
+    The same logic works for 1K, 10K, 100K, 1M+ character documents: bigger docs get
+    more regions (each region a smaller slice of the fixed budget), so the classifier
+    always sees the whole document without ever exceeding the token budget.
+    """
+    text = (text or "").strip()
+    if not text:
+        return ""
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text  # short enough — classify on the entire document
+
+    sep_len = len(separator)
+
+    # How many regions the budget can afford at the minimum chunk size (separators
+    # included). Guarantees chunk_size >= min_chunk_chars and total <= max_chars.
+    affordable = max(1, (max_chars + sep_len) // (min_chunk_chars + sep_len))
+
+    # Region count scales with document size, then is bounded by max_regions and
+    # by what the budget can actually afford.
+    regions = round(len(text) / max(1, region_stride_chars))
+    regions = max(3, min(max_regions, regions))
+    regions = max(1, min(regions, affordable))
+
+    sep_overhead = sep_len * (regions - 1)
+    content_budget = max(min_chunk_chars, max_chars - sep_overhead)
+    chunk_size = max(min_chunk_chars, content_budget // regions)
+
+    if regions == 1:
+        positions = [0]
+    else:
+        step = (len(text) - chunk_size) / (regions - 1)
+        positions = [round(i * step) for i in range(regions)]
+
+    chunks = []
+    for pos in positions:
+        start = max(0, min(pos, len(text) - chunk_size))
+        chunks.append(text[start:start + chunk_size])
+
+    return separator.join(chunks)
+
 class SalesClassificationResult(BaseModel):
     category: str = "GENERAL_RESOURCE"
     target_competitor: Optional[str] = None
@@ -68,6 +150,15 @@ class SalesClassifier:
         self.model_name = os.environ.get("OPENROUTER_MODEL", "google/gemma-4-31b-it:free").strip()
         self.site_url = os.environ.get("OPENROUTER_SITE_URL", "https://rolesync.ai")
         self.site_name = os.environ.get("OPENROUTER_SITE_NAME", "RoleSync Enterprise AI")
+
+        # Classification content-sampling budget (env-overridable). max_chars is the
+        # hard cap on how much document text is ever sent to the classifier.
+        self.max_classification_tokens = _env_int("CLASSIFICATION_MAX_TOKENS", DEFAULT_CLASSIFICATION_MAX_TOKENS)
+        self.chars_per_token = _env_int("CLASSIFICATION_CHARS_PER_TOKEN", DEFAULT_CHARS_PER_TOKEN)
+        self.max_classification_chars = self.max_classification_tokens * self.chars_per_token
+        self.min_chunk_chars = _env_int("CLASSIFICATION_MIN_CHUNK_CHARS", DEFAULT_MIN_CHUNK_CHARS)
+        self.max_regions = _env_int("CLASSIFICATION_MAX_REGIONS", DEFAULT_MAX_REGIONS)
+        self.region_stride_chars = _env_int("CLASSIFICATION_REGION_STRIDE_CHARS", DEFAULT_REGION_STRIDE_CHARS)
 
     def classify(
         self,
@@ -130,14 +221,23 @@ class SalesClassifier:
     ) -> Optional[SalesClassificationResult]:
         import requests
 
-        # Extract snippet of up to 3500 chars for classification efficiency
-        snippet = (text_content or "").strip()[:3500]
+        # Build a representative, budget-bounded classification input. Short docs are
+        # used whole; larger docs are sampled across beginning/middle/end so the
+        # classifier sees the entire document without exceeding the token budget.
+        snippet = build_classification_content(
+            text_content or "",
+            max_chars=self.max_classification_chars,
+            min_chunk_chars=self.min_chunk_chars,
+            max_regions=self.max_regions,
+            region_stride_chars=self.region_stride_chars,
+        )
         if not snippet and not filename:
             return None
 
         system_prompt = (
             "You are an expert Enterprise Sales Intelligence Specialist and Sales Knowledge Librarian. "
-            "Analyze the provided business document title and content excerpt, and classify it into exactly ONE sales category.\n\n"
+            "Analyze the provided business document title and content (which may be representative excerpts "
+            "sampled from across the whole document), and classify it into exactly ONE sales category.\n\n"
             "Categories available:\n"
             "- BATTLECARD: Competitor comparison, objection handling, win/loss strategies, competitor weaknesses/strengths.\n"
             "- PRICING_PACKAGING: Rate cards, discounting rules, tier packaging, quotes, licensing fees, seat costs.\n"
@@ -160,7 +260,7 @@ class SalesClassifier:
         user_content = (
             f"Filename: {filename}\n"
             f"MIME Type: {mime_type}\n"
-            f"Content Excerpt:\n{snippet}"
+            f"Representative content samples (may span the beginning, middle and end of the document):\n{snippet}"
         )
 
         headers = {

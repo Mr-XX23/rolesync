@@ -680,11 +680,14 @@ def reclassify_document(
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found.")
 
-    snippet = doc.get("metadata", {}).get("preview_snippet", doc.get("name", ""))
+    # Reclassify against the FULL document text (the classifier samples it within a
+    # token budget), not the tiny stored preview snippet. Fall back to the snippet
+    # only if the full text isn't available (e.g. not yet indexed).
+    full_text = raw_document_store.get_full_text(doc_id) or doc.get("metadata", {}).get("preview_snippet", doc.get("name", ""))
     classification = sales_classifier.classify(
         filename=doc.get("name", ""),
         mime_type=doc.get("metadata", {}).get("content_type", "text/plain"),
-        text_content=snippet,
+        text_content=full_text,
     )
 
     doc["category"] = classification.category
