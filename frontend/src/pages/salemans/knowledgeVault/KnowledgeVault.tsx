@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Globe } from 'lucide-react';
+import { Globe, Layers } from 'lucide-react';
 import { useToast } from '../../../context/ToastContext';
 import { useAppSelector } from '../../../store';
 import {
@@ -13,6 +13,7 @@ import { useAdaptivePolling } from './useAdaptivePolling';
 import { VectorInspectorModal } from './VectorInspectorModal';
 import { IngestUrlModal } from './IngestUrlModal';
 import { DeleteConfirmModal } from './DeleteConfirmModal';
+import { DeduplicateModal } from './DeduplicateModal';
 import { EditSalesMetadataModal } from './EditSalesMetadataModal';
 import { VaultMetricsCards } from './VaultMetricsCards';
 import { VaultDropzone } from './VaultDropzone';
@@ -53,6 +54,7 @@ export const KnowledgeVault: React.FC = () => {
   const [isUrlModalOpen, setIsUrlModalOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string; isAbort: boolean } | null>(null);
   const [editingSalesDoc, setEditingSalesDoc] = useState<KnowledgeDocument | null>(null);
+  const [isDedupOpen, setIsDedupOpen] = useState(false);
 
   // Load Vault Data
   const loadVaultData = useCallback(
@@ -179,9 +181,20 @@ export const KnowledgeVault: React.FC = () => {
         setUploadQueue((prev) => [...prev, file.name]);
 
         try {
-          const newDoc = await knowledgeVaultApi.uploadFile(file);
-          setDocuments((prev) => [newDoc, ...prev.filter((d) => d.doc_id !== newDoc.doc_id)]);
-          toast.success(`"${file.name}" queued for parsing & vectorization.`, 'Uploaded');
+          const { document: newDoc, duplicate, message } = await knowledgeVaultApi.uploadFile(file);
+          if (duplicate) {
+            // Backend recognised an identical file already in the vault and skipped re-ingesting it.
+            setDocuments((prev) =>
+              prev.some((d) => d.doc_id === newDoc.doc_id) ? prev : [newDoc, ...prev]
+            );
+            toast.warning(
+              message || `"${file.name}" is already in your Knowledge Vault.`,
+              'Duplicate Skipped'
+            );
+          } else {
+            setDocuments((prev) => [newDoc, ...prev.filter((d) => d.doc_id !== newDoc.doc_id)]);
+            toast.success(`"${file.name}" queued for parsing & vectorization.`, 'Uploaded');
+          }
           // Refresh stats in background
           knowledgeVaultApi.getStats().then(setStats);
         } catch (err: any) {
@@ -356,6 +369,15 @@ export const KnowledgeVault: React.FC = () => {
             Your central repository for sales materials. Upload battlecards, pricing sheets, and product specs to power your AI assistant with accurate deal intelligence.
           </p>
         </div>
+        <button
+          type="button"
+          onClick={() => setIsDedupOpen(true)}
+          className="flex items-center gap-2 px-3.5 py-2 rounded-lg border border-border bg-card hover:bg-muted text-sm font-semibold text-foreground transition-colors cursor-pointer shrink-0"
+          title="Find and remove duplicate documents"
+        >
+          <Layers className="w-4 h-4" />
+          Clean up duplicates
+        </button>
       </section>
 
       {/* Dynamic KPI Metric Cards */}
@@ -450,6 +472,12 @@ export const KnowledgeVault: React.FC = () => {
         isAbort={!!deleteTarget?.isAbort}
         onConfirm={handleConfirmDelete}
         onClose={() => setDeleteTarget(null)}
+      />
+
+      <DeduplicateModal
+        isOpen={isDedupOpen}
+        onClose={() => setIsDedupOpen(false)}
+        onCleaned={() => loadVaultData()}
       />
     </div>
   );
