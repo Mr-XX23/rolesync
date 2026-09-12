@@ -18,6 +18,11 @@ _GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 class EmbeddedChunk:
     node: TextNode
     vector: list[float]
+    # True when the vector is the deterministic pseudo-embedding rather than a
+    # real one. Callers must not treat these as searchable, and must not commit
+    # their delta hashes, or a transient API failure would be recorded as a
+    # successful index and could never be repaired.
+    is_fallback: bool = False
 
 
 class EmbeddingWorker:
@@ -59,7 +64,10 @@ class EmbeddingWorker:
         if not use_real:
             reason = "GEMINI_API_KEY not set" if not self.api_key else "requests unavailable"
             print(f"[EmbeddingWorker] {reason} — using deterministic pseudo-vectors (NOT semantic) for {len(nodes)} chunks.")
-            return [EmbeddedChunk(node=n, vector=self._pseudo_vector(n.chunk_hash)) for n in nodes]
+            return [
+                EmbeddedChunk(node=n, vector=self._pseudo_vector(n.chunk_hash), is_fallback=True)
+                for n in nodes
+            ]
 
         print(f"[EmbeddingWorker] Generating embeddings for {len(nodes)} chunks via {self.api_model} (dim={self.dimension}, task={self.task_type})...")
         embedded: list[EmbeddedChunk] = []
@@ -67,13 +75,17 @@ class EmbeddingWorker:
         for start in range(0, len(nodes), self.batch_size):
             batch = nodes[start:start + self.batch_size]
             vectors = self._embed_batch([n.text for n in batch])
-            if vectors is None:
-                print(f"[EmbeddingWorker] Batch at offset {start} failed — pseudo-vector fallback for {len(batch)} chunks.")
+            batch_failed = vectors is None
+            if batch_failed:
+                print(
+                    f"[EmbeddingWorker] Batch at offset {start} failed — pseudo-vector fallback for "
+                    f"{len(batch)} chunks; they will NOT be indexed and can be repaired by re-indexing."
+                )
                 vectors = [self._pseudo_vector(n.chunk_hash) for n in batch]
             else:
                 real_ok += len(batch)
             for node, vec in zip(batch, vectors):
-                embedded.append(EmbeddedChunk(node=node, vector=vec))
+                embedded.append(EmbeddedChunk(node=node, vector=vec, is_fallback=batch_failed))
 
         print(f"[EmbeddingWorker] Generated {len(embedded)} embeddings ({real_ok} real, {len(embedded) - real_ok} fallback).")
         return embedded

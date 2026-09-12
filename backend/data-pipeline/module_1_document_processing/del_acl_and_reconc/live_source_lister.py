@@ -19,7 +19,14 @@ from typing import Any, Optional
 # Sources whose contents are a bounded, listable set. Mailboxes and chat
 # histories are unbounded streams: a partial page says nothing about deletion,
 # so they are never swept for tombstones.
-SWEEPABLE_SOURCES = ("gdrive", "notion", "calendar")
+# These must match the `source` values actually persisted on documents, not the
+# connector's colloquial name: calendar events are stored as "google_calendar",
+# so keying this "calendar" made every calendar sweep match zero documents while
+# still spending Composio executions.
+SWEEPABLE_SOURCES = ("gdrive", "notion", "google_calendar")
+
+# Colloquial names accepted from callers, mapped to the stored source value.
+SOURCE_ALIASES = {"calendar": "google_calendar", "googlecalendar": "google_calendar"}
 UNSWEEPABLE_REASON = (
     "source is an unbounded message stream; a partial listing cannot prove deletion"
 )
@@ -81,6 +88,7 @@ class LiveSourceLister:
     # ---- per-source listings --------------------------------------------
     def list_source(self, source: str, user_id: str) -> LiveListing:
         key = (source or "").lower()
+        key = SOURCE_ALIASES.get(key, key)
         if key not in SWEEPABLE_SOURCES:
             return LiveListing(source=key, complete=False, reason=UNSWEEPABLE_REASON)
 
@@ -160,7 +168,7 @@ class LiveSourceLister:
             nested = data.get("data") if isinstance(data.get("data"), dict) else {}
             next_token = data.get("nextPageToken") or (nested.get("nextPageToken") if nested else None)
             if next_token:
-                return LiveListing(source="calendar", items=items, complete=False, reason="listing truncated")
-            return LiveListing(source="calendar", items=items, complete=True)
+                return LiveListing(source="google_calendar", items=items, complete=False, reason="listing truncated")
+            return LiveListing(source="google_calendar", items=items, complete=True)
 
-        return LiveListing(source="calendar", complete=False, reason="listing call failed")
+        return LiveListing(source="google_calendar", complete=False, reason="listing call failed")

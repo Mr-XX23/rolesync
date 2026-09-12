@@ -107,6 +107,9 @@ class VectorStore:
         self.db_name = os.environ.get("MONGODB_DB_NAME", "rolesync_rag")
         self.collection_name = "vector_chunks"
         self._in_memory: dict[str, VectorRecord] = {}
+        # Whether the most recent upsert reached a durable store; the bulk writer
+        # refuses to commit delta hashes when it did not.
+        self.last_write_durable: bool = False
 
         self._mongo_client = None
         self._collection = None
@@ -158,6 +161,12 @@ class VectorStore:
             next_id = getattr(node, "next_chunk_id", None)
             tot = getattr(node, "total_chunks", 0)
 
+            # Flag pseudo-embeddings so they can be excluded from search and
+            # repaired later, instead of silently degrading retrieval quality.
+            chunk_metadata = dict(node.metadata or {})
+            if getattr(item, "is_fallback", False):
+                chunk_metadata["embedding_fallback"] = True
+
             rec = VectorRecord(
                 vector_id=node.chunk_id,
                 doc_id=node.doc_id,
@@ -173,21 +182,26 @@ class VectorStore:
                 prev_chunk_id=prev_id,
                 next_chunk_id=next_id,
                 total_chunks=tot,
-                metadata=node.metadata,
+                metadata=chunk_metadata,
             )
             self._in_memory[node.chunk_id] = rec
             records.append(rec)
             count += 1
 
-        # pgvector is the chunk store: it serves both search and the chunk viewer.
+        # Pseudo-embeddings are never put in the search index: a transient
+        # provider outage must not quietly poison retrieval.
+        real_records = [r for r in records if not r.metadata.get("embedding_fallback")]
+        fallback_count = len(records) - len(real_records)
+
         indexed = 0
-        if pgvector_index is not None and records:
-            indexed = pgvector_index.upsert(records)
+        if pgvector_index is not None and real_records:
+            indexed = pgvector_index.upsert(real_records)
             if indexed:
                 print(f"[VectorStore] Indexed {indexed} embeddings into pgvector (HNSW).")
 
         # MongoDB only carries chunks when pgvector is unavailable, so the same
         # embeddings are never stored twice.
+        mongo_written = 0
         if indexed == 0 and self._collection is not None:
             for rec in records:
                 try:
@@ -196,12 +210,35 @@ class VectorStore:
                         {"$set": rec.to_dict()},
                         upsert=True,
                     )
+                    mongo_written += 1
                 except Exception as err:
                     print(f"[VectorStore] Mongo vector upsert error: {err}")
 
-        destination = "pgvector" if indexed else "MongoDB fallback"
-        print(f"[VectorStore] Upserted {count} vector records into VectorStore ({destination}).")
-        return count
+        # Did a DURABLE store accept the write? The caller gates its delta-hash
+        # commit on this: a fingerprint recorded for a chunk that only ever lived
+        # in this process would make the loss permanent.
+        self.last_write_durable = bool(indexed or mongo_written)
+
+        has_durable_store = self._collection is not None or (
+            pgvector_index is not None and pgvector_index.available()
+        )
+        if indexed:
+            result, destination = indexed, "pgvector"
+        elif mongo_written:
+            result, destination = mongo_written, "MongoDB fallback"
+        elif not has_durable_store:
+            # Fully degraded (tests / local dev with no datastore): chunks exist
+            # in-process only, and no hashes will be committed for them.
+            result, destination = count, "in-memory only"
+        else:
+            # A durable store exists but refused the write - surface that rather
+            # than reporting the document as successfully indexed.
+            result, destination = 0, "none"
+
+        if fallback_count:
+            print(f"[VectorStore] {fallback_count} chunk(s) used fallback embeddings and were NOT added to the search index.")
+        print(f"[VectorStore] Persisted {result}/{count} vector records ({destination}).")
+        return result
 
     def count_vectors(self, tenant_id: str, source: str, user_id: str = "") -> int:
         """Returns accurate count of stored vector records across MongoDB and memory."""

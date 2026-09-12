@@ -63,6 +63,8 @@ SELECT vector_id, doc_id, doc_ref_id, tenant_id, user_id, source, external_id,
 FROM {TABLE}
 WHERE tenant_id = :tenant_id
   AND embedding IS NOT NULL
+  -- Never serve pseudo-embeddings as search results.
+  AND (meta->>'embedding_fallback') IS DISTINCT FROM 'true'
   AND EXISTS (
         SELECT 1 FROM jsonb_array_elements_text(acl) AS entry
         WHERE entry IN :acl_list

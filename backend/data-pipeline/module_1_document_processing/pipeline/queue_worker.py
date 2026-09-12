@@ -240,6 +240,15 @@ class QueueWorker:
 
         self.store.record_event(sanitized_event, status="GATEKEEPER_ACCEPTED")
 
+        # Connector normalizers set provider-native ACLs (a mailbox owner's email,
+        # a Slack sender id). Knowledge-vault search filters on the workspace and
+        # caller identity, so without these markers connector documents are
+        # indexed but unreachable - Gmail in particular was invisible to search.
+        workspace_acl = [f"tenant:{sanitized_event.tenant_id}", f"user:{sanitized_event.user_id}"]
+        for marker in workspace_acl:
+            if marker not in parsed_doc.acl:
+                parsed_doc.acl.append(marker)
+
         # 5. Module 3 Batch Ingestion Pipeline (Chunker -> Delta Hash -> Embedder -> VectorStore)
         vectors_written = self.ingestion_pipeline.process_accepted_document(parsed_doc)
         print(f"[QueueWorker] Ingestion pipeline complete for doc_id={doc_id}: Upserted {vectors_written} vectors into VectorStore.")

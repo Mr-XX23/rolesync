@@ -72,7 +72,8 @@ async def lifespan(app: FastAPI):
     reconciliation_scheduler.providers = {
         "gdrive": gdrive_sync_manager,
         "notion": notion_sync_manager,
-        "calendar": calendar_sync_manager,
+        # Keyed by the stored `source` value, not the connector's colloquial name.
+        "google_calendar": calendar_sync_manager,
     }
     await reconciliation_scheduler.start_scheduler()
 
