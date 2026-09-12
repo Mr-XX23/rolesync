@@ -6,6 +6,7 @@ import { ALLOWED_EXTENSIONS } from './vaultUtils';
 interface VaultDropzoneProps {
   dragActive: boolean;
   uploadQueue: string[];
+  isUploading?: boolean;
   fileInputRef: React.RefObject<HTMLInputElement | null>;
   onDrag: (e: React.DragEvent) => void;
   onDrop: (e: React.DragEvent) => void;
@@ -23,6 +24,7 @@ export const VaultDropzone: React.FC<VaultDropzoneProps> = React.memo(
   ({
     dragActive,
     uploadQueue,
+    isUploading = false,
     fileInputRef,
     onDrag,
     onDrop,
@@ -41,18 +43,23 @@ export const VaultDropzone: React.FC<VaultDropzoneProps> = React.memo(
           className="hidden"
           ref={fileInputRef}
           onChange={onFileChange}
+          disabled={isUploading}
         />
 
         <div
-          onDragEnter={onDrag}
-          onDragLeave={onDrag}
-          onDragOver={onDrag}
-          onDrop={onDrop}
-          onClick={() => fileInputRef.current?.click()}
-          className={`w-full border-2 border-dashed rounded-2xl p-8 md:p-10 flex flex-col items-center justify-center text-center transition-all cursor-pointer relative overflow-hidden bg-card/60 ${
-            dragActive
-              ? 'border-primary bg-primary/5 scale-[0.99] shadow-inner ring-4 ring-primary/10'
-              : 'border-border/80 hover:border-primary/50 hover:bg-muted/30 shadow-2xs'
+          onDragEnter={isUploading ? undefined : onDrag}
+          onDragLeave={isUploading ? undefined : onDrag}
+          onDragOver={isUploading ? undefined : onDrag}
+          onDrop={isUploading ? undefined : onDrop}
+          onClick={() => {
+            if (!isUploading) fileInputRef.current?.click();
+          }}
+          className={`w-full border-2 border-dashed rounded-2xl p-8 md:p-10 flex flex-col items-center justify-center text-center transition-all relative overflow-hidden bg-card/60 ${
+            isUploading
+              ? 'border-border/80 opacity-90 cursor-not-allowed'
+              : dragActive
+              ? 'border-primary bg-primary/5 scale-[0.99] shadow-inner ring-4 ring-primary/10 cursor-pointer'
+              : 'border-border/80 hover:border-primary/50 hover:bg-muted/30 shadow-2xs cursor-pointer'
           }`}
         >
           {/* Active Upload Queue Banner */}
@@ -97,6 +104,9 @@ export const VaultDropzone: React.FC<VaultDropzoneProps> = React.memo(
           <div className="flex flex-wrap items-center justify-center gap-3">
             <Button
               variant="primary"
+              disabled={isUploading}
+              isLoading={isUploading}
+              loadingText="Uploading..."
               onClick={(e) => {
                 e.stopPropagation();
                 fileInputRef.current?.click();
@@ -107,6 +117,7 @@ export const VaultDropzone: React.FC<VaultDropzoneProps> = React.memo(
             </Button>
             <Button
               variant="outline"
+              disabled={isUploading}
               onClick={(e) => {
                 e.stopPropagation();
                 onOpenUrlModal();
