@@ -50,13 +50,27 @@ class QueueWorker:
         self._handlers: dict[str, Callable[[dict[str, Any]], Any]] = {
             JOB_CONNECTOR_EVENT: self._handle_connector_event,
         }
+        # Called when a job kind has exhausted its retries, so the owning module
+        # can record the outcome instead of leaving a record stuck mid-flight.
+        self._on_dead: dict[str, Callable[[dict[str, Any]], Any]] = {}
         self._worker_tasks: list[asyncio.Task] = []
         self._is_running = False
 
-    def register_handler(self, kind: str, handler: Callable[[dict[str, Any]], Any]) -> None:
+    def register_handler(
+        self,
+        kind: str,
+        handler: Callable[[dict[str, Any]], Any],
+        on_dead: Callable[[dict[str, Any]], Any] | None = None,
+    ) -> None:
         """Route a job kind to a handler. Lets other modules (the knowledge vault
-        upload path) put work on the same durable queue without importing it."""
+        upload path) put work on the same durable queue without importing it.
+
+        `on_dead` runs once the queue gives up on a job, so a failure that is
+        still being retried is not reported to the user as final.
+        """
         self._handlers[kind] = handler
+        if on_dead is not None:
+            self._on_dead[kind] = on_dead
 
     async def start(self) -> None:
         if self._is_running:
@@ -126,22 +140,47 @@ class QueueWorker:
                     f"[QueueWorker] Job {job.job_id} ({job.kind}) failed on attempt "
                     f"{job.attempts}/{self.queue.max_attempts}: {err} -> {outcome}"
                 )
+                if outcome == "dead":
+                    await self._notify_dead(job)
+
+    async def _notify_dead(self, job: Job) -> None:
+        callback = self._on_dead.get(job.kind)
+        if callback is None:
+            return
+        try:
+            await self._run(callback, job.payload)
+        except Exception as err:
+            # A failing callback must not take the worker loop down with it.
+            print(f"[QueueWorker] on_dead callback failed for {job.job_id}: {err}")
 
     async def _dispatch(self, job: Job) -> None:
         handler = self._handlers.get(job.kind)
         if handler is None:
             raise RuntimeError(f"No handler registered for job kind '{job.kind}'")
-        result = handler(job.payload)
+        await self._run(handler, job.payload)
+
+    @staticmethod
+    async def _run(fn: Callable[[dict[str, Any]], Any], payload: dict[str, Any]) -> Any:
+        """Run a handler without stalling the event loop.
+
+        Ingestion handlers are ordinary blocking functions - they call LlamaParse,
+        the classifier and the embeddings API, and sleep between embedding
+        retries. Calling one directly would freeze every other request, the health
+        check and the Eureka heartbeat for the whole document.
+        """
+        if inspect.iscoroutinefunction(fn):
+            return await fn(payload)
+        result = await asyncio.to_thread(fn, payload)
         if inspect.isawaitable(result):
-            await result
+            result = await result
+        return result
 
     async def _handle_connector_event(self, payload: dict[str, Any]) -> None:
         event = payload_to_event(payload)
-        try:
-            await self._process_event(event)
-        finally:
-            # The staged copy exists only to carry bytes through the queue.
-            discard_staged_bytes(payload.get("staged_ref") or "")
+        await self._process_event(event)
+        # Only on success. Discarding in a `finally` would destroy the bytes a
+        # retry needs, turning the first transient failure into a permanent one.
+        discard_staged_bytes(payload.get("staged_ref") or "")
 
     @staticmethod
     def _display_name(event: CanonicalEvent, doc_id: str) -> str:

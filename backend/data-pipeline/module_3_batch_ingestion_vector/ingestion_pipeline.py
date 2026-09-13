@@ -5,10 +5,16 @@ from module_3_batch_ingestion_vector.embedding_worker import EmbeddingWorker
 from module_3_batch_ingestion_vector.vector_store import VectorStore
 from module_3_batch_ingestion_vector.bulk_writer import BulkWriter
 from module_3_batch_ingestion_vector.checkpoint_store import CheckpointStore
-from module_3_batch_ingestion_vector.dlq import DeadLetterQueue
 
 class BatchIngestionPipeline:
-    """Facade orchestrating Module 3 Batch Ingestion Pipeline."""
+    """Facade orchestrating Module 3 Batch Ingestion Pipeline.
+
+    Failures are re-raised rather than absorbed. They used to be pushed to an
+    in-memory dead-letter list that nothing ever read - and which was rebuilt per
+    document, so it was discarded moments later - leaving a FAILED checkpoint as
+    the only trace and no retry of any kind. The ingestion queue is the real dead
+    letter queue now: it retries with backoff and keeps what it cannot process.
+    """
 
     def __init__(
         self,
@@ -17,7 +23,6 @@ class BatchIngestionPipeline:
         embedding_worker: EmbeddingWorker | None = None,
         bulk_writer: BulkWriter | None = None,
         checkpoint_store: CheckpointStore | None = None,
-        dlq: DeadLetterQueue | None = None,
     ) -> None:
         self.chunker = chunker or HierarchicalChunker()
         self.delta_checker = delta_checker or DeltaChecker()
@@ -25,7 +30,6 @@ class BatchIngestionPipeline:
         self.bulk_writer = bulk_writer or BulkWriter(delta_checker=self.delta_checker)
         self.vector_store = self.bulk_writer.vector_store
         self.checkpoint_store = checkpoint_store or CheckpointStore()
-        self.dlq = dlq or DeadLetterQueue()
 
     def process_accepted_document(self, document: ParsedDocument) -> int:
         return self.process_document(document)
@@ -65,5 +69,4 @@ class BatchIngestionPipeline:
         except Exception as err:
             print(f"[BatchIngestionPipeline] Pipeline failure for doc_id={document.doc_id}: {err}")
             self.checkpoint_store.update_status(batch_id=batch_id, status="FAILED")
-            self.dlq.push_failure(doc_id=document.doc_id, tenant_id=document.tenant_id, reason=str(err), failed_chunks=nodes)
-            return 0
+            raise

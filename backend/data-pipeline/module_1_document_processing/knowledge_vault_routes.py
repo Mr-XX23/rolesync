@@ -136,6 +136,12 @@ def _get_rag_config(tenant_id: str, user_id: str) -> dict[str, Any]:
     return default_cfg
 
 
+def read_rag_config(tenant_id: str, user_id: str) -> dict[str, Any]:
+    """This workspace's stored RAG settings. Registered with the chunker at
+    startup so every ingestion path resolves chunking the same way."""
+    return _get_rag_config(tenant_id, user_id)
+
+
 def _save_rag_config(tenant_id: str, user_id: str, data: dict[str, Any]):
     data["tenant_id"] = tenant_id
     data["user_id"] = user_id
@@ -368,8 +374,6 @@ def _process_document_background(
     try:
         # 1. Read current workspace RAG config
         cfg = _get_rag_config(tenant_id, user_id)
-        chunk_size = int(cfg.get("chunk_size", 512))
-        overlap = int(cfg.get("overlap", 12))
         embedding_engine = cfg.get("embedding_engine", "RoleSync Vector Engine (1536-dim)")
 
         # 2. Build CanonicalEvent for ParserService
@@ -481,14 +485,11 @@ def _process_document_background(
             source=source,
         )
 
-        # 5. Hierarchical Chunker calibrated with active RAG parameters
-        chunk_overlap = max(0, int(chunk_size * (overlap / 100.0)))
-        chunker = HierarchicalChunker(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        # 5. Chunk settings are resolved from this workspace's RAG config inside
+        # the chunker itself, so the connector path applies the same ones instead
+        # of falling back to library defaults.
         embedding_worker = EmbeddingWorker(model_name=embedding_engine)
-        batch_pipeline = BatchIngestionPipeline(
-            chunker=chunker,
-            embedding_worker=embedding_worker,
-        )
+        batch_pipeline = BatchIngestionPipeline(embedding_worker=embedding_worker)
 
         # 6. Process through the batch ingestion pipeline (chunking, delta check, embedding, vector store upsert)
         written_count = batch_pipeline.process_document(parsed_doc)
@@ -546,14 +547,13 @@ def _process_document_background(
         print(f"[KnowledgeVault] Successfully indexed {doc_id} via BatchIngestionPipeline with {written_count} chunks.")
 
     except Exception as err:
-        # The real error is logged; the user sees a generic, actionable message.
+        # Re-raised so the ingestion queue retries the document. Swallowing it
+        # here meant a transient parser or embedding failure ended the document's
+        # life on the first attempt. The record is only marked Error once the
+        # queue gives up (see mark_document_failed), so a document that recovers
+        # on a later attempt never shows a failure the user has to act on.
         print(f"[KnowledgeVault] Pipeline failure for {doc_id}: {err}")
-        record = _find_doc_record(doc_id)
-        if record:
-            record["status"] = "Error"
-            record["error_message"] = guards.PROCESSING_FAILED_MESSAGE
-            record["last_updated"] = datetime.now(timezone.utc).isoformat()
-            _save_doc_record(record)
+        raise
 
 
 # Endpoints
@@ -632,6 +632,26 @@ def list_documents(
 
 
 
+
+def _reject_if_backlogged() -> None:
+    """Refuse new ingestion while the backlog is too deep.
+
+    The queue is durable, so accepting more would not lose anything - but it would
+    keep answering "queued for parsing" for work that will not be reached for a
+    long time, and grow the backlog without bound. Better to say so and let the
+    caller retry.
+    """
+    if not ingest_queue.is_overloaded():
+        return
+    depth = ingest_queue.depth()
+    print(f"[KnowledgeVault] Refusing ingestion: {depth} job(s) queued (limit {ingest_queue.max_depth}).")
+    raise HTTPException(
+        status_code=503,
+        detail=guards.QUEUE_FULL_MESSAGE,
+        headers={"Retry-After": "120"},
+    )
+
+
 def _queue_document_job(
     background_tasks: BackgroundTasks,
     *,
@@ -696,20 +716,38 @@ def process_document_job(payload: dict) -> None:
     if raw_bytes is None:
         raise RuntimeError(f"Staged bytes missing for {payload.get('doc_id')} ({staged_ref})")
 
-    try:
-        _process_document_background(
-            doc_id=payload.get("doc_id", ""),
-            tenant_id=payload.get("tenant_id", ""),
-            user_id=payload.get("user_id", ""),
-            raw_bytes=raw_bytes,
-            filename=payload.get("filename", ""),
-            mime_type=payload.get("mime_type", ""),
-            source=payload.get("source", "USER_UPLOAD"),
-            user_override_category=payload.get("user_override_category"),
-            user_override_competitor=payload.get("user_override_competitor"),
-        )
-    finally:
-        discard_staged_bytes(staged_ref)
+    _process_document_background(
+        doc_id=payload.get("doc_id", ""),
+        tenant_id=payload.get("tenant_id", ""),
+        user_id=payload.get("user_id", ""),
+        raw_bytes=raw_bytes,
+        filename=payload.get("filename", ""),
+        mime_type=payload.get("mime_type", ""),
+        source=payload.get("source", "USER_UPLOAD"),
+        user_override_category=payload.get("user_override_category"),
+        user_override_competitor=payload.get("user_override_competitor"),
+    )
+    # Only on success: a retry needs these bytes, and a dead-lettered job needs
+    # them to be replayable at all.
+    discard_staged_bytes(staged_ref)
+
+
+def mark_document_failed(payload: dict) -> None:
+    """Called when the queue has exhausted its retries for this document.
+
+    The record stops saying "Parsing" and tells the user something actually went
+    wrong. The staged bytes are deliberately kept: the job is still in the
+    dead-letter list, and replaying it needs them. A successful replay discards
+    them at the end of process_document_job.
+    """
+    doc_id = payload.get("doc_id", "")
+    record = _find_doc_record(doc_id)
+    if record:
+        record["status"] = "Error"
+        record["error_message"] = guards.PROCESSING_FAILED_MESSAGE
+        record["last_updated"] = datetime.now(timezone.utc).isoformat()
+        _save_doc_record(record)
+    print(f"[KnowledgeVault] Ingestion gave up on {doc_id}; marked Error and kept in the dead-letter queue.")
 
 
 @router.post("/knowledge-vault/upload")
@@ -722,6 +760,7 @@ async def upload_document(
 ):
     """Uploads a single file (PDF, CSV, TXT, DOCX, PPTX, XLSX, MD, JSON), validates <=25MB, runs SalesClassifier, and processes chunks via ParserService and BatchIngestionPipeline."""
     require_writer(access)
+    _reject_if_backlogged()
     filename = file.filename or "uploaded_file"
 
     # Read first so type, size and malware checks all run against the real bytes.
@@ -842,6 +881,7 @@ def ingest_url(
 ):
     """Ingests text content from an external webpage URL and runs SalesClassifier."""
     require_writer(access)
+    _reject_if_backlogged()
     url = req.url.strip()
     if not re.match(r"^https?://[^\s/$.?#].[^\s]*$", url, re.IGNORECASE):
         raise HTTPException(status_code=400, detail="Invalid URL format. Must start with http:// or https://")
@@ -1220,6 +1260,7 @@ def reindex_document(
 ):
     """Re-triggers chunking and vector indexing using the stored complete document."""
     require_writer(access)
+    _reject_if_backlogged()
     doc = _find_doc_record(doc_id, access.workspace_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found.")

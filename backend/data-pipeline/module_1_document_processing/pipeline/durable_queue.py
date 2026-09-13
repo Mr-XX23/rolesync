@@ -41,6 +41,9 @@ except ImportError:  # pragma: no cover - redis client not installed
 DEFAULT_MAX_ATTEMPTS = 5
 DEFAULT_BACKOFF_SECONDS = 10.0
 DEFAULT_HEARTBEAT_SECONDS = 60
+# 0 disables the limit. Above this many waiting jobs the service stops
+# accepting new ingestion instead of promising work it cannot get to.
+DEFAULT_MAX_DEPTH = 0
 _TRUTHY = {"1", "true", "yes", "on"}
 
 
@@ -103,6 +106,7 @@ class DurableQueue:
         max_attempts: Optional[int] = None,
         backoff_seconds: Optional[float] = None,
         heartbeat_seconds: Optional[int] = None,
+        max_depth: Optional[int] = None,
         consumer_id: str = "",
         client: Any = None,
     ) -> None:
@@ -110,6 +114,7 @@ class DurableQueue:
         self.max_attempts = max_attempts if max_attempts is not None else _env_int("INGEST_QUEUE_MAX_ATTEMPTS", DEFAULT_MAX_ATTEMPTS)
         self.backoff_seconds = backoff_seconds if backoff_seconds is not None else _env_float("INGEST_QUEUE_BACKOFF_SECONDS", DEFAULT_BACKOFF_SECONDS)
         self.heartbeat_seconds = heartbeat_seconds if heartbeat_seconds is not None else _env_int("INGEST_QUEUE_HEARTBEAT_SECONDS", DEFAULT_HEARTBEAT_SECONDS)
+        self.max_depth = max_depth if max_depth is not None else _env_int("INGEST_QUEUE_MAX_DEPTH", DEFAULT_MAX_DEPTH)
         # One consumer per process; the hostname keeps it stable across restarts
         # of the same container so its own in-flight work is reclaimed first.
         self.consumer_id = consumer_id or os.environ.get("HOSTNAME", "") or socket.gethostname() or uuid.uuid4().hex[:8]
@@ -119,6 +124,7 @@ class DurableQueue:
         self._memory: deque[Job] = deque()
         self._memory_inflight: dict[str, Job] = {}
         self._memory_dead: list[Job] = []
+        self._memory_counts: dict[str, int] = {}
 
     # ---- keys ------------------------------------------------------------
     @property
@@ -132,6 +138,9 @@ class DurableQueue:
     @property
     def dead_key(self) -> str:
         return f"{self.name}:dead"
+
+    def counter_key(self, name: str) -> str:
+        return f"{self.name}:count:{name}"
 
     def inflight_key(self, consumer: str = "") -> str:
         return f"{self.name}:inflight:{consumer or self.consumer_id}"
@@ -177,6 +186,7 @@ class DurableQueue:
     def enqueue(self, kind: str, payload: dict[str, Any]) -> Job:
         """Accept a job. Returns once the job is durable (or memory-queued)."""
         job = Job(kind=kind, payload=payload)
+        self._bump("enqueued")
         if self._client is not None:
             try:
                 self._client.lpush(self.pending_key, job.to_json())
@@ -208,6 +218,7 @@ class DurableQueue:
 
     def ack(self, job: Job) -> None:
         """Mark a job done and remove it from the in-flight list."""
+        self._bump("processed")
         if self._client is not None:
             try:
                 self._client.lrem(self.inflight_key(), 1, job.to_json())
@@ -225,6 +236,7 @@ class DurableQueue:
         job.attempts += 1
         job.last_error = (error or "")[:1000]
         retryable = job.attempts < self.max_attempts
+        self._bump("retried" if retryable else "dead")
         # Exponential backoff, so a struggling vendor is not hammered.
         ready_at = time.time() + self.backoff_seconds * (2 ** (job.attempts - 1))
 
@@ -301,7 +313,69 @@ class DurableQueue:
         return reclaimed
 
     # ---- visibility ------------------------------------------------------
+    def _bump(self, name: str) -> None:
+        """Count an outcome. Kept in Redis so figures span workers and restarts."""
+        if self._client is None:
+            self._memory_counts[name] = self._memory_counts.get(name, 0) + 1
+            return
+        try:
+            self._client.incr(self.counter_key(name))
+        except Exception:
+            pass
+
+    def counters(self) -> dict[str, int]:
+        names = ("enqueued", "processed", "retried", "dead")
+        if self._client is None:
+            return {n: int(self._memory_counts.get(n, 0)) for n in names}
+        try:
+            return {n: int(self._client.get(self.counter_key(n)) or 0) for n in names}
+        except Exception:
+            return {n: 0 for n in names}
+
+    def depth(self) -> int:
+        """Jobs waiting to start, including those held for a retry."""
+        if self._client is None:
+            return len(self._memory)
+        try:
+            return int(self._client.llen(self.pending_key)) + int(self._client.zcard(self.retry_key))
+        except Exception:
+            return 0
+
+    def is_overloaded(self) -> bool:
+        """True when the backlog is deep enough to stop accepting new work."""
+        return self.max_depth > 0 and self.depth() >= self.max_depth
+
+    def oldest_pending_age_seconds(self) -> float:
+        """How long the longest-waiting job has waited.
+
+        Queue age is what reveals a stalled worker: depth alone can look healthy
+        while nothing is draining.
+        """
+        raw = None
+        if self._client is None:
+            raw = self._memory[0].to_json() if self._memory else None
+        else:
+            try:
+                # Jobs are taken from the tail, so the tail is the oldest.
+                raw = self._client.lindex(self.pending_key, -1)
+            except Exception:
+                raw = None
+        if not raw:
+            return 0.0
+        try:
+            return max(0.0, time.time() - Job.from_json(raw).enqueued_at)
+        except Exception:
+            return 0.0
+
     def stats(self) -> dict[str, Any]:
+        common = {
+            "consumer_id": self.consumer_id,
+            "max_attempts": self.max_attempts,
+            "max_depth": self.max_depth,
+            "oldest_pending_age_seconds": round(self.oldest_pending_age_seconds(), 1),
+            "accepting": not self.is_overloaded(),
+            "totals": self.counters(),
+        }
         if self._client is not None:
             try:
                 return {
@@ -310,8 +384,7 @@ class DurableQueue:
                     "inflight": int(self._client.llen(self.inflight_key())),
                     "retry": int(self._client.zcard(self.retry_key)),
                     "dead": int(self._client.llen(self.dead_key)),
-                    "consumer_id": self.consumer_id,
-                    "max_attempts": self.max_attempts,
+                    **common,
                 }
             except Exception as err:
                 print(f"[DurableQueue] Stats failed: {err}")
@@ -321,8 +394,7 @@ class DurableQueue:
             "inflight": len(self._memory_inflight),
             "retry": 0,
             "dead": len(self._memory_dead),
-            "consumer_id": self.consumer_id,
-            "max_attempts": self.max_attempts,
+            **common,
             "warning": "Redis unavailable: queued work is lost if this process restarts.",
         }
 
@@ -386,13 +458,17 @@ class DurableQueue:
         """Drop every queue key. Test and operator use only."""
         if self._client is not None:
             try:
-                self._client.delete(self.pending_key, self.retry_key, self.dead_key, self.inflight_key())
+                self._client.delete(
+                    self.pending_key, self.retry_key, self.dead_key, self.inflight_key(),
+                    *(self.counter_key(n) for n in ("enqueued", "processed", "retried", "dead")),
+                )
                 return
             except Exception as err:
                 print(f"[DurableQueue] Purge failed: {err}")
         self._memory.clear()
         self._memory_inflight.clear()
         self._memory_dead.clear()
+        self._memory_counts.clear()
 
 
 ingest_queue = DurableQueue()

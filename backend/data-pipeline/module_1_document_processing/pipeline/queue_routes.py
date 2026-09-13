@@ -7,7 +7,7 @@ stuck ingestion can be diagnosed and replayed instead of guessed at.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
 
 from module_1_document_processing.identity import bind_identity
 from module_1_document_processing.pipeline.durable_queue import ingest_queue
@@ -25,6 +25,45 @@ def queue_stats(access: WorkspaceAccess = Depends(require_workspace_member)):
     """Queue depth and backend. `durable` false means a restart would lose work."""
     stats = ingest_queue.stats()
     return {"status": "success", "durable": stats.get("backend") == "redis", "queue": stats}
+
+
+@router.get("/ingestion/queue/metrics")
+def queue_metrics(access: WorkspaceAccess = Depends(require_workspace_member)):
+    """The same figures in Prometheus text format, for Grafana.
+
+    Queue *age* matters as much as depth: a backlog that is not draining looks
+    identical to a healthy one if you only measure depth. Counters are totals
+    since the Redis keys were created, so they survive a restart of this service.
+
+    Scraping this needs a public path on the gateway; today it is behind the same
+    workspace check as the rest of the pipeline API. It carries counts only, never
+    document content.
+    """
+    stats = ingest_queue.stats()
+    totals = stats.get("totals") or {}
+    lines = [
+        "# HELP rolesync_ingest_queue_depth Jobs waiting to be processed.",
+        "# TYPE rolesync_ingest_queue_depth gauge",
+        f'rolesync_ingest_queue_depth{{state="pending"}} {stats.get("pending", 0)}',
+        f'rolesync_ingest_queue_depth{{state="inflight"}} {stats.get("inflight", 0)}',
+        f'rolesync_ingest_queue_depth{{state="retry"}} {stats.get("retry", 0)}',
+        f'rolesync_ingest_queue_depth{{state="dead"}} {stats.get("dead", 0)}',
+        "# HELP rolesync_ingest_queue_oldest_pending_seconds Age of the longest-waiting job.",
+        "# TYPE rolesync_ingest_queue_oldest_pending_seconds gauge",
+        f'rolesync_ingest_queue_oldest_pending_seconds {stats.get("oldest_pending_age_seconds", 0)}',
+        "# HELP rolesync_ingest_queue_durable 1 when queued work survives a restart.",
+        "# TYPE rolesync_ingest_queue_durable gauge",
+        f'rolesync_ingest_queue_durable {1 if stats.get("backend") == "redis" else 0}',
+        "# HELP rolesync_ingest_queue_accepting 1 while new ingestion is being accepted.",
+        "# TYPE rolesync_ingest_queue_accepting gauge",
+        f'rolesync_ingest_queue_accepting {1 if stats.get("accepting") else 0}',
+        "# HELP rolesync_ingest_jobs_total Ingestion jobs by outcome.",
+        "# TYPE rolesync_ingest_jobs_total counter",
+    ]
+    for outcome in ("enqueued", "processed", "retried", "dead"):
+        lines.append(f'rolesync_ingest_jobs_total{{outcome="{outcome}"}} {totals.get(outcome, 0)}')
+
+    return Response(content="\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
 
 
 @router.get("/ingestion/queue/dead-letters")

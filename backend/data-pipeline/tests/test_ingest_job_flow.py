@@ -223,3 +223,61 @@ def test_connector_events_are_enqueued_as_jobs(object_store):
     assert job.kind == JOB_CONNECTOR_EVENT
     assert job.payload["external_id"] == "file_99"
     assert store.llen(queue.pending_key) == 1
+
+
+# --- staged bytes survive a failed connector event -----------------------
+def test_a_failed_connector_event_keeps_its_staged_bytes(monkeypatch, object_store):
+    """Same rule as uploads: the retry re-reads these, so a failure must not
+    destroy them. This path discarded them in a `finally` block."""
+    store = FakeRedis()
+    queue = DurableQueue(name="t:conn", client=store, consumer_id="w1", max_attempts=3, backoff_seconds=60)
+    worker = build_worker(queue)
+    discarded: list[str] = []
+    monkeypatch.setattr(
+        "module_1_document_processing.pipeline.queue_worker.discard_staged_bytes",
+        lambda ref: discarded.append(ref),
+    )
+
+    async def explode(event):
+        raise RuntimeError("LlamaParse returned 500")
+
+    monkeypatch.setattr(worker, "_process_event", explode)
+    payload = event_to_payload(make_event(metadata={"name": "x.pdf", "raw_bytes": b"data"}))
+
+    async def scenario():
+        await worker.start()
+        await worker.enqueue_job(JOB_CONNECTOR_EVENT, payload)
+        await asyncio.sleep(0.3)
+        await worker.stop()
+
+    run(scenario())
+
+    assert discarded == []                      # kept for the retry
+    assert store.zcard(queue.retry_key) == 1
+
+
+def test_a_successful_connector_event_cleans_up_its_staged_bytes(monkeypatch, object_store):
+    store = FakeRedis()
+    queue = DurableQueue(name="t:conn", client=store, consumer_id="w1", max_attempts=3)
+    worker = build_worker(queue)
+    discarded: list[str] = []
+    monkeypatch.setattr(
+        "module_1_document_processing.pipeline.queue_worker.discard_staged_bytes",
+        lambda ref: discarded.append(ref),
+    )
+
+    async def succeed(event):
+        return None
+
+    monkeypatch.setattr(worker, "_process_event", succeed)
+    payload = event_to_payload(make_event(metadata={"name": "x.pdf", "raw_bytes": b"data"}))
+
+    async def scenario():
+        await worker.start()
+        await worker.enqueue_job(JOB_CONNECTOR_EVENT, payload)
+        await asyncio.sleep(0.3)
+        await worker.stop()
+
+    run(scenario())
+
+    assert discarded == [payload["staged_ref"]]
