@@ -20,7 +20,7 @@ from module_1_document_processing.composio_connector.connector_routes import (
     notion_sync_manager,
 )
 from module_1_document_processing.knowledge_vault_routes import router as knowledge_vault_router
-from module_1_document_processing.knowledge_vault_routes import process_document_job
+from module_1_document_processing.knowledge_vault_routes import mark_document_failed, process_document_job
 from module_1_document_processing.pipeline.job_payloads import JOB_DOCUMENT_INGEST
 from module_1_document_processing.pipeline.queue_routes import router as queue_router
 from module_1_document_processing.del_acl_and_reconc.reconciliation_routes import router as reconciliation_router
@@ -60,7 +60,7 @@ async def lifespan(app: FastAPI):
 
     # Uploads, URL ingests and reindexes share the connector queue, so every
     # ingestion path gets the same durability, retries and dead-lettering.
-    queue_worker.register_handler(JOB_DOCUMENT_INGEST, process_document_job)
+    queue_worker.register_handler(JOB_DOCUMENT_INGEST, process_document_job, on_dead=mark_document_failed)
 
     # Start Staging Queue Worker
     await queue_worker.start()

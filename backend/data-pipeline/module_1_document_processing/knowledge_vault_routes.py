@@ -546,14 +546,13 @@ def _process_document_background(
         print(f"[KnowledgeVault] Successfully indexed {doc_id} via BatchIngestionPipeline with {written_count} chunks.")
 
     except Exception as err:
-        # The real error is logged; the user sees a generic, actionable message.
+        # Re-raised so the ingestion queue retries the document. Swallowing it
+        # here meant a transient parser or embedding failure ended the document's
+        # life on the first attempt. The record is only marked Error once the
+        # queue gives up (see mark_document_failed), so a document that recovers
+        # on a later attempt never shows a failure the user has to act on.
         print(f"[KnowledgeVault] Pipeline failure for {doc_id}: {err}")
-        record = _find_doc_record(doc_id)
-        if record:
-            record["status"] = "Error"
-            record["error_message"] = guards.PROCESSING_FAILED_MESSAGE
-            record["last_updated"] = datetime.now(timezone.utc).isoformat()
-            _save_doc_record(record)
+        raise
 
 
 # Endpoints
@@ -696,20 +695,38 @@ def process_document_job(payload: dict) -> None:
     if raw_bytes is None:
         raise RuntimeError(f"Staged bytes missing for {payload.get('doc_id')} ({staged_ref})")
 
-    try:
-        _process_document_background(
-            doc_id=payload.get("doc_id", ""),
-            tenant_id=payload.get("tenant_id", ""),
-            user_id=payload.get("user_id", ""),
-            raw_bytes=raw_bytes,
-            filename=payload.get("filename", ""),
-            mime_type=payload.get("mime_type", ""),
-            source=payload.get("source", "USER_UPLOAD"),
-            user_override_category=payload.get("user_override_category"),
-            user_override_competitor=payload.get("user_override_competitor"),
-        )
-    finally:
-        discard_staged_bytes(staged_ref)
+    _process_document_background(
+        doc_id=payload.get("doc_id", ""),
+        tenant_id=payload.get("tenant_id", ""),
+        user_id=payload.get("user_id", ""),
+        raw_bytes=raw_bytes,
+        filename=payload.get("filename", ""),
+        mime_type=payload.get("mime_type", ""),
+        source=payload.get("source", "USER_UPLOAD"),
+        user_override_category=payload.get("user_override_category"),
+        user_override_competitor=payload.get("user_override_competitor"),
+    )
+    # Only on success: a retry needs these bytes, and a dead-lettered job needs
+    # them to be replayable at all.
+    discard_staged_bytes(staged_ref)
+
+
+def mark_document_failed(payload: dict) -> None:
+    """Called when the queue has exhausted its retries for this document.
+
+    The record stops saying "Parsing" and tells the user something actually went
+    wrong. The staged bytes are deliberately kept: the job is still in the
+    dead-letter list, and replaying it needs them. A successful replay discards
+    them at the end of process_document_job.
+    """
+    doc_id = payload.get("doc_id", "")
+    record = _find_doc_record(doc_id)
+    if record:
+        record["status"] = "Error"
+        record["error_message"] = guards.PROCESSING_FAILED_MESSAGE
+        record["last_updated"] = datetime.now(timezone.utc).isoformat()
+        _save_doc_record(record)
+    print(f"[KnowledgeVault] Ingestion gave up on {doc_id}; marked Error and kept in the dead-letter queue.")
 
 
 @router.post("/knowledge-vault/upload")

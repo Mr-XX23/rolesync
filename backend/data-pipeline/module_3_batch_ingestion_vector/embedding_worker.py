@@ -1,7 +1,9 @@
 from dataclasses import dataclass
 from typing import Any, Optional
-import os
 import math
+import os
+import random
+import time
 
 try:
     import requests
@@ -12,6 +14,22 @@ from module_3_batch_ingestion_vector.chunker import TextNode
 
 # Google Generative Language API (Gemini) embeddings endpoint.
 _GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
+
+# Worth another attempt: rate limiting and transient server-side faults.
+# Anything else (400 bad request, 401/403 bad key, 404 wrong model) will fail
+# identically forever, so retrying only delays the real error.
+_RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504})
+
+
+class EmbeddingFailed(RuntimeError):
+    """Real embeddings were configured but could not be produced.
+
+    Raised rather than quietly substituting pseudo-vectors: the chunks would
+    be dropped from the index while the document still reported success, so a
+    single rate-limit response silently cost a batch of content. Raising hands
+    the document to the ingestion queue, which retries it and finally
+    dead-letters it where it can be seen and replayed.
+    """
 
 
 @dataclass
@@ -41,6 +59,9 @@ class EmbeddingWorker:
       EMBEDDING_TASK_TYPE       default "RETRIEVAL_DOCUMENT" (use RETRIEVAL_QUERY for queries)
       EMBEDDING_BATCH_SIZE      default 100 requests per batchEmbedContents call
       EMBEDDING_TIMEOUT_SECONDS default 30
+      EMBEDDING_MAX_ATTEMPTS    default 4 attempts per batch (429/5xx only)
+      EMBEDDING_BACKOFF_SECONDS default 2.0 base for exponential backoff
+      EMBEDDING_MAX_BACKOFF_SECONDS default 60 ceiling for a single wait
     """
 
     def __init__(self, model_name: str = "gemini-embedding-001", dimension: int = 1536) -> None:
@@ -60,6 +81,9 @@ class EmbeddingWorker:
         self.task_type = os.environ.get("EMBEDDING_TASK_TYPE", "RETRIEVAL_DOCUMENT").strip()
         self.batch_size = max(1, int(os.environ.get("EMBEDDING_BATCH_SIZE", "100")))
         self.timeout = float(os.environ.get("EMBEDDING_TIMEOUT_SECONDS", "30"))
+        self.max_attempts = max(1, int(os.environ.get("EMBEDDING_MAX_ATTEMPTS", "4")))
+        self.backoff_seconds = float(os.environ.get("EMBEDDING_BACKOFF_SECONDS", "2"))
+        self.max_backoff_seconds = float(os.environ.get("EMBEDDING_MAX_BACKOFF_SECONDS", "60"))
 
     # ---- public API -------------------------------------------------------
     def generate_embeddings(self, nodes: list[TextNode]) -> list[EmbeddedChunk]:
@@ -81,19 +105,20 @@ class EmbeddingWorker:
         for start in range(0, len(nodes), self.batch_size):
             batch = nodes[start:start + self.batch_size]
             vectors = self._embed_batch([n.text for n in batch])
-            batch_failed = vectors is None
-            if batch_failed:
-                print(
-                    f"[EmbeddingWorker] Batch at offset {start} failed — pseudo-vector fallback for "
-                    f"{len(batch)} chunks; they will NOT be indexed and can be repaired by re-indexing."
+            if vectors is None:
+                # Previously this substituted pseudo-vectors, which the writer
+                # then excluded - so the chunks vanished from the index while the
+                # document still looked successfully ingested. Fail loudly so the
+                # queue retries the document instead.
+                raise EmbeddingFailed(
+                    f"{self.api_model} could not embed {len(batch)} chunk(s) at offset {start} "
+                    f"after {self.max_attempts} attempt(s)"
                 )
-                vectors = [self._pseudo_vector(n.chunk_hash) for n in batch]
-            else:
-                real_ok += len(batch)
+            real_ok += len(batch)
             for node, vec in zip(batch, vectors):
-                embedded.append(EmbeddedChunk(node=node, vector=vec, is_fallback=batch_failed))
+                embedded.append(EmbeddedChunk(node=node, vector=vec, is_fallback=False))
 
-        print(f"[EmbeddingWorker] Generated {len(embedded)} embeddings ({real_ok} real, {len(embedded) - real_ok} fallback).")
+        print(f"[EmbeddingWorker] Generated {len(embedded)} embeddings ({real_ok} real).")
         return embedded
 
     def embed_query(self, text: str) -> Optional[list[float]]:
@@ -118,24 +143,52 @@ class EmbeddingWorker:
                 for t in texts
             ]
         }
-        try:
-            resp = requests.post(
-                url,
-                headers={"x-goog-api-key": self.api_key, "Content-Type": "application/json"},
-                json=payload,
-                timeout=self.timeout,
-            )
-            if resp.status_code != 200:
-                print(f"[EmbeddingWorker] Gemini embeddings HTTP {resp.status_code}: {resp.text[:300]}")
-                return None
-            embeddings = resp.json().get("embeddings", [])
-            if len(embeddings) != len(texts):
-                print(f"[EmbeddingWorker] Gemini returned {len(embeddings)} embeddings for {len(texts)} inputs.")
-                return None
-            return [self._normalize([float(x) for x in (emb.get("values") or [])]) for emb in embeddings]
-        except Exception as err:
-            print(f"[EmbeddingWorker] Gemini embeddings request error: {err}")
-            return None
+        for attempt in range(1, self.max_attempts + 1):
+            last = attempt >= self.max_attempts
+            try:
+                resp = requests.post(
+                    url,
+                    headers={"x-goog-api-key": self.api_key, "Content-Type": "application/json"},
+                    json=payload,
+                    timeout=self.timeout,
+                )
+                if resp.status_code == 200:
+                    embeddings = resp.json().get("embeddings", [])
+                    if len(embeddings) != len(texts):
+                        # A short response would misalign vectors with chunks, so
+                        # it is treated as a failure rather than a partial result.
+                        print(f"[EmbeddingWorker] Gemini returned {len(embeddings)} embeddings for {len(texts)} inputs.")
+                        return None
+                    return [self._normalize([float(x) for x in (emb.get("values") or [])]) for emb in embeddings]
+
+                retryable = resp.status_code in _RETRYABLE_STATUS
+                print(
+                    f"[EmbeddingWorker] Gemini embeddings HTTP {resp.status_code} "
+                    f"(attempt {attempt}/{self.max_attempts}, retryable={retryable}): {resp.text[:300]}"
+                )
+                if not retryable or last:
+                    return None
+                self._wait_before_retry(attempt, resp.headers.get("Retry-After"))
+            except Exception as err:
+                # Timeouts and connection resets are transient by nature.
+                print(f"[EmbeddingWorker] Gemini embeddings request error (attempt {attempt}/{self.max_attempts}): {err}")
+                if last:
+                    return None
+                self._wait_before_retry(attempt, None)
+        return None
+
+    def _wait_before_retry(self, attempt: int, retry_after: Optional[str]) -> None:
+        """Back off exponentially, but obey an explicit Retry-After when given."""
+        delay = self.backoff_seconds * (2 ** (attempt - 1))
+        if retry_after:
+            try:
+                delay = max(delay, float(retry_after))
+            except (TypeError, ValueError):
+                pass  # HTTP-date form: keep the computed backoff
+        # Jitter so parallel workers do not retry in lockstep after a 429.
+        delay = min(delay, self.max_backoff_seconds) * (0.5 + random.random() / 2)
+        print(f"[EmbeddingWorker] Retrying in {delay:.1f}s.")
+        time.sleep(delay)
 
     @staticmethod
     def _normalize(vec: list[float]) -> list[float]:

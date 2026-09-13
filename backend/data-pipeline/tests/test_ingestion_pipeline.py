@@ -6,7 +6,6 @@ from module_3_batch_ingestion_vector.embedding_worker import EmbeddingWorker
 from module_3_batch_ingestion_vector.vector_store import VectorStore
 from module_3_batch_ingestion_vector.bulk_writer import BulkWriter
 from module_3_batch_ingestion_vector.checkpoint_store import CheckpointStore
-from module_3_batch_ingestion_vector.dlq import DeadLetterQueue
 from module_3_batch_ingestion_vector.ingestion_pipeline import BatchIngestionPipeline
 
 def test_hierarchical_chunker():
