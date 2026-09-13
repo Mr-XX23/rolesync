@@ -62,6 +62,7 @@ class EmbeddingWorker:
       EMBEDDING_MAX_ATTEMPTS    default 4 attempts per batch (429/5xx only)
       EMBEDDING_BACKOFF_SECONDS default 2.0 base for exponential backoff
       EMBEDDING_MAX_BACKOFF_SECONDS default 60 ceiling for a single wait
+      EMBEDDING_QUERY_MAX_ATTEMPTS default 2 (a search waits on this, so it fails fast)
     """
 
     def __init__(self, model_name: str = "gemini-embedding-001", dimension: int = 1536) -> None:
@@ -84,6 +85,7 @@ class EmbeddingWorker:
         self.max_attempts = max(1, int(os.environ.get("EMBEDDING_MAX_ATTEMPTS", "4")))
         self.backoff_seconds = float(os.environ.get("EMBEDDING_BACKOFF_SECONDS", "2"))
         self.max_backoff_seconds = float(os.environ.get("EMBEDDING_MAX_BACKOFF_SECONDS", "60"))
+        self.query_max_attempts = max(1, int(os.environ.get("EMBEDDING_QUERY_MAX_ATTEMPTS", "2")))
 
     # ---- public API -------------------------------------------------------
     def generate_embeddings(self, nodes: list[TextNode]) -> list[EmbeddedChunk]:
@@ -126,11 +128,20 @@ class EmbeddingWorker:
         API key/dependency is missing or the call fails."""
         if not text or not self.api_key or requests is None:
             return None
-        vecs = self._embed_batch([text], task_type="RETRIEVAL_QUERY")
+        # A person is waiting on this, so it fails fast rather than working
+        # through the ingestion backoff ladder; ingestion can afford to wait.
+        vecs = self._embed_batch(
+            [text], task_type="RETRIEVAL_QUERY", max_attempts=self.query_max_attempts
+        )
         return vecs[0] if vecs else None
 
     # ---- internals --------------------------------------------------------
-    def _embed_batch(self, texts: list[str], task_type: Optional[str] = None) -> Optional[list[list[float]]]:
+    def _embed_batch(
+        self,
+        texts: list[str],
+        task_type: Optional[str] = None,
+        max_attempts: Optional[int] = None,
+    ) -> Optional[list[list[float]]]:
         url = f"{_GEMINI_BASE}/models/{self.api_model}:batchEmbedContents"
         payload = {
             "requests": [
@@ -143,8 +154,9 @@ class EmbeddingWorker:
                 for t in texts
             ]
         }
-        for attempt in range(1, self.max_attempts + 1):
-            last = attempt >= self.max_attempts
+        attempts = max(1, max_attempts or self.max_attempts)
+        for attempt in range(1, attempts + 1):
+            last = attempt >= attempts
             try:
                 resp = requests.post(
                     url,
@@ -164,14 +176,14 @@ class EmbeddingWorker:
                 retryable = resp.status_code in _RETRYABLE_STATUS
                 print(
                     f"[EmbeddingWorker] Gemini embeddings HTTP {resp.status_code} "
-                    f"(attempt {attempt}/{self.max_attempts}, retryable={retryable}): {resp.text[:300]}"
+                    f"(attempt {attempt}/{attempts}, retryable={retryable}): {resp.text[:300]}"
                 )
                 if not retryable or last:
                     return None
                 self._wait_before_retry(attempt, resp.headers.get("Retry-After"))
             except Exception as err:
                 # Timeouts and connection resets are transient by nature.
-                print(f"[EmbeddingWorker] Gemini embeddings request error (attempt {attempt}/{self.max_attempts}): {err}")
+                print(f"[EmbeddingWorker] Gemini embeddings request error (attempt {attempt}/{attempts}): {err}")
                 if last:
                     return None
                 self._wait_before_retry(attempt, None)

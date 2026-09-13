@@ -59,6 +59,13 @@ class FakeRedis:
     def llen(self, key: str) -> int:
         return len(self.lists.get(key) or [])
 
+    def lindex(self, key: str, index: int):
+        bucket = self.lists.get(key) or []
+        try:
+            return bucket[index]
+        except IndexError:
+            return None
+
     # ---- sorted sets -----------------------------------------------------
     def zadd(self, key: str, mapping: dict[str, float]) -> int:
         bucket = self.zsets.setdefault(key, {})
@@ -83,6 +90,16 @@ class FakeRedis:
     def set(self, key: str, value: str, ex: Optional[int] = None) -> bool:
         self.strings[key] = (value, time.time() + ex if ex else None)
         return True
+
+    def incr(self, key: str, amount: int = 1) -> int:
+        current = int((self.strings.get(key) or ('0', None))[0])
+        current += amount
+        self.strings[key] = (str(current), None)
+        return current
+
+    def get(self, key: str):
+        entry = self.strings.get(key)
+        return entry[0] if entry else None
 
     def exists(self, key: str) -> int:
         entry = self.strings.get(key)

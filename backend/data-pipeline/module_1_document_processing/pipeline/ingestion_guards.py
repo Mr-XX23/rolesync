@@ -131,6 +131,10 @@ PROCESSING_FAILED_MESSAGE = (
 URL_FETCH_FAILED_MESSAGE = (
     "We could not fetch that URL. Check that the link is public and reachable, then try again."
 )
+QUEUE_FULL_MESSAGE = (
+    "We are still working through a large backlog of documents. Please try again in "
+    "a few minutes - nothing you have already uploaded has been lost."
+)
 MEDIA_PENDING_MESSAGE = (
     "Audio and video files are stored but cannot be searched yet - transcription "
     "is not available. This file was not added to your Knowledge Vault."

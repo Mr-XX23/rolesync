@@ -173,3 +173,66 @@ def test_handlers_without_a_callback_are_unaffected():
     drain(worker, "doc", {"doc_id": "doc_1", "tenant_id": "t1"})
 
     assert len(queue.dead_letters()) == 1  # dead-lettered, no callback needed
+
+
+# --- the worker must not freeze the service ------------------------------
+def test_a_blocking_handler_does_not_stall_the_event_loop():
+    """Ingestion handlers are ordinary blocking functions: they call LlamaParse,
+    the classifier and the embeddings API, and sleep between embedding retries.
+    Running one on the event loop would freeze every other request, the health
+    check and the Eureka heartbeat for the whole document."""
+    import time
+
+    store = FakeRedis()
+    queue = DurableQueue(name="t:block", client=store, consumer_id="w1", max_attempts=1)
+    worker = build_worker(queue)
+    worker.register_handler("slow", lambda payload: time.sleep(0.5))
+
+    ticks = 0
+
+    async def scenario():
+        nonlocal ticks
+        await worker.start()
+        await worker.enqueue_job("slow", {"doc_id": "doc_1", "tenant_id": "t1"})
+        deadline = asyncio.get_event_loop().time() + 0.6
+        while asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.02)
+            ticks += 1
+        await worker.stop()
+
+    asyncio.run(scenario())
+
+    # ~30 ticks if the loop kept running; a handful if it was blocked.
+    assert ticks > 15, f"event loop stalled during the handler ({ticks} ticks)"
+
+
+def test_a_blocking_on_dead_callback_also_stays_off_the_loop():
+    import time
+
+    store = FakeRedis()
+    queue = DurableQueue(name="t:block", client=store, consumer_id="w1", max_attempts=1)
+    worker = build_worker(queue)
+    called: list[str] = []
+
+    worker.register_handler(
+        "doc",
+        lambda p: (_ for _ in ()).throw(RuntimeError("boom")),
+        on_dead=lambda p: (time.sleep(0.3), called.append(p["doc_id"]))[1],
+    )
+
+    ticks = 0
+
+    async def scenario():
+        nonlocal ticks
+        await worker.start()
+        await worker.enqueue_job("doc", {"doc_id": "doc_1", "tenant_id": "t1"})
+        deadline = asyncio.get_event_loop().time() + 0.5
+        while asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.02)
+            ticks += 1
+        await worker.stop()
+
+    asyncio.run(scenario())
+
+    assert called == ["doc_1"]
+    assert ticks > 12, f"event loop stalled during on_dead ({ticks} ticks)"

@@ -210,3 +210,31 @@ def test_without_an_api_key_it_still_degrades_quietly(monkeypatch, no_sleep):
 
 def test_no_nodes_is_not_an_error(worker):
     assert worker.generate_embeddings([]) == []
+
+
+# --- a search must not wait as long as ingestion -------------------------
+def test_a_query_fails_fast_instead_of_working_the_full_ladder(monkeypatch, worker, no_sleep):
+    """Someone is waiting on a search; ingestion can afford to keep trying."""
+    fake = FakeRequests([FakeResponse(429, text="quota")])
+    monkeypatch.setattr(ew, "requests", fake)
+
+    assert worker.embed_query("enterprise pricing") is None
+    assert fake.calls == 2  # EMBEDDING_QUERY_MAX_ATTEMPTS, not EMBEDDING_MAX_ATTEMPTS (3)
+
+
+def test_a_query_still_retries_a_transient_failure(monkeypatch, worker, no_sleep):
+    fake = FakeRequests([FakeResponse(503), ok_response(1)])
+    monkeypatch.setattr(ew, "requests", fake)
+
+    assert worker.embed_query("enterprise pricing") is not None
+    assert fake.calls == 2
+
+
+def test_ingestion_keeps_its_own_deeper_retry_budget(monkeypatch, worker, no_sleep):
+    fake = FakeRequests([FakeResponse(429)])
+    monkeypatch.setattr(ew, "requests", fake)
+
+    with pytest.raises(EmbeddingFailed):
+        worker.generate_embeddings(nodes(1))
+
+    assert fake.calls == 3  # the document path is unchanged

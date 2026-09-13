@@ -85,3 +85,42 @@ def test_giving_up_on_an_unknown_document_is_harmless(staged):
     kv.mark_document_failed(payload(doc_id="doc_gone"))  # must not raise
 
     assert staged["records"] == {}
+
+
+# --- refusing work rather than promising it ------------------------------
+class _Queue:
+    def __init__(self, overloaded: bool, depth: int = 0, max_depth: int = 0):
+        self._overloaded, self._depth, self.max_depth = overloaded, depth, max_depth
+
+    def is_overloaded(self):
+        return self._overloaded
+
+    def depth(self):
+        return self._depth
+
+
+def test_a_deep_backlog_is_refused_with_a_retry_hint(monkeypatch):
+    """Accepting here would keep answering "queued for parsing" for work that
+    will not be reached for a long time, and grow the backlog without bound."""
+    import fastapi
+
+    monkeypatch.setattr(kv, "ingest_queue", _Queue(True, depth=500, max_depth=500))
+
+    with pytest.raises(fastapi.HTTPException) as excinfo:
+        kv._reject_if_backlogged()
+
+    assert excinfo.value.status_code == 503
+    assert excinfo.value.detail == kv.guards.QUEUE_FULL_MESSAGE
+    assert excinfo.value.headers["Retry-After"] == "120"
+
+
+def test_a_healthy_queue_accepts_work(monkeypatch):
+    monkeypatch.setattr(kv, "ingest_queue", _Queue(False))
+
+    kv._reject_if_backlogged()  # must not raise
+
+
+def test_the_refusal_message_says_nothing_was_lost():
+    """The queue is durable, so the user must not think an upload vanished."""
+    assert "lost" in kv.guards.QUEUE_FULL_MESSAGE
+    assert "try again" in kv.guards.QUEUE_FULL_MESSAGE.lower()

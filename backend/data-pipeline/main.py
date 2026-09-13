@@ -20,7 +20,12 @@ from module_1_document_processing.composio_connector.connector_routes import (
     notion_sync_manager,
 )
 from module_1_document_processing.knowledge_vault_routes import router as knowledge_vault_router
-from module_1_document_processing.knowledge_vault_routes import mark_document_failed, process_document_job
+from module_1_document_processing.knowledge_vault_routes import (
+    mark_document_failed,
+    process_document_job,
+    read_rag_config,
+)
+from module_3_batch_ingestion_vector.chunk_config import set_config_reader
 from module_1_document_processing.pipeline.job_payloads import JOB_DOCUMENT_INGEST
 from module_1_document_processing.pipeline.queue_routes import router as queue_router
 from module_1_document_processing.del_acl_and_reconc.reconciliation_routes import router as reconciliation_router
@@ -57,6 +62,10 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         set_persistence_available(False)
         print(f"RAG persistence initialization error (using in-memory stores): {e}")
+
+    # Chunking reads the workspace's own RAG settings on every path, so a
+    # connector document is chunked exactly like an uploaded one.
+    set_config_reader(read_rag_config)
 
     # Uploads, URL ingests and reindexes share the connector queue, so every
     # ingestion path gets the same durability, retries and dead-lettering.
