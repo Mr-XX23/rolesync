@@ -29,6 +29,7 @@ class ToolScope(StrEnum):
     CATALOG = "CATALOG"  # catalog + inventory writes, reservations
     DOCUMENT = "DOCUMENT"  # document generation, drive / KB storage, quotes
     CRM = "CRM"  # deal records
+    KNOWLEDGE = "KNOWLEDGE"  # adding, changing and deleting knowledge-base documents (the coordinator only)
     COMPENSATION = "COMPENSATION"  # undoing completed actions (the coordinator only)
     MEMORY = "MEMORY"  # saving and forgetting what the agent remembers
     DELEGATE = "DELEGATE"  # handing work to a sub-agent (the coordinator only)

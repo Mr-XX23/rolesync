@@ -31,7 +31,8 @@ UndoHandler = Callable[[UndoInvocation], Awaitable[str]]
 SCOPES: Mapping[str, frozenset[ToolScope]] = {
     # Sole coordinator: every scope, plus the only one that may hand work to a sub-agent.
     "orchestrator": frozenset(ToolScope),
-    # Sub-agents (Phase 5). None of them has DELEGATE, so a sub-agent cannot start another.
+    # Sub-agents (Phase 5). None of them has DELEGATE, so a sub-agent cannot start another, or KNOWLEDGE,
+    # so none can change or delete the workspace's knowledge base (they can read it).
     "research": frozenset({ToolScope.READ}),
     "outreach": frozenset({ToolScope.READ, ToolScope.COMMUNICATION}),
     "quote": frozenset({ToolScope.READ, ToolScope.CATALOG, ToolScope.DOCUMENT}),

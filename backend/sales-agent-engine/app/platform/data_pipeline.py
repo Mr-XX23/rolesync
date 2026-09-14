@@ -16,6 +16,9 @@ from uuid import UUID
 
 import httpx
 
+_PAGE_FETCH_TIMEOUT = 45.0  # data-pipeline waits up to 12 s for the page, then scans and stores it
+_CLASSIFY_TIMEOUT = 110.0  # a model call, with fallbacks between models
+
 
 class DataPipelineError(Exception):
     """data-pipeline failed or refused; the message is safe to show to the agent.
@@ -39,13 +42,89 @@ class DataPipelineClient:
         self._timeout = timeout_seconds
 
     # ------------------------------------------------------------------ knowledge vault
-    async def list_documents(self, user_id: UUID, tenant_id: UUID, *, category: str | None = None) -> list[dict[str, Any]]:
-        """The workspace's indexed documents, newest first (data-pipeline has no pagination)."""
-        params = {"status": "Indexed"}
+    async def list_documents(
+        self,
+        user_id: UUID,
+        tenant_id: UUID,
+        *,
+        category: str | None = None,
+        status: str | None = "Indexed",
+        search: str | None = None,
+        mine: bool = False,
+    ) -> list[dict[str, Any]]:
+        """The workspace's documents, newest first (data-pipeline has no pagination). By default only
+        indexed ones; ``status=None`` lists every state (Parsing, Indexed, Error, Rejected)."""
+        params: dict[str, Any] = {}
+        if status:
+            params["status"] = status
         if category:
             params["category"] = category
+        if search:
+            params["search"] = search
+        if mine:
+            params["mine"] = "true"
         body = await self._get("/api/v1/knowledge-vault/documents", user_id, tenant_id=tenant_id, params=params)
         return [doc for doc in body.get("documents") or [] if isinstance(doc, dict)]
+
+    async def ingest_url(
+        self,
+        user_id: UUID,
+        tenant_id: UUID,
+        *,
+        url: str,
+        title: str | None = None,
+        category: str | None = None,
+        competitor: str | None = None,
+    ) -> dict[str, Any]:
+        """Fetch a public web page into the vault (indexed in the background). The same address again
+        refreshes its existing document."""
+        payload = {"url": url, "title": title, "category": category, "target_competitor": competitor}
+        body = await self._send(
+            "POST",
+            "/api/v1/knowledge-vault/ingest-url",
+            user_id,
+            tenant_id=tenant_id,
+            json={key: value for key, value in payload.items() if value},
+            timeout=_PAGE_FETCH_TIMEOUT,
+        )
+        document = body.get("document") if isinstance(body, dict) else None
+        if not isinstance(document, dict) or not document.get("doc_id"):
+            raise DataPipelineError("data-pipeline accepted the page but returned no document id", status=200)
+        return document
+
+    async def update_document_classification(
+        self, user_id: UUID, tenant_id: UUID, doc_id: str, changes: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Set a document's category, competitor, industry, summary or tags (only the keys given; an empty
+        competitor or industry clears it). ``None`` if the workspace has no such document."""
+        body = await self._send(
+            "PATCH",
+            f"/api/v1/knowledge-vault/documents/{quote(doc_id, safe='')}/sales-classification",
+            user_id,
+            tenant_id=tenant_id,
+            json=changes,
+            missing_ok=True,
+        )
+        return _document_of(body)
+
+    async def reclassify_document(self, user_id: UUID, tenant_id: UUID, doc_id: str) -> dict[str, Any] | None:
+        """Classify a document again with the model, replacing its classification (a model call: slow)."""
+        body = await self._send(
+            "POST",
+            f"/api/v1/knowledge-vault/documents/{quote(doc_id, safe='')}/reclassify",
+            user_id,
+            tenant_id=tenant_id,
+            missing_ok=True,
+            timeout=_CLASSIFY_TIMEOUT,
+        )
+        return _document_of(body)
+
+    async def reindex_document(self, user_id: UUID, tenant_id: UUID, doc_id: str) -> dict[str, Any] | None:
+        """Rebuild a document's search index from its stored content (in the background)."""
+        body = await self._send(
+            "POST", f"/api/v1/knowledge-vault/documents/{quote(doc_id, safe='')}/reindex", user_id, tenant_id=tenant_id, missing_ok=True
+        )
+        return _document_of(body)
 
     async def document_text(self, user_id: UUID, tenant_id: UUID, doc_id: str) -> dict[str, Any] | None:
         """A document's full text, or ``None`` if the workspace has no such document."""
@@ -206,6 +285,7 @@ class DataPipelineClient:
         files: Any = None,
         data: Any = None,
         missing_ok: bool = False,
+        timeout: float | None = None,
     ) -> Any:
         headers = {"X-User-Id": str(user_id)}
         if tenant_id is not None:
@@ -219,7 +299,7 @@ class DataPipelineClient:
                 json=json,
                 files=files,
                 data=data,
-                timeout=self._timeout,
+                timeout=timeout or self._timeout,
             )
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
             raise DataPipelineError(f"data-pipeline unreachable: {type(exc).__name__}") from exc
@@ -233,6 +313,15 @@ class DataPipelineClient:
             return response.json()
         except ValueError as exc:
             raise DataPipelineError("data-pipeline returned a non-JSON response", status=response.status_code) from exc
+
+
+def _document_of(body: Any) -> dict[str, Any] | None:
+    if body is None:
+        return None
+    document = body.get("document") if isinstance(body, dict) else None
+    if not isinstance(document, dict):
+        raise DataPipelineError("data-pipeline answered without the document", status=200)
+    return document
 
 
 def _detail(response: httpx.Response) -> str:

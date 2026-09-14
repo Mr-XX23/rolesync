@@ -66,7 +66,8 @@ class Compensator:
             description=(
                 "Undo actions you completed earlier in this session, most recent first: cancel a calendar event, "
                 "delete a Slack message, move a created document or Notion page to the trash, restore catalog "
-                "values or stock, release reserved stock. Sent emails can't be undone. The rep approves the exact "
+                "values or stock, release reserved stock, remove a web page added to the knowledge base or restore a "
+                "document's classification. Sent emails and deleted files can't be undone. The rep approves the exact "
                 "list first. Use the action_id from each action's result."
             ),
             kind=ToolKind.WRITE,

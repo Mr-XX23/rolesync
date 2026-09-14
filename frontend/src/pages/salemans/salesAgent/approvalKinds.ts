@@ -3,6 +3,8 @@ import {
   Boxes,
   BriefcaseBusiness,
   CalendarPlus,
+  FilePen,
+  Globe,
   Handshake,
   FileText,
   Mail,
@@ -11,7 +13,10 @@ import {
   PackageMinus,
   PackagePlus,
   Receipt,
+  RefreshCw,
   ShieldCheck,
+  Tags,
+  Trash2,
   Truck,
   Undo2,
 } from 'lucide-react';
@@ -43,9 +48,18 @@ const KINDS: Record<string, { title: string; approve: string; icon: LucideIcon }
   stock_movement: { title: 'Record this stock movement?', approve: 'Approve & record', icon: Truck },
   stock_reservation: { title: 'Reserve this stock?', approve: 'Approve & reserve', icon: PackagePlus },
   stock_release: { title: 'Release this reservation?', approve: 'Approve & release', icon: PackageMinus },
+  knowledge_add_url: { title: 'Add this web page to the knowledge base?', approve: 'Approve & add', icon: Globe },
+  knowledge_update: { title: 'Update this document’s classification?', approve: 'Approve & update', icon: FilePen },
+  knowledge_reclassify: { title: 'Classify this document again?', approve: 'Approve & classify', icon: Tags },
+  knowledge_reindex: { title: 'Index this document again?', approve: 'Approve & re-index', icon: RefreshCw },
+  knowledge_delete: { title: 'Delete this document?', approve: 'Approve & delete', icon: Trash2 },
   undo: { title: 'Undo these actions?', approve: 'Undo them', icon: Undo2 },
 };
 
 export function describeKind(card: ApprovalCardModel): { title: string; approve: string; icon: LucideIcon } {
-  return KINDS[previewKind(card)] ?? { title: `Allow ${card.tool}?`, approve: 'Approve', icon: ShieldCheck };
+  const kind = previewKind(card);
+  if (kind === 'knowledge_add_url' && card.preview.existing) {
+    return { title: 'Refresh this web page in the knowledge base?', approve: 'Approve & refresh', icon: Globe };
+  }
+  return KINDS[kind] ?? { title: `Allow ${card.tool}?`, approve: 'Approve', icon: ShieldCheck };
 }

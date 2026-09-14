@@ -44,6 +44,10 @@ def test_actions_get_readable_timeline_names():
         "Correct stock count of TS-1 to 40", "INVENTORY_CHANGE",
     )
     assert describe_action("undo_actions", {"action_ids": ["a", "b"]}) == ("Undo 2 completed action(s)", "UNDO")
+    assert describe_action("add_web_page_to_knowledge_base", {"url": "https://globex.test/pricing"}) == (
+        "Add web page to the knowledge base: https://globex.test/pricing", "KNOWLEDGE_CHANGE",
+    )
+    assert describe_action("delete_knowledge_document", {"doc_id": "doc_1"}) == ("Delete a knowledge-base document", "KNOWLEDGE_CHANGE")
     assert describe_action("brand_new_tool", {}) == ("Brand new tool", "BRAND_NEW_TOOL")
     long_name, _ = describe_action("send_email", {"to": ["x@y.z"], "subject": "s" * 400})
     assert len(long_name) == 150

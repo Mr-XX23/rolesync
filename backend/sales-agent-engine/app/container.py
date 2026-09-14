@@ -49,6 +49,7 @@ from app.tools.adapters.documents import document_tools
 from app.tools.adapters.gmail import gmail_tools
 from app.tools.adapters.google_calendar import calendar_tools
 from app.tools.adapters.knowledge import knowledge_tools
+from app.tools.adapters.knowledge_writes import knowledge_write_tools
 from app.tools.adapters.memory import memory_tools
 from app.tools.adapters.notion import notion_tools
 from app.tools.adapters.quotes import quote_tools
@@ -161,6 +162,7 @@ def default_registry(
     data_pipeline = DataPipelineClient(base_url=settings.data_pipeline_url, http=http)
     definitions += [
         *knowledge_tools(data_pipeline),
+        *knowledge_write_tools(data_pipeline, workspaces, vault_link=settings.knowledge_vault_link),
         *catalog_tools(data_pipeline),
         *catalog_write_tools(data_pipeline, workspaces),
         *deal_tools(deals, workspaces),

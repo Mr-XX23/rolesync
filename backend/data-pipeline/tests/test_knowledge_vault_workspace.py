@@ -44,11 +44,11 @@ def _as(user, workspace=WORKSPACE):
     return {"X-User-Id": user, "X-Tenant-Id": workspace}
 
 
-def _upload(client, user, name="battlecard.md"):
+def _upload(client, user, name="battlecard.md", body=b"# Globex battlecard\nWe win on price."):
     return client.post(
         "/api/v1/knowledge-vault/upload",
         headers=_as(user),
-        files={"file": (name, b"# Globex battlecard\nWe win on price.", "text/markdown")},
+        files={"file": (name, body, "text/markdown")},
         data={"user_id": "someone-else"},  # a client-chosen user id is ignored
     )
 
@@ -83,12 +83,72 @@ def test_a_workspace_is_required(client):
     assert client.get("/api/v1/knowledge-vault/documents", headers={"X-Tenant-Id": WORKSPACE}).status_code == 401
 
 
+def test_pages_on_internal_addresses_are_refused_without_being_fetched(client, monkeypatch):
+    from module_1_document_processing.pipeline import safe_fetch
+
+    def no_connections(*args, **kwargs):
+        raise AssertionError("the vault connected to an internal address")
+
+    monkeypatch.setattr(safe_fetch, "_open_socket", no_connections)
+    for url in (
+        "http://127.0.0.1:8000/api/v1/catalog/products",
+        "http://localhost:8083/api/v1/workspaces",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://[::ffff:10.0.0.1]/",
+    ):
+        refused = client.post("/api/v1/knowledge-vault/ingest-url", headers=_as(MEMBER), json={"url": url})
+        assert refused.status_code == 400, (url, refused.text)
+        assert refused.json()["detail"] == safe_fetch.NOT_PUBLIC_MESSAGE
+    assert client.get("/api/v1/knowledge-vault/documents", headers=_as(OWNER)).json()["count"] == 0
+
+
+def test_a_public_page_that_cannot_be_fetched_is_still_a_502(client, monkeypatch):
+    from module_1_document_processing.pipeline import ingestion_guards, safe_fetch
+
+    def unreachable(*args, **kwargs):
+        raise OSError("timed out")
+
+    monkeypatch.setattr(safe_fetch, "fetch_public_url", unreachable)
+    failed = client.post("/api/v1/knowledge-vault/ingest-url", headers=_as(MEMBER), json={"url": "https://example.com/pricing"})
+    assert failed.status_code == 502 and failed.json()["detail"] == ingestion_guards.URL_FETCH_FAILED_MESSAGE
+
+
+def test_processing_a_document_again_forgets_its_chunk_fingerprints(client, monkeypatch):
+    """Re-indexing and re-crawling a page used to remove only the vectors. The fingerprints left behind made
+    the delta check skip unchanged content as already indexed, so the document ended in Error with 0 chunks."""
+    from module_1_document_processing.pipeline import safe_fetch
+
+    cleared: list[str] = []
+
+    class FingerprintStore:
+        def clear_document_hashes(self, doc_id):
+            cleared.append(doc_id)
+
+    monkeypatch.setattr(knowledge_vault_routes, "VersionedHashDB", FingerprintStore)
+    monkeypatch.setattr(safe_fetch, "fetch_public_url", lambda *a, **k: b"<html><body><p>Globex charges per seat.</p></body></html>")
+
+    doc_id = _upload(client, MEMBER).json()["document"]["doc_id"]
+    assert cleared == []  # a new document has nothing to forget
+    assert client.post(f"/api/v1/knowledge-vault/documents/{doc_id}/reindex", headers=_as(MEMBER)).status_code == 200
+    assert set(cleared) == {f"{WORKSPACE}:USER_UPLOAD:{doc_id}", doc_id}
+
+    cleared.clear()
+    page = {"url": "https://globex.example/pricing"}
+    page_id = client.post("/api/v1/knowledge-vault/ingest-url", headers=_as(MEMBER), json=page).json()["document"]["doc_id"]
+    assert cleared == []
+    refreshed = client.post("/api/v1/knowledge-vault/ingest-url", headers=_as(MEMBER), json=page).json()["document"]
+    assert refreshed["doc_id"] == page_id
+    assert set(cleared) == {f"{WORKSPACE}:URL_INGEST:{page_id}", page_id}
+
+
 def test_only_the_uploader_or_an_admin_deletes_and_viewers_only_read(client):
     doc_id = _upload(client, MEMBER).json()["document"]["doc_id"]
     assert _upload(client, VIEWER).status_code == 403
 
     assert client.delete(f"/api/v1/knowledge-vault/documents/{doc_id}", headers=_as(VIEWER)).status_code == 403
-    other = _upload(client, OWNER).json()["document"]["doc_id"]
+    # Different bytes: the same file again would be de-duplicated into the member's own document.
+    other = _upload(client, OWNER, "pricing.md", b"# Pricing\nList price is $40 a seat.").json()["document"]["doc_id"]
+    assert other != doc_id
     assert client.delete(f"/api/v1/knowledge-vault/documents/{other}", headers=_as(MEMBER)).status_code == 403
 
     assert client.delete(f"/api/v1/knowledge-vault/documents/{doc_id}", headers=_as(MEMBER)).status_code == 200

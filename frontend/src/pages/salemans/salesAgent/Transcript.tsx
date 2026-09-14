@@ -39,6 +39,12 @@ const TOOL_LABEL: Record<string, string> = {
   read_notion_page: 'Read Notion page',
   search_knowledge_base: 'Search knowledge base',
   read_knowledge_document: 'Read document',
+  list_knowledge_documents: 'List knowledge base',
+  add_web_page_to_knowledge_base: 'Add web page to knowledge base',
+  update_knowledge_document: 'Update document',
+  reclassify_knowledge_document: 'Classify document again',
+  reindex_knowledge_document: 'Index document again',
+  delete_knowledge_document: 'Delete document',
   search_catalog: 'Search catalog',
   check_inventory: 'Check stock',
   web_search: 'Search the web',
@@ -84,6 +90,11 @@ const WRITE_TOOLS = new Set([
   'release_stock',
   'create_deal',
   'update_deal',
+  'add_web_page_to_knowledge_base',
+  'update_knowledge_document',
+  'reclassify_knowledge_document',
+  'reindex_knowledge_document',
+  'delete_knowledge_document',
 ]);
 const MEMORY_TOOLS = new Set(['remember', 'forget']);
 /** Handing part of the job to a sub-agent; its own steps stream in under its name. */
@@ -97,6 +108,11 @@ const WHERE_TO_CHECK: Record<string, string> = {
   create_quote: ' (check Google Drive or the knowledge base)',
   create_deal: ' (check Deals)',
   update_deal: ' (check the deal on the Deals page)',
+  add_web_page_to_knowledge_base: ' (check the knowledge vault)',
+  update_knowledge_document: ' (check the document in the knowledge vault)',
+  reclassify_knowledge_document: ' (check the document in the knowledge vault)',
+  reindex_knowledge_document: ' (check the document in the knowledge vault)',
+  delete_knowledge_document: ' (check the knowledge vault)',
 };
 
 function describeResult(item: TranscriptItem): string | null | undefined {
@@ -155,6 +171,22 @@ function describeCall(item: TranscriptItem): string {
       return [args.sku, args.counted_quantity === undefined ? '' : `count ${String(args.counted_quantity)}`].filter(Boolean).map(String).join(' · ');
     case 'stock_history':
       return args.sku ? String(args.sku) : '';
+    case 'list_knowledge_documents':
+      return [args.status, args.category, typeof args.search === 'string' ? `“${args.search}”` : '']
+        .filter(Boolean)
+        .map(String)
+        .join(' · ');
+    case 'add_web_page_to_knowledge_base':
+      return args.title ? `“${String(args.title)}”` : String(args.url ?? '');
+    case 'update_knowledge_document':
+      // Every field arrives, unset ones as null: name only the ones being changed.
+      return Object.keys(args)
+        .filter((field) => field !== 'doc_id' && args[field] !== null && args[field] !== undefined)
+        .join(', ');
+    case 'reclassify_knowledge_document':
+    case 'reindex_knowledge_document':
+    case 'delete_knowledge_document':
+      return '';
     case 'undo_actions':
       return Array.isArray(args.action_ids) ? `${args.action_ids.length} action${args.action_ids.length === 1 ? '' : 's'}` : '';
     case 'delegate': {

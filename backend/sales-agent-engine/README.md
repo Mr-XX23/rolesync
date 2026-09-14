@@ -83,6 +83,10 @@ outcome is unknown (timeout, dropped connection) is reported as UNKNOWN and neve
 | `record_stock_movement` | write: received, sold, shipped, damaged, lost or returned stock, checked against available units first; only a shipment can be undone (shipped back once) | data-pipeline inventory movements |
 | `correct_stock_count` | write: replace a count with a note; workspace owners and admins only, refused before approval for anyone else; undo restores the count unless stock moved since | data-pipeline inventory movements |
 | `reserve_stock`, `release_stock` | write; undo releases the reservation (a release can't be undone) | data-pipeline inventory |
+| `add_web_page_to_knowledge_base` | write (coordinator only): a public page, checked for an internal address before approval; the same address again refreshes it, keeping its name and category; undo deletes a page it added (after waiting for processing to finish) | data-pipeline knowledge vault (`ingest-url`, public addresses only) |
+| `update_knowledge_document`, `reclassify_knowledge_document` | write (coordinator only): correct the category, competitor, industry, summary or tags, or have the classifier decide again; undo restores the previous values | data-pipeline knowledge vault |
+| `reindex_knowledge_document` | write (coordinator only): rebuild the search index from the stored content; nothing to undo | data-pipeline knowledge vault |
+| `delete_knowledge_document` | write (coordinator only): only the rep's own documents unless they are an owner or admin, checked before approval; undo adds a web page back from its address, a file can't be restored | data-pipeline knowledge vault |
 | `create_deal` | write (approval); warns about an open deal for the same customer; undo deletes it unless it changed | workspace-service deals |
 | `update_deal` | write (approval): only the fields it names; re-applies over a concurrent edit; undo restores only fields nobody touched since | workspace-service deals |
 | `remember`, `forget` | memory: saved and deleted without approval, audited; shared memory is closed to viewers | engine `agent.memory` |
@@ -92,6 +96,7 @@ outcome is unknown (timeout, dropped connection) is reported as UNKNOWN and neve
 | `search_slack_messages` | read | Composio Slack |
 | `search_notion`, `read_notion_page` | read | Composio Notion |
 | `search_knowledge_base`, `read_knowledge_document` | read | data-pipeline knowledge vault: semantic search, with keyword retrieval in the adapter when it is unavailable |
+| `list_knowledge_documents` | read: every document in any state, with why one isn't searchable and whether the rep added it | data-pipeline knowledge vault |
 | `stock_history` | read: movements newest first, with totals per location | data-pipeline inventory movements |
 | `search_catalog`, `check_inventory` | read | data-pipeline catalog |
 | `web_search` | read | Tavily pages + Google Search grounding (Gemini) |
@@ -103,8 +108,9 @@ outcome is unknown (timeout, dropped connection) is reported as UNKNOWN and neve
 
 Connector tools are denied (not failed) when the user hasn't connected that app. Results carry
 `sources` (web pages, message and page links, or links to what a write created), which the chat UI
-shows under each step. Catalog writes and stock reservations are denied to workspace viewers. Every
-executed write's result includes an `action_id`, which `undo_actions` takes.
+shows under each step. Catalog, stock and knowledge-base writes are denied to workspace viewers, and
+knowledge-base writes need the KNOWLEDGE scope, which no sub-agent has. Every executed write's result
+includes an `action_id`, which `undo_actions` takes.
 
 ## Guardrails
 

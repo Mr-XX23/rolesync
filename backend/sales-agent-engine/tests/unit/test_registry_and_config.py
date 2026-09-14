@@ -80,11 +80,17 @@ def test_every_write_tool_shows_the_reviewer_a_preview_and_says_how_to_undo_it()
         "send_email", "create_calendar_event", "send_slack_message", "create_notion_page", "generate_document",
         "create_quote", "create_catalog_item", "update_catalog_item", "record_stock_movement", "correct_stock_count",
         "reserve_stock", "release_stock", "retire_catalog_item", "undo_actions", "create_deal", "update_deal",
+        "add_web_page_to_knowledge_base", "update_knowledge_document", "reclassify_knowledge_document",
+        "reindex_knowledge_document", "delete_knowledge_document",
     }
     assert all(d.preview is not None for d in writes.values())
-    # Only these can't be reversed: a sent email, a released reservation, and an undo itself. (A stock movement
-    # has an undo handler for shipments; other movements report that they can't be undone.)
-    assert {name for name, d in writes.items() if d.undo_handler is None} == {"send_email", "release_stock", "undo_actions"}
+    # Only these can't be reversed: a sent email, a released reservation, an undo itself, and indexing a document
+    # again (nothing to put back). A stock movement has an undo handler for shipments, and deleting a document one
+    # for web pages (added again from their address); other movements and deleted files report that they can't be.
+    assert {name for name, d in writes.items() if d.undo_handler is None} == {
+        "send_email", "release_stock", "undo_actions", "reindex_knowledge_document"
+    }
+    assert {name for name, d in writes.items() if d.irreversible} == {"send_email", "undo_actions", "delete_knowledge_document"}
 
 
 def test_sub_agent_scopes_stay_narrow_over_the_full_tool_set():
@@ -99,6 +105,15 @@ def test_sub_agent_scopes_stay_narrow_over_the_full_tool_set():
         "send_email", "create_calendar_event", "send_slack_message", "create_notion_page",
     }
     assert "undo_actions" in {d.name for d in scopes.tools_for("orchestrator", registry)}
+    # Sub-agents read the knowledge base but only the coordinator changes or deletes what is in it.
+    knowledge = {d.name for d in registry.all() if d.scope is ToolScope.KNOWLEDGE}
+    assert knowledge == {
+        "add_web_page_to_knowledge_base", "update_knowledge_document", "reclassify_knowledge_document",
+        "reindex_knowledge_document", "delete_knowledge_document",
+    }
+    assert not knowledge & {d.name for agent in ("research", "outreach", "quote") for d in scopes.tools_for(agent, registry)}
+    assert knowledge <= {d.name for d in scopes.tools_for("orchestrator", registry)}
+    assert {"list_knowledge_documents", "search_knowledge_base"} <= {d.name for d in scopes.tools_for("research", registry)}
     # The agent's memory needs its own scope: no sub-agent has it yet.
     memory = {d.name for d in registry.all() if d.kind is ToolKind.MEMORY}
     assert memory == {"remember", "forget"}

@@ -2,7 +2,6 @@ import os
 import uuid
 import re
 import hashlib
-import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Optional
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks, Depends
@@ -35,6 +34,7 @@ from module_1_document_processing.pipeline.job_payloads import (
     stage_bytes,
 )
 from module_1_document_processing.pipeline import ingestion_guards as guards
+from module_1_document_processing.pipeline import safe_fetch
 from module_1_document_processing.pipeline.canonical_store import CanonicalStore
 from module_1_document_processing.parsing.media_queue import MEDIA_PENDING
 from module_3_batch_ingestion_vector.delta_checker import VersionedHashDB
@@ -317,13 +317,39 @@ def plan_deduplication(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return plan
 
 
+def _canonical_doc_id(record: dict[str, Any], doc_id: str) -> str:
+    """The pipeline's id for a vault document (tenant:source:doc_id), which keys its chunk
+    fingerprints and lineage."""
+    tenant = record.get("tenant_id", "")
+    source = record.get("source", "USER_UPLOAD")
+    return f"{tenant}:{source}:{doc_id}" if tenant else doc_id
+
+
+def _clear_chunk_hashes(doc_id: str, canonical_id: str) -> None:
+    # Clearing the chunk fingerprints is essential whenever a document's vectors are
+    # removed. Leaving them behind makes the delta check treat the next processing of
+    # unchanged content as already indexed, so it skips embedding entirely and the
+    # document ends up with zero chunks.
+    try:
+        hash_db = VersionedHashDB()
+        for key in {canonical_id, doc_id}:
+            hash_db.clear_document_hashes(key)
+    except Exception as e:
+        print(f"[KnowledgeVault] Error clearing chunk hashes for {doc_id}: {e}")
+
+
+def _drop_index(record: dict[str, Any]) -> None:
+    """Remove a document's vectors and chunk fingerprints before it is processed again
+    (re-index, a re-crawled page, a repaired upload)."""
+    doc_id = record["doc_id"]
+    vector_store.delete_by_doc_id(doc_id)
+    _clear_chunk_hashes(doc_id, _canonical_doc_id(record, doc_id))
+
+
 def _delete_doc_record(doc_id: str):
     # Read the record before removing it: the chunk fingerprints and the lineage
     # row are keyed by the canonical id (tenant:source:doc_id), not the short id.
-    _record = _find_doc_record(doc_id) or {}
-    _tenant = _record.get("tenant_id", "")
-    _source = _record.get("source", "USER_UPLOAD")
-    _canonical_id = f"{_tenant}:{_source}:{doc_id}" if _tenant else doc_id
+    _canonical_id = _canonical_doc_id(_find_doc_record(doc_id) or {}, doc_id)
 
     if _docs_col is not None:
         try:
@@ -344,15 +370,7 @@ def _delete_doc_record(doc_id: str):
         except Exception as e:
             print(f"[KnowledgeVault] Error purging mongo vectors: {e}")
 
-    # Clearing the chunk fingerprints is essential. Leaving them behind makes the
-    # delta check treat a later re-upload of the same file as "unchanged", so it
-    # skips embedding entirely and the document indexes with zero chunks.
-    try:
-        hash_db = VersionedHashDB()
-        for key in {_canonical_id, doc_id}:
-            hash_db.clear_document_hashes(key)
-    except Exception as e:
-        print(f"[KnowledgeVault] Error clearing chunk hashes for {doc_id}: {e}")
+    _clear_chunk_hashes(doc_id, _canonical_id)
 
     # Tombstone the lineage rather than erasing the audit trail.
     try:
@@ -911,7 +929,7 @@ async def upload_document(
         doc_id = existing["doc_id"]
         created_at = existing.get("created_at", now_str)
         owner_id = existing.get("user_id") or access.user_id
-        vector_store.delete_by_doc_id(doc_id)
+        _drop_index(existing)
     else:
         doc_id = f"doc_{uuid.uuid4().hex[:12]}"
         created_at = now_str
@@ -994,16 +1012,19 @@ def ingest_url(
 
     # Fetch webpage content safely. A failed fetch is reported to the caller instead
     # of silently indexing a placeholder string as though it were real content.
+    # Only public addresses are fetched, redirects included, so the vault can't be
+    # used to read internal services.
     try:
-        req_obj = urllib.request.Request(
+        raw_bytes = safe_fetch.fetch_public_url(
             url,
+            max_bytes=guards.MAX_URL_FETCH_BYTES,
+            timeout=12,
             headers={"User-Agent": "RoleSync-Knowledge-Crawler/1.0 (+https://rolesync.ai)"},
         )
-        with urllib.request.urlopen(req_obj, timeout=12) as response:
-            raw_bytes = response.read(guards.MAX_URL_FETCH_BYTES + 1)
-        if len(raw_bytes) > guards.MAX_URL_FETCH_BYTES:
-            raw_bytes = raw_bytes[: guards.MAX_URL_FETCH_BYTES]
         raw_html = raw_bytes.decode("utf-8", errors="replace")
+    except safe_fetch.UnsafeUrlError as err:
+        print(f"[KnowledgeVault] Refused to fetch {url}: {err}")
+        raise HTTPException(status_code=400, detail=safe_fetch.NOT_PUBLIC_MESSAGE)
     except Exception as err:
         print(f"[KnowledgeVault] URL fetch failed for {url}: {err}")
         raise HTTPException(status_code=502, detail=guards.URL_FETCH_FAILED_MESSAGE)
@@ -1038,7 +1059,7 @@ def ingest_url(
         doc_id = existing["doc_id"]
         created_at = existing.get("created_at", now_str)
         owner_id = existing.get("user_id") or access.user_id
-        vector_store.delete_by_doc_id(doc_id)
+        _drop_index(existing)
     else:
         doc_id = f"url_{uuid.uuid4().hex[:12]}"
         created_at = now_str
@@ -1371,8 +1392,8 @@ def reindex_document(
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found.")
 
-    # Remove old vectors
-    vector_store.delete_by_doc_id(doc_id)
+    # Remove the old vectors and their fingerprints, so unchanged content is embedded again
+    _drop_index(doc)
 
     # Set status to Parsing
     doc["status"] = "Parsing"

@@ -1,6 +1,7 @@
 import React from 'react';
 import { AlertTriangle, Undo2 } from 'lucide-react';
 import { formatMoney, stageLabel } from '../deals/dealFormat';
+import { getSalesCategoryMeta } from '../knowledgeVault/vaultUtils';
 import { previewKind } from './approvalKinds';
 import type { ApprovalCardModel } from './chatState';
 
@@ -406,6 +407,104 @@ const DealUpdatePreview: React.FC<{ preview: Preview }> = ({ preview }) => {
   );
 };
 
+const categoryLabel = (value: unknown): string => (text(value) ? getSalesCategoryMeta(text(value)).label : '');
+
+const capitalized = (value: unknown): string => text(value).charAt(0).toUpperCase() + text(value).slice(1);
+
+/** An address the agent proposes: shown as text, never as a link (it may come from a page the agent read). */
+const Address: React.FC<{ value: unknown }> = ({ value }) => <span className="font-mono text-xs break-all">{text(value)}</span>;
+
+const KnowledgeAddUrlPreview: React.FC<{ preview: Preview }> = ({ preview }) => {
+  const existing = record(preview.existing);
+  return (
+    <div className="space-y-2 text-sm">
+      <PreviewRow label="Page" value={<span className="font-semibold">{text(preview.title)}</span>} />
+      <PreviewRow label="Address" value={<Address value={preview.url} />} />
+      <PreviewRow label="Category" value={categoryLabel(preview.category) || 'Chosen by the classifier'} />
+      {text(preview.competitor) && <PreviewRow label="Competitor" value={text(preview.competitor)} />}
+      {text(existing.doc_id) ? (
+        <Warning>
+          This address is already in the knowledge base as “{text(existing.name)}”. The page is fetched again and replaces
+          its earlier text, which can’t be undone.
+        </Warning>
+      ) : (
+        <p className="text-xs text-muted-foreground">
+          The page is fetched from {text(preview.site)} and becomes searchable for everyone in the workspace once it’s
+          indexed. Undoing deletes it again.
+        </p>
+      )}
+    </div>
+  );
+};
+
+const knowledgeValue = (field: string, value: unknown): unknown => (field === 'category' && text(value) ? categoryLabel(value) : value);
+
+const KnowledgeUpdatePreview: React.FC<{ preview: Preview }> = ({ preview }) => (
+  <div className="space-y-2 text-sm">
+    <PreviewRow label="Document" value={<span className="font-semibold">{text(preview.name)}</span>} />
+    <DataTable
+      columns={['Field', 'Change']}
+      rows={list(preview.changes).map((raw) => {
+        const change = record(raw);
+        const field = text(change.field);
+        return [field, <BeforeAfter before={knowledgeValue(field, change.before)} after={knowledgeValue(field, change.after)} />];
+      })}
+    />
+    <p className="text-xs text-muted-foreground">Only these fields change. Undoing puts the previous values back.</p>
+  </div>
+);
+
+const KnowledgeReclassifyPreview: React.FC<{ preview: Preview }> = ({ preview }) => {
+  const current = record(preview.current);
+  const tags = list(current.tags).map(text);
+  return (
+    <div className="space-y-2 text-sm">
+      <PreviewRow label="Document" value={<span className="font-semibold">{text(preview.name)}</span>} />
+      <PreviewRow label="Category" value={categoryLabel(current.category) || '—'} />
+      {text(current.competitor) && <PreviewRow label="Competitor" value={text(current.competitor)} />}
+      {text(current.industry) && <PreviewRow label="Industry" value={text(current.industry)} />}
+      {tags.length > 0 && <PreviewRow label="Tags" value={tags.join(', ')} />}
+      {preview.set_by_hand ? (
+        <Warning>Someone set this classification by hand. The classifier’s answer replaces it; undoing puts it back.</Warning>
+      ) : (
+        <p className="text-xs text-muted-foreground">
+          The classifier reads the document again and replaces its category, competitor, industry, summary and tags.
+          Undoing puts the current values back.
+        </p>
+      )}
+    </div>
+  );
+};
+
+const KnowledgeReindexPreview: React.FC<{ preview: Preview }> = ({ preview }) => (
+  <div className="space-y-2 text-sm">
+    <PreviewRow label="Document" value={<span className="font-semibold">{text(preview.name)}</span>} />
+    <PreviewRow label="Status" value={text(preview.status)} />
+    {text(preview.problem) && <PreviewRow label="Problem" value={text(preview.problem)} />}
+    <p className="text-xs text-muted-foreground">
+      Its search index is rebuilt from the stored content. It won’t show up in searches until that finishes, usually
+      within a minute.
+    </p>
+  </div>
+);
+
+const KnowledgeDeletePreview: React.FC<{ preview: Preview }> = ({ preview }) => (
+  <div className="space-y-2 text-sm">
+    <PreviewRow label="Document" value={<span className="font-semibold">{text(preview.name)}</span>} />
+    <PreviewRow label="Source" value={[capitalized(preview.source), text(preview.type)].filter(Boolean).join(' · ')} />
+    {text(preview.category) && <PreviewRow label="Category" value={categoryLabel(preview.category)} />}
+    {text(preview.url) && <PreviewRow label="Address" value={<Address value={preview.url} />} />}
+    <PreviewRow label="Added by" value={preview.added_by_me ? 'You' : 'Someone else in the workspace'} />
+    {preview.restorable ? (
+      <p className="text-xs text-muted-foreground">
+        It’s deleted for everyone in the workspace. Undoing adds the page back from its address, as it is then.
+      </p>
+    ) : (
+      <Warning>It’s deleted for everyone in the workspace, with its search index. This can’t be undone.</Warning>
+    )}
+  </div>
+);
+
 export const UndoPreview: React.FC<{
   preview: Preview;
   selected?: Set<string>;
@@ -492,6 +591,16 @@ export const PreviewBody: React.FC<{ card: ApprovalCardModel }> = ({ card }) => 
       return <ReservationPreview preview={preview} />;
     case 'stock_release':
       return <ReleasePreview preview={preview} />;
+    case 'knowledge_add_url':
+      return <KnowledgeAddUrlPreview preview={preview} />;
+    case 'knowledge_update':
+      return <KnowledgeUpdatePreview preview={preview} />;
+    case 'knowledge_reclassify':
+      return <KnowledgeReclassifyPreview preview={preview} />;
+    case 'knowledge_reindex':
+      return <KnowledgeReindexPreview preview={preview} />;
+    case 'knowledge_delete':
+      return <KnowledgeDeletePreview preview={preview} />;
     case 'undo':
       return <UndoPreview preview={preview} />;
     default:

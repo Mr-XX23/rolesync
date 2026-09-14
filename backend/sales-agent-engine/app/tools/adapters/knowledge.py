@@ -6,6 +6,9 @@ that is unavailable, or finds nothing among the workspace's indexed documents (o
 may have no vectors), it falls back to keyword retrieval here: rank documents by their sales
 metadata, read the best candidates' text, and return the passages that match. data-pipeline
 enforces workspace membership on every call.
+
+``list_knowledge_documents`` shows every document whatever its state, for finding one to change
+(changes are in ``knowledge_writes.py``).
 """
 
 from __future__ import annotations
@@ -13,18 +16,20 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from typing import Any
+from collections import Counter
+from typing import Any, Literal, get_args
+from uuid import UUID
 
 from pydantic import Field
 
 from app.platform.data_pipeline import DataPipelineClient, DataPipelineError
-from app.tools.adapters.common import clip, pipeline_failure, plural
+from app.tools.adapters.common import as_dict, clip, pipeline_failure, plural
 from app.tools.registry import ToolDefinition
 from app.tools.types import ToolCategory, ToolInput, ToolInputError, ToolInvocation, ToolKind, ToolOutput, ToolScope
 
 logger = logging.getLogger(__name__)
 
-CATEGORIES = (
+KnowledgeCategory = Literal[
     "BATTLECARD",
     "PRICING_PACKAGING",
     "CASE_STUDY_ROI",
@@ -32,7 +37,11 @@ CATEGORIES = (
     "PRODUCT_SPEC",
     "CONTRACT_LEGAL",
     "GENERAL_RESOURCE",
-)
+]
+CATEGORIES: tuple[str, ...] = get_args(KnowledgeCategory)
+DocumentStatus = Literal["Indexed", "Parsing", "Error", "Rejected"]
+# Where a document came from (data-pipeline's ``source``); connectors use their own name.
+SOURCE_LABELS = {"USER_UPLOAD": "uploaded file", "URL_INGEST": "web page"}
 _CANDIDATES = 6  # documents whose text is read per keyword search
 _SEMANTIC_HITS_PER_RESULT = 4  # passages asked for per document wanted, before grouping by document
 _CONTEXT_CHARS = 1_200
@@ -68,6 +77,17 @@ class ReadKnowledgeDocumentArgs(ToolInput):
     question: str | None = Field(
         default=None, max_length=300, description="If the document is long, return the parts relevant to this"
     )
+
+
+class ListKnowledgeDocumentsArgs(ToolInput):
+    status: DocumentStatus | None = Field(
+        default=None,
+        description="Only documents in this state: Indexed (searchable), Parsing (being processed), Error or Rejected (not searchable; see problem)",
+    )
+    category: KnowledgeCategory | None = None
+    search: str | None = Field(default=None, min_length=2, max_length=200, description="Words in the name, type, competitor, industry or tags")
+    added_by_me: bool = Field(default=False, description="Only documents the rep added")
+    limit: int = Field(default=20, ge=1, le=50)
 
 
 def knowledge_tools(client: DataPipelineClient) -> list[ToolDefinition]:
@@ -161,6 +181,26 @@ def knowledge_tools(client: DataPipelineClient) -> list[ToolDefinition]:
             summary=f"Read '{name}' ({plural(len(text), 'character')})",
         )
 
+    async def list_knowledge_documents(invocation: ToolInvocation) -> ToolOutput:
+        args = invocation.args
+        assert isinstance(args, ListKnowledgeDocumentsArgs)
+        ctx = invocation.ctx
+        try:
+            documents = await client.list_documents(
+                ctx.user_id, ctx.tenant_id, status=args.status, category=args.category, search=args.search, mine=args.added_by_me
+            )
+        except DataPipelineError as exc:
+            raise pipeline_failure(exc) from exc
+        listed = [vault_entry(doc, ctx.user_id) for doc in documents[: args.limit]]
+        states = Counter(str(doc.get("status") or "Unknown") for doc in documents)
+        needing_attention = states.get("Error", 0) + states.get("Rejected", 0)
+        return ToolOutput(
+            data={"documents": listed, "total": len(documents), "by_status": dict(states)},
+            summary=f"{plural(len(documents), 'knowledge-base document')}"
+            + (f", showing {len(listed)}" if len(listed) < len(documents) else "")
+            + (f" ({needing_attention} not searchable)" if needing_attention else ""),
+        )
+
     return [
         ToolDefinition(
             name="search_knowledge_base",
@@ -185,7 +225,47 @@ def knowledge_tools(client: DataPipelineClient) -> list[ToolDefinition]:
             handler=read_knowledge_document,
             timeout_seconds=45,
         ),
+        ToolDefinition(
+            name="list_knowledge_documents",
+            description=(
+                "List the workspace's knowledge-base documents newest first, in every state (Indexed, Parsing, Error, "
+                "Rejected) with why a document isn't searchable, its classification, and whether the rep added it. "
+                "Use it to find a document to change or delete; to find information use search_knowledge_base."
+            ),
+            kind=ToolKind.READ,
+            scope=ToolScope.READ,
+            category=ToolCategory.KNOWLEDGE,
+            input_model=ListKnowledgeDocumentsArgs,
+            handler=list_knowledge_documents,
+            timeout_seconds=30,
+        ),
     ]
+
+
+def vault_entry(doc: dict[str, Any], user_id: UUID) -> dict[str, Any]:
+    """A vault document as the agent sees it. Who added it shows only as ``added_by_me``, never as a person's id."""
+    source = str(doc.get("source") or "")
+    status = doc.get("status")
+    entry = {
+        "doc_id": doc.get("doc_id"),
+        "name": doc.get("name"),
+        "type": doc.get("type"),
+        "status": status,
+        "category": doc.get("category"),
+        "competitor": doc.get("target_competitor"),
+        "industry": doc.get("target_industry"),
+        "tags": doc.get("sales_tags") or [],
+        "summary": clip(doc.get("sales_summary"), 300),
+        "chunks": doc.get("chunks"),
+        "source": SOURCE_LABELS.get(source, f"synced from {source.replace('_', ' ').title()}" if source else None),
+        "url": as_dict(doc.get("metadata")).get("target_url"),
+        "added_by_me": str(doc.get("user_id")) == str(user_id),
+        "classified_by": "hand" if doc.get("classifier_used") == "manual_user_override" else "classifier",
+        "updated": doc.get("last_updated") or doc.get("created_at"),
+    }
+    if status in ("Error", "Rejected"):
+        entry["problem"] = clip(doc.get("error_message"), 300) or None
+    return {key: value for key, value in entry.items() if value not in (None, "")}
 
 
 async def _text(client: DataPipelineClient, user_id: Any, tenant_id: Any, doc_id: str) -> str:

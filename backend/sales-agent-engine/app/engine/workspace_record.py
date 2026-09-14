@@ -100,6 +100,11 @@ def describe_action(tool: str, args: Any) -> tuple[str, str]:
         "correct_stock_count": (f"Correct stock count of {text('sku')} to {fields.get('counted_quantity')}", "INVENTORY_CHANGE"),
         "reserve_stock": (f"Reserve {fields.get('quantity')} × {text('sku')}", "INVENTORY_CHANGE"),
         "release_stock": ("Release a stock reservation", "INVENTORY_CHANGE"),
+        "add_web_page_to_knowledge_base": (f"Add web page to the knowledge base: {text('title') or text('url')}", "KNOWLEDGE_CHANGE"),
+        "update_knowledge_document": ("Update a knowledge-base document", "KNOWLEDGE_CHANGE"),
+        "reclassify_knowledge_document": ("Classify a knowledge-base document again", "KNOWLEDGE_CHANGE"),
+        "reindex_knowledge_document": ("Index a knowledge-base document again", "KNOWLEDGE_CHANGE"),
+        "delete_knowledge_document": ("Delete a knowledge-base document", "KNOWLEDGE_CHANGE"),
         "undo_actions": (f"Undo {len(fields.get('action_ids') or [])} completed action(s)", "UNDO"),
     }
     if tool in described:

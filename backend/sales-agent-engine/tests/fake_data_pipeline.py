@@ -1,13 +1,15 @@
-"""An in-memory data-pipeline (catalog, inventory, knowledge vault uploads) behind an httpx
+"""An in-memory data-pipeline (catalog, inventory, knowledge vault) behind an httpx
 MockTransport, answering like the real routes the engine's write tools use."""
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import httpx
@@ -17,6 +19,10 @@ from app.platform.data_pipeline import DataPipelineClient
 MAIN_WAREHOUSE = "11111111-1111-4111-8111-111111111111"
 STORE = "22222222-2222-4222-8222-222222222222"
 _BASE = "http://data-pipeline.test"
+_VAULT = "/api/v1/knowledge-vault"
+VAULT_CATEGORIES = frozenset(
+    {"BATTLECARD", "PRICING_PACKAGING", "CASE_STUDY_ROI", "SECURITY_COMPLIANCE", "PRODUCT_SPEC", "CONTRACT_LEGAL", "GENERAL_RESOURCE"}
+)
 
 
 def _json(status: int, body: Any) -> httpx.Response:
@@ -42,6 +48,25 @@ class FakeDataPipeline:
     forbid_writes: bool = False
     corrections_allowed: bool = True  # data-pipeline lets only workspace OWNER/ADMIN correct a count
     movements: list[dict[str, Any]] = field(default_factory=list)  # the stock ledger, oldest first
+    unreachable_pages: set[str] = field(default_factory=set)  # addresses ingest-url can't fetch (502)
+    # What the classifier decides when a document is classified again.
+    classifier_answer: dict[str, Any] = field(
+        default_factory=lambda: {
+            "category": "PRICING_PACKAGING", "target_competitor": "Globex", "target_industry": "SaaS",
+            "sales_summary": "Globex price points", "sales_tags": ["pricing", "globex"],
+        }
+    )
+
+    def add_document(self, *, name: str, user_id: Any, **fields: Any) -> dict[str, Any]:
+        """A vault document as data-pipeline lists it (indexed, uploaded, unclassified by hand)."""
+        document = {
+            "doc_id": f"doc_{uuid4().hex[:12]}", "name": name, "type": "PDF", "status": "Indexed", "chunks": 4,
+            "category": "GENERAL_RESOURCE", "target_competitor": None, "target_industry": None, "sales_summary": "",
+            "sales_tags": [], "classifier_used": "openrouter", "user_id": str(user_id), "source": "USER_UPLOAD",
+            "created_at": "2026-09-01T10:00:00+00:00", "last_updated": "2026-09-01T10:05:00+00:00", "metadata": {},
+        } | fields
+        self.documents[document["doc_id"]] = document
+        return document
 
     # ------------------------------------------------------------------ setup
     def add_product(
@@ -257,16 +282,83 @@ class FakeDataPipeline:
             reservation["released"] = True
             released = sum(take for _, _, take in reservation["allocations"])
             return _json(200, {"reservation_id": match.group(1), "released_qty": released, "movements_count": 1})
-        if path == "/api/v1/knowledge-vault/upload" and method == "POST":
+        if path.startswith(_VAULT):
+            return self._vault(method, path.removeprefix(_VAULT), body, request)
+        return _detail(404, f"no route {method} {path}")
+
+    def _vault(self, method: str, path: str, body: Any, request: httpx.Request) -> httpx.Response:
+        """The knowledge vault routes (data-pipeline knowledge_vault_routes.py)."""
+        user_id = request.headers["X-User-Id"]
+        if path == "/upload" and method == "POST":
             name = re.search(rb'filename="([^"]+)"', request.content)
-            doc_id = f"doc_{uuid4().hex[:12]}"
-            document = {"doc_id": doc_id, "name": name.group(1).decode() if name else "file", "size_bytes": len(request.content)}
-            self.documents[doc_id] = document
+            document = self.add_document(name=name.group(1).decode() if name else "file", user_id=user_id, status="Parsing", chunks=0)
+            document["size_bytes"] = len(request.content)
             return _json(200, {"status": "success", "document": document})
-        if (match := re.fullmatch(r"/api/v1/knowledge-vault/documents/([^/]+)", path)) and method == "DELETE":
-            if self.documents.pop(match.group(1), None) is None:
-                return _detail(404, "Document not found.")
-            return _json(200, {"status": "success"})
+        if path == "/documents" and method == "GET":
+            params = request.url.params
+            listed = [
+                doc
+                for doc in reversed(self.documents.values())
+                if (params.get("status", "all").lower() in ("all", str(doc.get("status")).lower()))
+                and (params.get("category", "all").lower() in ("all", str(doc.get("category")).lower()))
+                and (not params.get("search") or params["search"].lower() in str(doc.get("name")).lower())
+                and (params.get("mine") != "true" or doc.get("user_id") == user_id)
+            ]
+            return _json(200, {"status": "success", "count": len(listed), "documents": listed})
+        if path == "/ingest-url" and method == "POST":
+            url = body["url"].strip()
+            host = urlsplit(url).hostname or ""
+            try:
+                internal = not ipaddress.ip_address(host).is_global
+            except ValueError:
+                internal = "." not in host
+            if internal:
+                return _detail(400, "Only pages on the public internet can be added to the knowledge vault.")
+            if url in self.unreachable_pages:
+                return _detail(502, "We could not fetch that page. Check the address and try again.")
+            existing = next((doc for doc in self.documents.values() if doc.get("metadata", {}).get("target_url") == url), None)
+            if existing is not None:
+                # Like data-pipeline: the page is named after its address unless a title is given, and the
+                # classifier decides again unless the request overrides it.
+                existing.update(
+                    name=(body.get("title") or url).strip(), status="Parsing", chunks=0,
+                    category=body.get("category") or "GENERAL_RESOURCE", target_competitor=body.get("target_competitor"),
+                )
+                return _json(200, {"status": "success", "document": existing})
+            document = self.add_document(
+                name=(body.get("title") or url).strip(), user_id=user_id, doc_id=f"url_{uuid4().hex[:12]}", type="URL",
+                status="Parsing", chunks=0, source="URL_INGEST", metadata={"target_url": url},
+                category=body.get("category") or "GENERAL_RESOURCE", target_competitor=body.get("target_competitor"),
+            )
+            return _json(200, {"status": "success", "document": document})
+        match = re.fullmatch(r"/documents/([^/]+)(/[a-z-]+)?", path)
+        if match is None:
+            return _detail(404, f"no route {method} {path}")
+        document = self.documents.get(match.group(1))
+        if document is None:
+            return _detail(404, "Document not found.")
+        action = match.group(2)
+        if action is None and method == "DELETE":
+            del self.documents[document["doc_id"]]
+            return _json(200, {"status": "success", "doc_id": document["doc_id"]})
+        if action == "/sales-classification" and method == "PATCH":
+            if body.get("category") and body["category"].upper() in VAULT_CATEGORIES:
+                document["category"] = body["category"].upper()
+            for key in ("target_competitor", "target_industry"):
+                if body.get(key) is not None:
+                    document[key] = body[key].strip() or None
+            if body.get("sales_summary") is not None:
+                document["sales_summary"] = body["sales_summary"].strip()
+            if body.get("sales_tags") is not None:
+                document["sales_tags"] = [tag.strip() for tag in body["sales_tags"] if tag.strip()][:8]
+            document["classifier_used"] = "manual_user_override"
+            return _json(200, {"status": "success", "document": document})
+        if action == "/reclassify" and method == "POST":
+            document.update(self.classifier_answer, classifier_used="openrouter")
+            return _json(200, {"status": "success", "document": document})
+        if action == "/reindex" and method == "POST":
+            document.update(status="Parsing", chunks=0)
+            return _json(200, {"status": "success", "document": document})
         return _detail(404, f"no route {method} {path}")
 
 
